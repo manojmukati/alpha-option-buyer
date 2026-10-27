@@ -1,0 +1,17 @@
+*.db
+*.sqlite
+*.sqlite3
+cache/
+bhavcopy_cache/
+3min_cache/
+alpha_profile_oi_system/bhavcopy_cache/
+alpha_profile_oi_system/3min_cache/
+*.parquet
+*.pdf
+__pycache__/
+*.pyc
+.gemini/
+register_tasks.ps1
+TechnoFunda_Momentum_Suite/
+institutional_cash_screener/
+

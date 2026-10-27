@@ -1,0 +1,103 @@
+name: Alpha Option Buyer - Cloud Cron Automation
+
+on:
+  schedule:
+    # =========================================================================
+    # SLAB 1 (MORNING): 09:30 AM to 10:15 AM IST (04:00 to 04:45 UTC, Mon-Fri)
+    # Exactly 10 Runs (Every 5 Mins): 09:30, 09:35, 09:40, 09:45, 09:50, 09:55, 10:00, 10:05, 10:10, 10:15 AM IST
+    # =========================================================================
+    - cron: '0,5,10,15,20,25,30,35,40,45 4 * * 1-5'
+
+    # =========================================================================
+    # SLAB 2 (AFTERNOON): 01:15 PM to 02:15 PM IST (07:45 to 08:45 UTC, Mon-Fri)
+    # Exactly 13 Runs (Every 5 Mins): 01:15, 01:20, 01:25, 01:30, 01:35, 01:40, 01:45, 01:50, 01:55, 02:00, 02:05, 02:10, 02:15 PM IST
+    # =========================================================================
+    - cron: '45,50,55 7 * * 1-5'
+    - cron: '0,5,10,15,20,25,30,35,40,45 8 * * 1-5'
+
+    # =========================================================================
+    # EOD JOURNAL DISPATCH: 03:35 PM IST (10:05 UTC, Mon-Fri)
+    # Automatically dispatches the closing Excel Journal strictly to Owner Chatbot!
+    # =========================================================================
+    - cron: '5 10 * * 1-5'
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Select execution mode (screener / force_screener / send_journal)'
+        required: true
+        default: 'screener'
+        type: choice
+        options:
+          - screener
+          - force_screener
+          - send_journal
+
+  repository_dispatch:
+    types: [cron_trigger, live_scan]
+
+permissions:
+  contents: write
+
+jobs:
+  run-alpha-trading:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests openpyxl pandas rich reportlab numpy nselib yfinance
+
+      - name: Execute Autonomous Screener
+        if: "${{ (github.event_name == 'schedule' && github.event.schedule != '5 10 * * 1-5') || github.event.inputs.action == 'screener' || github.event.inputs.action == 'force_screener' || github.event_name == 'repository_dispatch' }}"
+        env:
+          PYTHONUNBUFFERED: '1'
+          TZ: 'Asia/Kolkata'
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
+        run: |
+          if [ "${{ github.event.inputs.action }}" = "force_screener" ]; then
+            python alpha_profile_oi_system/daily_autonomous_screener.py --ignore-window
+          else
+            python alpha_profile_oi_system/daily_autonomous_screener.py
+          fi
+
+      - name: EOD Excel Journal Dispatch (Strictly to Owner Chatbot)
+        if: "${{ (github.event_name == 'schedule' && github.event.schedule == '5 10 * * 1-5') || github.event.inputs.action == 'send_journal' }}"
+        env:
+          PYTHONUNBUFFERED: '1'
+          TZ: 'Asia/Kolkata'
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_GROUP_ID: ${{ secrets.TELEGRAM_GROUP_ID }}
+        run: |
+          python alpha_profile_oi_system/daily_autonomous_screener.py --send-journal
+
+      - name: Commit and Push Updated Excel Journals & Cache
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add alpha_profile_oi_system/*.xlsx alpha_profile_oi_system/*.csv alpha_profile_oi_system/config/dispatched_signals_today.json || true
+          if git diff --staged --quiet; then
+            echo "No changes in Excel journals or cache. Clean exit."
+          else
+            git commit -m "Auto-update Trading Journals & Dispatched Signals [skip ci]"
+            git push
+          fi
+
+      - name: Execution Summary
+        run: |
+          echo "Screener pass finished. Only pure signals dispatched if qualified; Excel journals maintained; zero noise sent if no signal."
