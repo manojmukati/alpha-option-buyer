@@ -88,6 +88,10 @@ class TelegramNotifier:
                         timeout=30
                     )
                     res = resp.json()
+                    if res.get("ok"):
+                        print(f"[TELEGRAM DOCUMENT SUCCESS for {cid}]")
+                    else:
+                        print(f"[TELEGRAM DOCUMENT WARNING for {cid}]: {res.get('description', res)}")
             except Exception as e:
                 print(f"[TELEGRAM ERROR send_document for {cid}]: {e}")
         return res
@@ -110,7 +114,12 @@ class TelegramNotifier:
                     files={"document": doc_f},
                     timeout=30
                 )
-                return resp.json()
+                res = resp.json()
+                if res.get("ok"):
+                    print(f"[TELEGRAM DOCUMENT SUCCESS for owner {self.owner_chat_id}]")
+                else:
+                    print(f"[TELEGRAM DOCUMENT WARNING for owner {self.owner_chat_id}]: {res.get('description', res)}")
+                return res
         except Exception as e:
             print(f"[TELEGRAM ERROR send_document for owner {self.owner_chat_id}]: {e}")
             return {"ok": False, "error": str(e)}
@@ -135,6 +144,10 @@ class TelegramNotifier:
             try:
                 resp = requests.post(url, json={"chat_id": cid, "text": text, "parse_mode": parse_mode}, timeout=10)
                 res = resp.json()
+                if res.get("ok"):
+                    print(f"[TELEGRAM DISPATCH SUCCESS for {cid}]")
+                else:
+                    print(f"[TELEGRAM DISPATCH WARNING for {cid}]: {res.get('description', res)}")
             except Exception as e:
                 print(f"[TELEGRAM ERROR for {cid}]: {e}")
         return res
