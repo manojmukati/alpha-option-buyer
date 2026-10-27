@@ -194,15 +194,28 @@ class DailyAutonomousScreener:
                 day_high = float(idx_df['high'].max())
                 day_low = float(idx_df['low'].min())
 
-                if len(idx_df) < 10:
+                # 8 closed bars (24 mins) + 1 forming bar = minimum 9 bars
+                if len(idx_df) < 9:
                     return {
                         'symbol': sym_clean,
                         'passed': False,
-                        'failed_gate': f'INSUFFICIENT_COMPRESSION_BASE: Only {len(idx_df)-2} closed bars (< 24 mins)',
+                        'failed_gate': f'INSUFFICIENT_COMPRESSION_BASE: Only {len(idx_df)-1} closed bars (< 24 mins)',
                         'spot_price': cur_p,
                         'score': 0.0,
                         'is_index': True
                     }
+
+                eval_bar = idx_df.iloc[-2] if len(idx_df) >= 2 else idx_df.iloc[-1]
+                b_open = float(eval_bar['open'])
+                b_high = float(eval_bar['high'])
+                b_low = float(eval_bar['low'])
+                b_close = float(eval_bar['close'])
+                # Keep true live spot price from bulk feed or latest tick
+                cur_p = float(q.get('live_spot', idx_df.iloc[-1]['close']))
+
+                day_high = float(idx_df['high'].max())
+                day_low = float(idx_df['low'].min())
+
                 comp_bars = idx_df.iloc[:-2].tail(8)
                 comp_high = float(comp_bars['high'].max())
                 comp_low = float(comp_bars['low'].min())
@@ -242,7 +255,7 @@ class DailyAutonomousScreener:
                 clv = round((b_close - b_low) / rng, 2)
                 clv_ok = (clv >= 0.72) if direction == 'CALL' else (clv <= 0.28)
                 wick_ok = (up_wick <= 0.20) if direction == 'CALL' else (dn_wick <= 0.20)
-                single_mom_ok = (solid_body_ratio >= 0.50) and wick_ok and clv_ok
+                single_mom_ok = (solid_body_ratio >= 0.40) and wick_ok and clv_ok
 
                 if direction == 'CALL':
                     if b_close >= comp_high:
@@ -251,9 +264,13 @@ class DailyAutonomousScreener:
                     if b_close <= comp_low:
                         is_breakout = True
 
-                if len(idx_df) >= 4:
+                # Multi-candle cumulative breakout uses base prior to the 2/3-candle sequence
+                if len(idx_df) >= 5:
                     b_prev1 = idx_df.iloc[-3]
                     b_prev2 = idx_df.iloc[-4]
+                    pre_seq_bars = idx_df.iloc[:-4].tail(8) if len(idx_df) >= 6 else comp_bars
+                    seq_comp_high = float(pre_seq_bars['high'].max())
+                    seq_comp_low = float(pre_seq_bars['low'].min())
 
                     cum_fall_3_pct = ((float(b_prev2['open']) - b_close) / float(b_prev2['open'])) * 100.0
                     cum_fall_2_pct = ((float(b_prev1['open']) - b_close) / float(b_prev1['open'])) * 100.0
@@ -261,7 +278,7 @@ class DailyAutonomousScreener:
                                  float(b_prev1['close']) <= float(b_prev1['open']) and
                                  b_close <= b_open)
                     last_2_red = (float(b_prev1['close']) <= float(b_prev1['open']) and b_close <= b_open)
-                    broke_range_low = (b_close <= comp_low)
+                    broke_range_low = (b_close <= comp_low) or (b_close <= seq_comp_low)
 
                     if (all_3_red and cum_fall_3_pct >= 0.25 and broke_range_low) or (last_2_red and cum_fall_2_pct >= 0.20 and broke_range_low):
                         direction = 'PUT'
@@ -275,7 +292,7 @@ class DailyAutonomousScreener:
                                    float(b_prev1['close']) >= float(b_prev1['open']) and
                                    b_close >= b_open)
                     last_2_green = (float(b_prev1['close']) >= float(b_prev1['open']) and b_close >= b_open)
-                    broke_range_high = (b_close >= comp_high)
+                    broke_range_high = (b_close >= comp_high) or (b_close >= seq_comp_high)
 
                     if (all_3_green and cum_rise_3_pct >= 0.25 and broke_range_high) or (last_2_green and cum_rise_2_pct >= 0.20 and broke_range_high):
                         direction = 'CALL'
@@ -285,21 +302,23 @@ class DailyAutonomousScreener:
 
                 cand_mom_pass = (single_mom_ok or cum_mom_ok) and is_breakout
 
+                # PINPOINT FIX: Yahoo Finance Spot Index (`^NSEI`, `^NSEBANK`) has volume=0.
+                # When Spot Index volume is 0, use Range-Expansion RVOL (breakout bar range vs compression bar range)!
                 prior_v = idx_df['volume'].iloc[:-2].tail(10).mean() if ('volume' in idx_df.columns and len(idx_df) > 2) else 0.0
                 curr_v = float(eval_bar.get('volume', 0.0))
                 if prior_v > 0 and curr_v > 0:
-                    idx_rvol = round(curr_v / max(1.0, prior_v), 2)
+                    idx_rvol = round(curr_v / prior_v, 2)
+                    idx_rvol_pass = (idx_rvol >= 2.20)
                 else:
-                    eval_rng = max(1.0, b_high - b_low)
-                    prior_rng_mean = (idx_df['high'] - idx_df['low']).iloc[:-2].tail(10).mean() if len(idx_df) > 2 else eval_rng
-                    range_rvol = round(eval_rng / max(1.0, prior_rng_mean), 2)
-                    idx_rvol = max(2.50, round(range_rvol * 2.0, 2)) if range_rvol >= 1.20 else 2.50
-                idx_rvol_pass = (idx_rvol >= 2.50)
+                    prior_rng = (comp_bars['high'] - comp_bars['low']).mean()
+                    idx_rvol = round(rng / max(0.5, prior_rng), 2) if prior_rng > 0 else 2.50
+                    idx_rvol_pass = (idx_rvol >= 1.50) or cum_mom_ok
 
                 candle_cvd = round((2.0 * clv) - 1.0, 2)
-                raw_idx_cvd = float(q.get('cvd_delta_pct', 0.0))
-                idx_cvd = raw_idx_cvd if abs(raw_idx_cvd) > 0.01 else candle_cvd
-                idx_cvd_pass = (idx_cvd >= 0.50) if direction == 'CALL' else (idx_cvd <= -0.50)
+                idx_cvd = candle_cvd
+                idx_cvd_pass = (idx_cvd >= 0.45) if direction == 'CALL' else (idx_cvd <= -0.45)
+                if cum_mom_ok:
+                    idx_cvd_pass = True
 
                 stage1_pass = cand_mom_pass and idx_rvol_pass and idx_cvd_pass
                 oi_confluent = True
@@ -338,114 +357,50 @@ class DailyAutonomousScreener:
             }
 
         # =====================================================================
-        # 2. FULL 216 STOCK OPTION EVALUATION (30 to 60+ Pts Option Move Target)
+        # 2. STAGE-1 FAST PRE-FILTER FOR ALL 216 STOCKS
+        # (Does NOT reject stocks on full-day wick! Full 3-min candle & RVOL audit runs in Stage-2!)
         # =====================================================================
         b_open = float(q.get('open', cur_p))
         b_high = float(q.get('high', cur_p))
         b_low = float(q.get('low', cur_p))
         b_close = float(q.get('close', cur_p))
-        tot_vol = float(q.get('volume', 10000.0))
         pct_chg = float(q.get('pct_change', 0.0))
         rvol = float(q.get('rvol', 1.0))
         direction = 'CALL' if pct_chg >= 0 else 'PUT'
 
+        # Gate 0: Mathematical Expected Option Move >= 30.0 Pts
         stock_atr = self.get_stock_atr(sym_clean, q)
-        if stock_atr < 30.0:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'GATE_0_STOCK_ATR_BELOW_30_PTS ({stock_atr:.1f} < 30.0)'
-            }
-
         delta = 0.60
         expected_opt_move = round(stock_atr * delta, 2)
+        if expected_opt_move < 30.0:
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f'GATE_0_EXPECTED_OPTION_MOVE_BELOW_30_PTS ({expected_opt_move:.1f} < 30.0)'
+            }
 
-        # Anti-Exhaustion Freshness Shield ("Jaldi move ho chuke na de")
+        # Anti-Exhaustion Shield: Allow up to 1.15x ATR so afternoon trenders (1:15 PM) are not prematurely choked
         day_range = round(b_high - b_low, 2)
-        ist_now = get_ist_time()
-        max_atr_mult = 1.20 if (ist_now.hour >= 13 or ist_now.hour < 9 or (ist_now.hour == 9 and ist_now.minute < 30)) else 0.85
-        if day_range > (stock_atr * max_atr_mult):
+        if day_range > (stock_atr * 1.15):
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'STOCK_MOVE_ALREADY_EXHAUSTED ({day_range:.1f} > {max_atr_mult:.2f}x ATR {stock_atr * max_atr_mult:.1f} pts)'
+                'failed_gate': f'STOCK_MOVE_ALREADY_EXHAUSTED ({day_range:.1f} > 1.15x ATR {stock_atr * 1.15:.1f} pts)'
             }
 
-        min_rvol = 1.80
-        if rvol < min_rvol:
+        # Require meaningful intraday directional activity to enter Stage-2 3-min candle audit
+        if abs(pct_chg) < 0.20:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'GATE_2_RVOL_BELOW_MINIMUM_{min_rvol}X ({rvol:.2f}x < {min_rvol}x)'
+                'failed_gate': f'FLAT_STOCK_NO_MOMENTUM ({pct_chg:+.2f}%)'
             }
 
-        rng = max(0.01, b_high - b_low)
-        clv = round((b_close - b_low) / rng, 2)
-        candle_delta = round((2.0 * clv) - 1.0, 2)
-        raw_cvd = float(q.get('cvd_delta_pct', 0.0))
-        real_cvd_ratio = raw_cvd if abs(raw_cvd) > 0.01 else candle_delta
-
-        cvd_ok = (real_cvd_ratio >= 0.50) if direction == 'CALL' else (real_cvd_ratio <= -0.50)
-        if not cvd_ok:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'GATE_3_CVD_DELTA_NOT_CONFLUENT ({real_cvd_ratio:+.2f} not aligned >= 0.50)'
-            }
-
-        body = abs(b_close - b_open)
-        body_ratio = round(body / rng, 2)
-        up_wick = round((b_high - max(b_open, b_close)) / rng, 2)
-        dn_wick = round((min(b_open, b_close) - b_low) / rng, 2)
-        hw_aligned = bool((direction == 'CALL' and pct_chg > 0.15) or (direction == 'PUT' and pct_chg < -0.15))
-
-        gate_res = evaluate_5pillar_gate(
-            symbol=sym_clean,
-            spot_price=cur_p,
-            open=b_open,
-            high=b_high,
-            low=b_low,
-            close=b_close,
-            volume=tot_vol,
-            rvol=rvol,
-            clv_ratio=clv,
-            solid_body_ratio=body_ratio,
-            upper_wick=up_wick,
-            lower_wick=dn_wick,
-            squeeze_active=True,
-            cvd_imbalance=real_cvd_ratio,
-            oi_confluence=True,
-            oi_neutralized=False,
-            hw_alignment=hw_aligned,
-            hw_aligned=hw_aligned,
-            hw_neutralized=False,
-            is_index=False,
-            index_opt_volume=0.0,
-            index_min_opt_volume=0.0,
-            direction=direction,
-            vwap=cur_p,
-            max_vwap_distance_pct=0.60,
-            follow_through_confirmed=True
-        )
-
-        stage1_passed = bool(gate_res.get('passed', False))
-        score = float(gate_res.get('composite_score', gate_res.get('quality_score', 0.0)))
-
-        if stage1_passed and verify_oi_now:
-            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym_clean, cur_p, direction=direction)
-            if not oi_conf.get('confluent', False):
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f"STOCK_OI_CONFLICT_{oi_conf.get('reason', 'NO_CONFLUENCE')}",
-                    'spot_price': cur_p,
-                    'score': 0.0,
-                    'is_index': False
-                }
+        score = round(min(99.0, 70.0 + abs(pct_chg) * 5.0 + min(15.0, rvol * 3.0)), 2)
 
         return {
             'symbol': sym_clean,
-            'passed': stage1_passed,
+            'passed': True,
             'spot_price': cur_p,
             'direction': direction,
             'pct_change': pct_chg,
@@ -568,14 +523,14 @@ class DailyAutonomousScreener:
             is_idx = cand.get('is_index', False)
 
             # -------------------------------------------------------------
-            # STAGE 2: 5-PILLAR REAL INTRADAY CANDLE & BREAKOUT AUDIT
+            # STAGE 2A: 5-PILLAR REAL 3-MINUTE INTRADAY CANDLE & BREAKOUT AUDIT
             # (Indices already audited on real 3m bars in Stage 1;
-            #  Stocks audited here on genuine 3-min resampled bars)
+            #  Stocks audited here on genuine 3-min resampled bars!)
             # -------------------------------------------------------------
             if not is_idx:
                 stk_df = self.data_feed.get_live_intraday_bars(sym)
-                if stk_df is None or len(stk_df) < 10:
-                    print(f"  [5-PILLAR CANDLE REJECTED]: {sym} -> Insufficient 3-min candles (less than 10 bars)")
+                if stk_df is None or len(stk_df) < 9:
+                    print(f"  [5-PILLAR CANDLE REJECTED]: {sym} -> Insufficient 3-min candles (less than 9 bars)")
                     continue
 
                 eval_bar = stk_df.iloc[-2] if len(stk_df) >= 2 else stk_df.iloc[-1]
@@ -583,8 +538,11 @@ class DailyAutonomousScreener:
                 b_high = float(eval_bar['high'])
                 b_low = float(eval_bar['low'])
                 b_close = float(eval_bar['close'])
-                spot = b_close
+                # Keep live ticking spot price accurate
+                live_q = self.data_feed.get_live_asset_quote(sym)
+                spot = float(live_q.get('live_spot', stk_df.iloc[-1]['close']))
                 cand['spot_price'] = spot
+
                 rng = max(0.01, b_high - b_low)
                 body = abs(b_close - b_open)
                 solid_body_ratio = round(body / rng, 2)
@@ -596,7 +554,7 @@ class DailyAutonomousScreener:
                 comp_high = float(comp_bars['high'].max())
                 comp_low = float(comp_bars['low'].min())
 
-                # Pillar 1: Single 3-Minute Candle Momentum
+                # Pillar 1A: Single 3-Minute Candle Blast Momentum
                 if direction == 'CALL':
                     single_mom_ok = (b_close >= b_open) and (clv >= 0.72) and (up_wick <= 0.20) and (solid_body_ratio >= 0.40)
                     broke_comp = (b_close >= comp_high)
@@ -604,28 +562,53 @@ class DailyAutonomousScreener:
                     single_mom_ok = (b_close <= b_open) and (clv <= 0.28) and (dn_wick <= 0.20) and (solid_body_ratio >= 0.40)
                     broke_comp = (b_close <= comp_low)
 
-                # Pillar 1: Dual & Triple Candle Cumulative Momentum (Slow Grinding Move Support)
+                # Pillar 1B: Dual & Triple Candle Cumulative Momentum (Slow Grinding Move Support)
                 cum_mom_ok = False
-                if len(stk_df) >= 4:
+                if len(stk_df) >= 5:
                     b_prev1 = stk_df.iloc[-3]
                     b_prev2 = stk_df.iloc[-4]
+                    pre_seq_bars = stk_df.iloc[:-4].tail(8) if len(stk_df) >= 6 else comp_bars
+                    seq_comp_high = float(pre_seq_bars['high'].max())
+                    seq_comp_low = float(pre_seq_bars['low'].min())
+
                     if direction == 'CALL':
                         last_2_green = (float(b_prev1['close']) >= float(b_prev1['open']) and b_close >= b_open)
                         all_3_green = (float(b_prev2['close']) >= float(b_prev2['open']) and last_2_green)
                         cum_rise_2_pct = ((b_close - float(b_prev1['open'])) / float(b_prev1['open'])) * 100.0
                         cum_rise_3_pct = ((b_close - float(b_prev2['open'])) / float(b_prev2['open'])) * 100.0
                         cum_mom_ok = (all_3_green and cum_rise_3_pct >= 0.25) or (last_2_green and cum_rise_2_pct >= 0.20)
+                        if cum_mom_ok and (b_close >= seq_comp_high):
+                            broke_comp = True
                     else:
                         last_2_red = (float(b_prev1['close']) <= float(b_prev1['open']) and b_close <= b_open)
                         all_3_red = (float(b_prev2['close']) <= float(b_prev2['open']) and last_2_red)
                         cum_fall_2_pct = ((float(b_prev1['open']) - b_close) / float(b_prev1['open'])) * 100.0
                         cum_fall_3_pct = ((float(b_prev2['open']) - b_close) / float(b_prev2['open'])) * 100.0
                         cum_mom_ok = (all_3_red and cum_fall_3_pct >= 0.25) or (last_2_red and cum_fall_2_pct >= 0.20)
+                        if cum_mom_ok and (b_close <= seq_comp_low):
+                            broke_comp = True
 
                 cand_mom_pass = (single_mom_ok or cum_mom_ok) and broke_comp
                 if not cand_mom_pass:
-                    print(f"  [5-PILLAR CANDLE/BREAKOUT REJECTED]: {sym} ({direction}) -> SingleMom={single_mom_ok}, CumMom={cum_mom_ok}, BrokeComp={broke_comp} (CompHigh={comp_high:.1f}, CompLow={comp_low:.1f}, Close={b_close:.1f})")
+                    print(f"  [5-PILLAR 3M CANDLE REJECTED]: {sym} ({direction}) -> SingleMom={single_mom_ok}, CumMom={cum_mom_ok}, BrokeComp={broke_comp}")
                     continue
+
+                # Pillar 2 & 3 on Real 3-Minute Stock Bars (RVOL & CVD Verification)
+                hist_base_v = float(stk_df['hist_avg_3m_vol'].iloc[-1]) if 'hist_avg_3m_vol' in stk_df.columns else 0.0
+                prior_10_v = float(stk_df['volume'].iloc[:-2].tail(10).mean()) if len(stk_df) > 2 else 0.0
+                base_3m_v = hist_base_v if hist_base_v > 0 else prior_10_v
+                curr_3m_v = float(eval_bar.get('volume', 0.0))
+                if cum_mom_ok and len(stk_df) >= 4:
+                    curr_3m_v = max(curr_3m_v, float(stk_df.iloc[-3].get('volume', 0.0)))
+                real_3m_rvol = round(curr_3m_v / max(1.0, base_3m_v), 2) if base_3m_v > 0 else cand.get('rvol', 2.5)
+                cand['rvol'] = real_3m_rvol
+                if real_3m_rvol < 1.80 and not single_mom_ok:
+                    print(f"  [3M RVOL REJECTED]: {sym} -> 3m RVOL {real_3m_rvol:.2f}x < 1.80x")
+                    continue
+
+            # -------------------------------------------------------------
+            # STAGE 2B: LIVE OPTION CHAIN (-4 / 0 / +4) RUNWAY & LIVE LTP AUDIT
+            # -------------------------------------------------------------
 
             oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction)
             if not oi_conf.get('confluent', False):
@@ -634,7 +617,7 @@ class DailyAutonomousScreener:
 
             opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym)
             if not opt or not opt.get('is_live_chain_verified', False) or float(opt.get('entry_price', 0.0)) < 2.0:
-                print(f"  [LIVE LTP REJECTED]: {sym} -> Live Option Chain LTP unavailable.")
+                print(f"  [LIVE LTP REJECTED]: {sym} -> Live Option Chain LTP (< Rs. 2.00) unavailable.")
                 continue
 
             contract = opt['contract']

@@ -31,6 +31,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 NSE_BASE_URL = "https://www.nseindia.com"
 NSE_OC_PAGE_URL = "https://www.nseindia.com/option-chain"
 NSE_ALL_INDICES_URL = "https://www.nseindia.com/api/allIndices"
+NSE_FO_BULK_URL = "https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O"
 NSE_STOCKS_TRADED_URL = "https://www.nseindia.com/api/live-analysis-stocksTraded"
 NSE_OC_INFO_URL = "https://www.nseindia.com/api/option-chain-contract-info?symbol={symbol}"
 NSE_OC_V3_URL = "https://www.nseindia.com/api/option-chain-v3?type={type}&symbol={symbol}&expiry={expiry}"
@@ -183,10 +184,18 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
                     'status': 'LIVE_NSE_BULK'
                 }
 
-    # 2. Fetch All F&O Equities in ONE Consolidated Stocks-Traded Call
-    data_stocks = _safe_nse_fetch(NSE_STOCKS_TRADED_URL, origin_url="https://www.nseindia.com/market-data/stocks-traded")
-    if data_stocks and 'total' in data_stocks:
-        stocks_list = data_stocks.get('total', {}).get('data', [])
+    # 2. Fetch All F&O Equities in ONE Consolidated Call (True Day High, Day Low, Open)
+    data_fo = _safe_nse_fetch(NSE_FO_BULK_URL, origin_url="https://www.nseindia.com/market-data/live-equity-market")
+    stocks_list = data_fo.get('data', []) if (data_fo and 'data' in data_fo) else []
+
+    if not stocks_list:
+        data_stocks = _safe_nse_fetch(NSE_STOCKS_TRADED_URL, origin_url="https://www.nseindia.com/market-data/stocks-traded")
+        if data_stocks and 'total' in data_stocks:
+            stocks_list = data_stocks.get('total', {}).get('data', [])
+
+    if stocks_list:
+        ist_now = get_ist_time()
+        elapsed_mins = max(15.0, min(375.0, (ist_now.hour * 60 + ist_now.minute) - 555.0))
         for item in stocks_list:
             sym = str(item.get('symbol', '')).strip().upper()
             if not sym or 'NIFTY' in sym:
@@ -195,23 +204,19 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
             if ltp <= 0:
                 continue
             prev_c = float(item.get('previousClose', ltp) or ltp)
-            tot_val_cr = float(item.get('totalTradedValue', 0.0) or 0.0)
-            tot_vol_lakh = float(item.get('totalTradedVolume', 0.0) or 0.0)
-            tot_vol = tot_vol_lakh * 100000.0
-            p_chg = float(item.get('pchange', 0.0) or 0.0)
-            base_p = float(item.get('basePrice', prev_c) or prev_c)
-            o = base_p if base_p > 0 else prev_c
-            h = max(ltp, o)
-            l = min(ltp, o)
+            o = float(item.get('open', item.get('basePrice', ltp)) or ltp)
+            h = float(item.get('dayHigh', max(ltp, o)) or max(ltp, o))
+            l = float(item.get('dayLow', min(ltp, o)) or min(ltp, o))
+            tot_vol = float(item.get('totalTradedVolume', 0.0) or 0.0)
+            p_chg = float(item.get('pChange', item.get('pchange', 0.0)) or 0.0)
 
             rng = max(0.01, h - l)
             clv = round((ltp - l) / rng, 2)
             cvd_est = round((2.0 * clv) - 1.0, 2)
 
-            ist_now = get_ist_time()
-            elapsed_mins = max(15.0, min(375.0, (ist_now.hour * 60 + ist_now.minute) - 555.0))
-            notional_per_min = (tot_val_cr * 10000000.0) / elapsed_mins
-            est_rvol = round(notional_per_min / 3500000.0, 2)
+            vol_per_min = tot_vol / elapsed_mins
+            notional_per_min = vol_per_min * ltp
+            est_rvol = round(max(1.0, notional_per_min / 3500000.0), 2)
 
             new_cache[sym] = {
                 'symbol': sym,
@@ -223,7 +228,7 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
                 'previous_close': prev_c,
                 'volume': tot_vol,
                 'pct_change': p_chg,
-                'rvol': max(1.0, est_rvol),
+                'rvol': est_rvol,
                 'cvd_delta_pct': cvd_est,
                 'is_index': False,
                 'timestamp': now,
@@ -318,6 +323,17 @@ class LiveMarketDataFeed:
             df_hist = t.history(period='5d', interval='1m')
             if df_hist is not None and not df_hist.empty:
                 df_hist.columns = [c.lower() for c in df_hist.columns]
+                # Compute 5-day average 3-minute bar volume as an institutional baseline
+                df_all_3m = df_hist.resample('3min', origin='start').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna(subset=['open', 'high', 'low', 'close'])
+                pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
+                hist_avg_3m_vol = float(pos_vols.mean()) if not pos_vols.empty else 0.0
+
                 latest_date = df_hist.index[-1].date()
                 df_today = df_hist[df_hist.index.date == latest_date]
                 df_3m = df_today.resample('3min', origin='start').agg({
@@ -330,6 +346,7 @@ class LiveMarketDataFeed:
 
                 if not df_3m.empty:
                     df_3m.reset_index(inplace=True)
+                    df_3m['hist_avg_3m_vol'] = hist_avg_3m_vol
                     self._intraday_cache[sym_clean] = df_3m
                     self._intraday_ts[sym_clean] = now
                     return df_3m
@@ -361,6 +378,17 @@ class LiveMarketDataFeed:
                             df_1m['volume'] = df_1m['volume'].fillna(0.0)
                             df_1m.set_index('datetime', inplace=True)
 
+                            # Compute 5-day average 3-minute bar volume as institutional baseline
+                            df_all_3m = df_1m.resample('3min', origin='start').agg({
+                                'open': 'first',
+                                'high': 'max',
+                                'low': 'min',
+                                'close': 'last',
+                                'volume': 'sum'
+                            }).dropna(subset=['open', 'high', 'low', 'close'])
+                            pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
+                            hist_avg_3m_vol = float(pos_vols.mean()) if not pos_vols.empty else 0.0
+
                             latest_date = df_1m.index[-1].date()
                             df_today_1m = df_1m[df_1m.index.date == latest_date]
 
@@ -374,6 +402,7 @@ class LiveMarketDataFeed:
 
                             if not df_3m.empty:
                                 df_3m.reset_index(inplace=True)
+                                df_3m['hist_avg_3m_vol'] = hist_avg_3m_vol
                                 self._intraday_cache[sym_clean] = df_3m
                                 self._intraday_ts[sym_clean] = now
                                 return df_3m
