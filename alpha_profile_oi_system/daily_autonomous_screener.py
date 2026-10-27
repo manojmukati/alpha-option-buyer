@@ -476,12 +476,26 @@ class DailyAutonomousScreener:
         print(f"=======================================================")
 
         if not ignore_window and not is_in_active_trading_slab(ist_now):
-            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside 09:30-10:15 AM & 01:15-02:15 PM IST.")
-            print("[POLICY]: Strictly ZERO messages dispatched. Exiting immediately.")
+            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside active trading slabs (09:30-10:15 AM & 01:15-02:15 PM IST).")
+            standby_msg = (
+                f"ℹ️ <b>ALPHA SCREENER CLOUD STANDBY UPDATE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ <b>TRIGGER TIME:</b> <b>{ist_time_str}</b>\n"
+                f"🔒 <b>STATUS:</b> Market currently closed or outside active trading slabs.\n"
+                f"🎯 <b>DESIGNATED TRADING SLABS:</b>\n"
+                f"  • Slab 1 (Morning): 09:30 AM to 10:15 AM IST\n"
+                f"  • Slab 2 (Afternoon): 01:15 PM to 02:15 PM IST\n"
+                f"  • EOD Audit: 03:35 PM IST\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ <b>TELEGRAM CLOUD LINK:</b> Active & Verified. Bot is online and waiting for next trading session.\n"
+                f"👥 <b>GROUP STATUS:</b> Silence maintained (0 messages to Group).\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            self.notifier.send_broadcast_message(standby_msg, is_trade_signal=False)
             return
 
         already_sent_today = len(self.dispatched_today) + len(self.index_recent_dispatch)
-        if already_sent_today >= MAX_DAILY_SUPER_TRADES:
+        if already_sent_today >= MAX_DAILY_SUPER_TRADES and not ignore_window:
             print(f"[DAILY SUPER-TRADE CAP REACHED]: {already_sent_today}/{MAX_DAILY_SUPER_TRADES} best trades already dispatched today.")
             return
 
