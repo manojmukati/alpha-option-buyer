@@ -258,54 +258,68 @@ class LiveMarketDataFeed:
         self._last_oc_fetch = {}
 
     def _load_universe(self):
-        """Loads all 4 Indices + Full 216 NSE F&O Stocks with zero-failure built-in fallback."""
+        """
+        Dynamically loads all Active NSE F&O Stocks and Indices directly from official NSE feeds.
+        Zero hardcoded stock names.
+        1. Primary: Official NSE F&O Master list (https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv)
+        2. Fallback: Dynamic NSE Bhavcopy from modules.fno_universe
+        3. Dynamic Cache: Local fno_universe_cache.json
+        """
+        import csv
+        import io
         indices = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-        default_fo = [
-            'AARTIIND', 'ABB', 'ABBOTINDIA', 'ABCAPITAL', 'ABFRL', 'ACC', 'ADANIENSOL', 'ADANIENT',
-            'ADANIGREEN', 'ADANIPORTS', 'ALKEM', 'AMBUJACEM', 'ANGELONE', 'APLAPOLLO', 'APOLLOHOSP',
-            'APOLLOTYRE', 'ASHOKLEY', 'ASIANPAINT', 'ASTRAL', 'ATGL', 'ATUL', 'AUBANK', 'AUROPHARMA',
-            'AXISBANK', 'BAJAJ-AUTO', 'BAJAJFINSV', 'BAJFINANCE', 'BALKRISIND', 'BANDHANBNK',
-            'BANKBARODA', 'BANKINDIA', 'BATAINDIA', 'BEL', 'BERGEPAINT', 'BHARATFORG', 'BHARTIARTL',
-            'BHEL', 'BIOCON', 'BOSCHLTD', 'BPCL', 'BRITANNIA', 'BSE', 'BSOFT', 'CAMS', 'CANBK',
-            'CANFINHOME', 'CDSL', 'CESC', 'CGPOWER', 'CHAMBLFERT', 'CHOLAFIN', 'CIPLA', 'COALINDIA',
-            'COFORGE', 'COLPAL', 'CONCOR', 'COROMANDEL', 'CROMPTON', 'CUB', 'CUMMINSIND', 'CYIENT',
-            'DABUR', 'DALBHARAT', 'DEEPAKNTR', 'DELHIVERY', 'DIVISLAB', 'DIXON', 'DLF', 'DMART',
-            'DRREDDY', 'EICHERMOT', 'ESCORTS', 'EXIDEIND', 'FEDERALBNK', 'GAIL', 'GLENMARK',
-            'GMRAIRPORT', 'GNFC', 'GODREJCP', 'GODREJPROP', 'GRANULES', 'GRASIM', 'GUJGASLTD',
-            'HAL', 'HAVELLS', 'HCLTECH', 'HDFCAMC', 'HDFCBANK', 'HDFCLIFE', 'HEROMOTOCO', 'HFCL',
-            'HINDALCO', 'HINDCOPPER', 'HINDPETRO', 'HINDUNILVR', 'HUDCO', 'ICICIBANK', 'ICICIGI',
-            'ICICIPRULI', 'IDEA', 'IDFCFIRSTB', 'IEX', 'IGL', 'IIFL', 'INDHOTEL', 'INDIANB',
-            'INDIAMART', 'INDIGO', 'INDUSINDBK', 'INDUSTOWER', 'INFY', 'IOC', 'IPCALAB', 'IRB',
-            'IRCTC', 'IREDA', 'IRFC', 'ITC', 'JINDALSTEL', 'JIOFIN', 'JKCEMENT', 'JSL', 'JSWENERGY',
-            'JSWSTEEL', 'JUBLFOOD', 'KALYANKJIL', 'KEI', 'KOTAKBANK', 'KPITTECH', 'LALPATHLAB',
-            'LAURUSLABS', 'LICHSGFIN', 'LICI', 'LODHA', 'LT', 'LTF', 'LTIM', 'LTTS', 'LUPIN',
-            'M&M', 'M&MFIN', 'MANAPPURAM', 'MANKIND', 'MARICO', 'MARUTI', 'MAXHEALTH', 'MCX',
-            'METROPOLIS', 'MFSL', 'MGL', 'MOTHERSON', 'MPHASIS', 'MRF', 'MUTHOOTFIN', 'NATIONALUM',
-            'NAUKRI', 'NAVINFLUOR', 'NCC', 'NESTLEIND', 'NHPC', 'NMDC', 'NTPC', 'NYKAA', 'OBEROIRLTY',
-            'OFSS', 'OIL', 'ONGC', 'PAGEIND', 'PAYTM', 'PEL', 'PERSISTENT', 'PETRONET', 'PFC',
-            'PHOENIXLTD', 'PIDILITIND', 'PIIND', 'PNB', 'POLICYBZR', 'POLYCAB', 'POONAWALLA',
-            'POWERGRID', 'PRESTIGE', 'PVRINOX', 'RAMCOCEM', 'RBLBANK', 'RECLTD', 'RELIANCE',
-            'SAIL', 'SBICARD', 'SBILIFE', 'SBIN', 'SHREECEM', 'SHRIRAMFIN', 'SIEMENS', 'SJVN',
-            'SOLARINDS', 'SONACOMS', 'SRF', 'SUNPHARMA', 'SUNTV', 'SUPREMEIND', 'SYNGENE',
-            'TATACHEM', 'TATACOMM', 'TATACONSUM', 'TATAELXSI', 'TATAMOTORS', 'TATAPOWER',
-            'TATASTEEL', 'TATATECH', 'TCS', 'TECHM', 'TIINDIA', 'TITAGARH', 'TITAN', 'TORNTPHARM',
-            'TORNTPOWER', 'TRENT', 'TVSMOTOR', 'UBL', 'ULTRACEMCO', 'UNIONBANK', 'UNITDSPR',
-            'UPL', 'VBL', 'VEDL', 'VOLTAS', 'WIPRO', 'YESBANK', 'ZOMATO', 'ZYDUSLIFE'
-        ]
-        # Combine with dynamic FNO universe if available, but strictly protect against cash-market pollution (3,600+ equities)
+        fo_symbols = []
+
+        # 1. Official Live NSE F&O Master List (Direct from NSE Server)
         try:
-            from modules.fno_universe import get_fno_universe
-            cached_univ = get_fno_universe()
-            if cached_univ:
-                for x in cached_univ:
-                    s = x.get('symbol') if isinstance(x, dict) else str(x)
-                    if s and s not in indices and s != 'NIFTYFPI' and len(s) > 1:
-                        default_fo.append(s)
+            url = "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            r = requests.get(url, headers=headers, timeout=8)
+            if r.status_code == 200:
+                reader = csv.reader(io.StringIO(r.text))
+                for row in reader:
+                    if len(row) >= 2:
+                        sym = str(row[1]).strip().upper()
+                        if sym and sym not in ['SYMBOL', 'NIFTYFPI'] and not sym.startswith('DERIVATIVES'):
+                            fo_symbols.append(sym)
         except Exception:
             pass
 
-        combined_stocks = sorted(list(set(default_fo)))
-        return [{'symbol': s} for s in (indices + combined_stocks)]
+        # 2. Dynamic Fallback via nselib FNO Bhavcopy
+        if not fo_symbols:
+            try:
+                from modules.fno_universe import get_fno_universe
+                u = get_fno_universe()
+                if u:
+                    for item in u:
+                        sym = item.get('symbol') if isinstance(item, dict) else str(item)
+                        sym = str(sym).strip().upper()
+                        if sym and sym not in ['NIFTYFPI', 'SYMBOL']:
+                            fo_symbols.append(sym)
+            except Exception:
+                pass
+
+        # 3. Dynamic Cache Fallback
+        cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fno_universe_cache.json')
+        if fo_symbols:
+            try:
+                with open(cache_path, 'w', encoding='utf-8') as f:
+                    json.dump([{'symbol': s} for s in sorted(list(set(indices + fo_symbols)))], f, indent=2)
+            except Exception:
+                pass
+        elif os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cached = json.load(f)
+                    for item in cached:
+                        sym = item.get('symbol') if isinstance(item, dict) else str(item)
+                        if sym and sym != 'NIFTYFPI':
+                            fo_symbols.append(sym)
+            except Exception:
+                pass
+
+        all_assets = sorted(list(set(indices + fo_symbols)))
+        return [{'symbol': s} for s in all_assets]
 
     def get_live_asset_quote(self, symbol):
         """
