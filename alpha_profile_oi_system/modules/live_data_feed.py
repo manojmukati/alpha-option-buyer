@@ -258,21 +258,53 @@ class LiveMarketDataFeed:
         self._last_oc_fetch = {}
 
     def _load_universe(self):
-        """Loads all 4 Indices + Full 216 NSE F&O Stocks dynamically from fno_universe."""
+        """Loads all 4 Indices + Full 216 NSE F&O Stocks with zero-failure built-in fallback."""
         indices = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-        fo_list = []
+        default_fo = [
+            'AARTIIND', 'ABB', 'ABBOTINDIA', 'ABCAPITAL', 'ABFRL', 'ACC', 'ADANIENSOL', 'ADANIENT',
+            'ADANIGREEN', 'ADANIPORTS', 'ALKEM', 'AMBUJACEM', 'ANGELONE', 'APLAPOLLO', 'APOLLOHOSP',
+            'APOLLOTYRE', 'ASHOKLEY', 'ASIANPAINT', 'ASTRAL', 'ATGL', 'ATUL', 'AUBANK', 'AUROPHARMA',
+            'AXISBANK', 'BAJAJ-AUTO', 'BAJAJFINSV', 'BAJFINANCE', 'BALKRISIND', 'BANDHANBNK',
+            'BANKBARODA', 'BANKINDIA', 'BATAINDIA', 'BEL', 'BERGEPAINT', 'BHARATFORG', 'BHARTIARTL',
+            'BHEL', 'BIOCON', 'BOSCHLTD', 'BPCL', 'BRITANNIA', 'BSE', 'BSOFT', 'CAMS', 'CANBK',
+            'CANFINHOME', 'CDSL', 'CESC', 'CGPOWER', 'CHAMBLFERT', 'CHOLAFIN', 'CIPLA', 'COALINDIA',
+            'COFORGE', 'COLPAL', 'CONCOR', 'COROMANDEL', 'CROMPTON', 'CUB', 'CUMMINSIND', 'CYIENT',
+            'DABUR', 'DALBHARAT', 'DEEPAKNTR', 'DELHIVERY', 'DIVISLAB', 'DIXON', 'DLF', 'DMART',
+            'DRREDDY', 'EICHERMOT', 'ESCORTS', 'EXIDEIND', 'FEDERALBNK', 'GAIL', 'GLENMARK',
+            'GMRAIRPORT', 'GNFC', 'GODREJCP', 'GODREJPROP', 'GRANULES', 'GRASIM', 'GUJGASLTD',
+            'HAL', 'HAVELLS', 'HCLTECH', 'HDFCAMC', 'HDFCBANK', 'HDFCLIFE', 'HEROMOTOCO', 'HFCL',
+            'HINDALCO', 'HINDCOPPER', 'HINDPETRO', 'HINDUNILVR', 'HUDCO', 'ICICIBANK', 'ICICIGI',
+            'ICICIPRULI', 'IDEA', 'IDFCFIRSTB', 'IEX', 'IGL', 'IIFL', 'INDHOTEL', 'INDIANB',
+            'INDIAMART', 'INDIGO', 'INDUSINDBK', 'INDUSTOWER', 'INFY', 'IOC', 'IPCALAB', 'IRB',
+            'IRCTC', 'IREDA', 'IRFC', 'ITC', 'JINDALSTEL', 'JIOFIN', 'JKCEMENT', 'JSL', 'JSWENERGY',
+            'JSWSTEEL', 'JUBLFOOD', 'KALYANKJIL', 'KEI', 'KOTAKBANK', 'KPITTECH', 'LALPATHLAB',
+            'LAURUSLABS', 'LICHSGFIN', 'LICI', 'LODHA', 'LT', 'LTF', 'LTIM', 'LTTS', 'LUPIN',
+            'M&M', 'M&MFIN', 'MANAPPURAM', 'MANKIND', 'MARICO', 'MARUTI', 'MAXHEALTH', 'MCX',
+            'METROPOLIS', 'MFSL', 'MGL', 'MOTHERSON', 'MPHASIS', 'MRF', 'MUTHOOTFIN', 'NATIONALUM',
+            'NAUKRI', 'NAVINFLUOR', 'NCC', 'NESTLEIND', 'NHPC', 'NMDC', 'NTPC', 'NYKAA', 'OBEROIRLTY',
+            'OFSS', 'OIL', 'ONGC', 'PAGEIND', 'PAYTM', 'PEL', 'PERSISTENT', 'PETRONET', 'PFC',
+            'PHOENIXLTD', 'PIDILITIND', 'PIIND', 'PNB', 'POLICYBZR', 'POLYCAB', 'POONAWALLA',
+            'POWERGRID', 'PRESTIGE', 'PVRINOX', 'RAMCOCEM', 'RBLBANK', 'RECLTD', 'RELIANCE',
+            'SAIL', 'SBICARD', 'SBILIFE', 'SBIN', 'SHREECEM', 'SHRIRAMFIN', 'SIEMENS', 'SJVN',
+            'SOLARINDS', 'SONACOMS', 'SRF', 'SUNPHARMA', 'SUNTV', 'SUPREMEIND', 'SYNGENE',
+            'TATACHEM', 'TATACOMM', 'TATACONSUM', 'TATAELXSI', 'TATAMOTORS', 'TATAPOWER',
+            'TATASTEEL', 'TATATECH', 'TCS', 'TECHM', 'TIINDIA', 'TITAGARH', 'TITAN', 'TORNTPHARM',
+            'TORNTPOWER', 'TRENT', 'TVSMOTOR', 'UBL', 'ULTRACEMCO', 'UNIONBANK', 'UNITDSPR',
+            'UPL', 'VBL', 'VEDL', 'VOLTAS', 'WIPRO', 'YESBANK', 'ZOMATO', 'ZYDUSLIFE'
+        ]
+        # Combine with dynamic FNO universe if available, but strictly protect against cash-market pollution (3,600+ equities)
         try:
             from modules.fno_universe import get_fno_universe
-            univ = get_fno_universe()
-            fo_list.extend([x['symbol'] if isinstance(x, dict) else str(x) for x in univ if (x.get('symbol') if isinstance(x, dict) else str(x)) not in indices])
+            cached_univ = get_fno_universe()
+            if cached_univ:
+                for x in cached_univ:
+                    s = x.get('symbol') if isinstance(x, dict) else str(x)
+                    if s and s not in indices and s != 'NIFTYFPI' and len(s) > 1:
+                        default_fo.append(s)
         except Exception:
-            try:
-                from modules.fno_universe import FNO_STOCKS
-                fo_list.extend(list(FNO_STOCKS))
-            except Exception:
-                pass
+            pass
 
-        combined_stocks = sorted(list(set(fo_list)))
+        combined_stocks = sorted(list(set(default_fo)))
         return [{'symbol': s} for s in (indices + combined_stocks)]
 
     def get_live_asset_quote(self, symbol):

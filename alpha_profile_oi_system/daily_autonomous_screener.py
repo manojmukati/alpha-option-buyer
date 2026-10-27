@@ -415,7 +415,8 @@ class DailyAutonomousScreener:
     def _record_signal_to_excel(self, ist_now, cand, opt, opt_action, contract, opt_entry, opt_sl, opt_tgt1, opt_tgt2, sl_pts, t1_pts, t2_pts, time_sl_time, buffer_end_time):
         """Maintains Daily & Monthly Official Excel Journals for every qualified signal dispatched."""
         sym = cand['symbol']
-        qty = opt.get('quantity', 25)
+        meta = get_instrument_meta(sym)
+        qty = opt.get('quantity') or (meta.get('lot', 25) if meta else 25)
         trade_uid = f"SIG-{ist_now.strftime('%Y%m%d-%H%M%S')}-{sym}"
         csv_path = os.path.join(CURRENT_DIR, 'Live_Paper_Trading_Journal.csv')
         daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
@@ -658,6 +659,8 @@ class DailyAutonomousScreener:
             opt = cand['verified_opt']
             contract = opt['contract']
 
+            meta = get_instrument_meta(sym)
+            lot_sz = opt.get('quantity') or (meta.get('lot', 25) if meta else 25)
             buffer_end_time = (ist_now + datetime.timedelta(minutes=4)).strftime('%I:%M %p IST')
             time_sl_time = (ist_now + datetime.timedelta(minutes=15)).strftime('%I:%M %p IST')
 
@@ -691,7 +694,7 @@ class DailyAutonomousScreener:
             pure_signal_msg = (
                 f"🟢 <b>ALPHA FAST GAMMA BUY SIGNAL</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📌 <b>CONTRACT:</b> <code>{contract}</code> ({opt_action})\n"
+                f"📌 <b>CONTRACT:</b> <code>{contract}</code> ({opt_action}) | <b>LOT:</b> {lot_sz}\n"
                 f"⏰ <b>ENTRY TIME:</b> <b>{ist_time_str}</b>\n"
                 f"📊 <b>SPOT PRICE:</b> Rs. {spot:,.2f} ({cand['pct_change']:+.2f}%)\n"
                 f"🧭 <b>OI RUNWAY (-4/0/+4):</b> <b>{cand.get('oi_reason', 'CLEAR')}</b>\n"
@@ -786,15 +789,16 @@ class DailyAutonomousScreener:
         ist_time_str = ist_now.strftime('%I:%M:%S %p IST')
         ist_date_str = ist_now.strftime('%d-%b-%Y')
         daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
-
         if not os.path.exists(daily_xl):
-            print(f"[EOD ERROR]: Excel file {daily_xl} not found.")
-            return
-
-        import pandas as pd
-        df = pd.read_excel(daily_xl)
-
-        df_today = df[df['Date'].astype(str).str.contains(ist_date_str, na=False)] if 'Date' in df.columns else pd.DataFrame()
+            import pandas as pd
+            df_today = pd.DataFrame()
+        else:
+            try:
+                import pandas as pd
+                df = pd.read_excel(daily_xl)
+                df_today = df[df['Date'].astype(str).str.contains(ist_date_str, na=False)] if 'Date' in df.columns else pd.DataFrame()
+            except Exception:
+                df_today = pd.DataFrame()
 
         total_trades = len(df_today)
         wins = 0
@@ -848,18 +852,22 @@ class DailyAutonomousScreener:
         report_text = "\n".join(report_lines)
         self.notifier.send_broadcast_message(report_text, is_trade_signal=False)
 
-        caption = (
-            f"📊 <b>DAILY OFFICIAL LIVE PAPER TRADING JOURNAL</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 <b>DATE:</b> {ist_date_str}\n"
-            f"⏰ <b>DISPATCH TIME:</b> {ist_time_str}\n"
-            f"🎯 <b>MODE:</b> EOD Official Paper Trading Ledger\n"
-            f"🔒 <b>SECURITY:</b> Strictly Confidential (Owner Private DM Only)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        res = self.notifier.send_document_to_owner_with_approval_prompt(daily_xl, caption=caption)
-        print(f"[EOD AUDIT & DISPATCH]: Delivered daily analysis & journal to Owner DM. Result: {res.get('ok')}")
-        return res
+        if os.path.exists(daily_xl):
+            caption = (
+                f"📊 <b>DAILY OFFICIAL LIVE PAPER TRADING JOURNAL</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 <b>DATE:</b> {ist_date_str}\n"
+                f"⏰ <b>DISPATCH TIME:</b> {ist_time_str}\n"
+                f"🎯 <b>MODE:</b> EOD Official Paper Trading Ledger\n"
+                f"🔒 <b>SECURITY:</b> Strictly Confidential (Owner Private DM Only)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            res = self.notifier.send_document_to_owner_with_approval_prompt(daily_xl, caption=caption)
+            print(f"[EOD AUDIT & DISPATCH]: Delivered daily analysis & journal to Owner DM. Result: {res.get('ok')}")
+            return res
+        else:
+            print("[EOD AUDIT & DISPATCH]: Delivered daily text analysis to Owner DM.")
+            return {"ok": True}
 
     def send_eod_journal_to_owner(self):
         """Compatibility alias for EOD dispatch."""
