@@ -83,6 +83,12 @@ class DailyAutonomousScreener:
         self.dispatched_cache_file = os.path.join(CURRENT_DIR, 'config', 'dispatched_signals_today.json')
         self.dispatched_today = self._load_dispatched_cache()
         self.index_recent_dispatch = {}
+        self.nifty_regime_cache = {
+            'allow_stock_call': True,
+            'allow_stock_put': True,
+            'reason': 'NEUTRAL',
+            'timestamp': 0.0
+        }
 
         if not self.notifier.is_configured():
             env_token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
@@ -137,6 +143,84 @@ class DailyAutonomousScreener:
 
         self.dispatched_today[sym_clean] = time.time()
         self._save_dispatched_cache()
+
+    def get_nifty_market_regime(self, force_refresh=False):
+        """
+        FLAW #3 FIX — NIFTY MACRO TIDE & CRASH REGIME GATE:
+        Audits NIFTY 50 live spot, 3-minute closed candle (`iloc[-2]`), live forming candle (`iloc[-1]`),
+        and 3-minute 9-EMA (`ema9`).
+        - Strictly blocks Stock CALL (CE) trades if NIFTY is crashing / below 9-EMA / printing red 3m candle.
+        - Does NOT block Stock PUT (PE) on minor +0.10% (+25 pts) opens; only blocks Stock PUT during a
+          strong vertical Nifty surge above 9-EMA.
+        """
+        now = time.time()
+        if not force_refresh and (now - self.nifty_regime_cache.get('timestamp', 0.0) < 35.0):
+            return self.nifty_regime_cache
+
+        nq = self.data_feed.get_live_asset_quote('NIFTY')
+        ndf = self.data_feed.get_live_intraday_bars('NIFTY')
+
+        allow_call = True
+        allow_put = True
+        reason = "NIFTY_NEUTRAL_OR_ALIGNED"
+
+        nifty_spot = float(nq.get('live_spot', 0.0)) if nq else 0.0
+        nifty_high = float(nq.get('high', nifty_spot)) if nq else nifty_spot
+        nifty_low = float(nq.get('low', nifty_spot)) if nq else nifty_spot
+
+        if ndf is not None and len(ndf) >= 3:
+            eval_b = ndf.iloc[-2]
+            live_b = ndf.iloc[-1]
+            n_open = float(eval_b['open'])
+            n_close = float(eval_b['close'])
+            l_open = float(live_b['open'])
+            l_close = float(live_b['close'])
+            if nifty_spot <= 0:
+                nifty_spot = l_close
+
+            ema9 = float(ndf['ema9'].iloc[-1]) if 'ema9' in ndf.columns else float(ndf['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+            day_high = max(nifty_high, float(ndf['high'].max()))
+            day_low = min(nifty_low, float(ndf['low'].min())) if nifty_low > 0 else float(ndf['low'].min())
+
+            drop_from_high = round(day_high - nifty_spot, 2)
+            rise_from_low = round(nifty_spot - day_low, 2)
+
+            prev_3m_red = (n_close < n_open)
+            live_3m_red = (l_close < l_open) or (nifty_spot < n_close)
+            below_ema9 = (nifty_spot < ema9)
+
+            # Flaw #3 Exact Protection: Block Stock CALLs if NIFTY 3m candle is red OR NIFTY is below 9-EMA OR crashing >= 50 pts from high
+            if prev_3m_red or below_ema9 or (drop_from_high >= 50.0 and live_3m_red):
+                allow_call = False
+                reason = (
+                    f"NIFTY_BEARISH_OR_CRASH_REGIME (Spot {nifty_spot:.1f} vs 9-EMA {ema9:.1f} | "
+                    f"Prev3mRed={prev_3m_red} | DropFromHigh=-{drop_from_high:.1f} pts)"
+                )
+
+            # Symmetrical Surge Protection for PUTs (only block PUTs on strong active rally above 9-EMA, NEVER on mild +25 pt open)
+            prev_3m_strong_green = (n_close - n_open) >= 15.0
+            live_3m_green = (l_close >= l_open) and (nifty_spot >= n_close)
+            above_ema9_strong = (nifty_spot > (ema9 + 15.0))
+            if above_ema9_strong and prev_3m_strong_green and live_3m_green and rise_from_low >= 75.0:
+                allow_put = False
+                reason = (
+                    f"NIFTY_STRONG_RALLY_REGIME (Spot {nifty_spot:.1f} > 9-EMA {ema9:.1f} | "
+                    f"RiseFromLow=+{rise_from_low:.1f} pts)"
+                )
+        elif nq and nifty_spot > 0:
+            drop_from_high = round(nifty_high - nifty_spot, 2)
+            p_chg = float(nq.get('pct_change', 0.0))
+            if drop_from_high >= 60.0 or p_chg <= -0.35:
+                allow_call = False
+                reason = f"NIFTY_INTRADAY_SELLOFF (DropFromHigh=-{drop_from_high:.1f} pts | {p_chg:+.2f}%)"
+
+        self.nifty_regime_cache = {
+            'allow_stock_call': allow_call,
+            'allow_stock_put': allow_put,
+            'reason': reason,
+            'timestamp': now
+        }
+        return self.nifty_regime_cache
 
     def get_stock_atr(self, symbol, q):
         atr14 = float(self.atr_cache.get(symbol, 0.0))
@@ -368,6 +452,21 @@ class DailyAutonomousScreener:
         rvol = float(q.get('rvol', 1.0))
         direction = 'CALL' if pct_chg >= 0 else 'PUT'
 
+        # FLAW #3 FIX (Nifty Macro Tide Gate): Block Stock CALLs if Nifty is crashing/below 9-EMA
+        nifty_regime = self.get_nifty_market_regime(force_refresh=False)
+        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_CALL: {nifty_regime.get('reason')}"
+            }
+        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
+            }
+
         # Gate 0: Mathematical Expected Option Move >= 30.0 Pts
         stock_atr = self.get_stock_atr(sym_clean, q)
         delta = 0.60
@@ -501,8 +600,13 @@ class DailyAutonomousScreener:
 
         print(f"[ACTIVE SLAB REACHED]: Executing Full 216 F&O + Index Scan at {ist_time_str}...")
 
-        # STEP 1 (UPSIDE): Fetch 1 Bulk NSE Snapshot & Scan ALL 216 Stocks + 4 Indices in memory
+        # STEP 1 (UPSIDE): Fetch 1 Bulk NSE Snapshot, Audit NIFTY Macro Regime, & Pre-Filter ALL 216 Stocks + 4 Indices
         fetch_bulk_nse_snapshot(force_refresh=True)
+        nifty_regime = self.get_nifty_market_regime(force_refresh=True)
+        print(
+            f"[MACRO TIDE REGIME]: AllowStockCALL={nifty_regime['allow_stock_call']} | "
+            f"AllowStockPUT={nifty_regime['allow_stock_put']} | {nifty_regime['reason']}"
+        )
 
         symbols = [x['symbol'] for x in self.universe]
         with ThreadPoolExecutor(max_workers=8) as executor:
@@ -543,22 +647,73 @@ class DailyAutonomousScreener:
             #  Stocks audited here on genuine 3-min resampled bars!)
             # -------------------------------------------------------------
             if not is_idx:
+                # Re-verify Nifty Macro Tide before evaluating stock
+                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
+                    print(f"  [NIFTY REGIME BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
+                    continue
+                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
+                    print(f"  [NIFTY REGIME BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
+                    continue
+
                 stk_df = self.data_feed.get_live_intraday_bars(sym)
                 if stk_df is None or len(stk_df) < 9:
                     print(f"  [5-PILLAR CANDLE REJECTED]: {sym} -> Insufficient 3-min candles (less than 9 bars)")
                     continue
 
                 eval_bar = stk_df.iloc[-2] if len(stk_df) >= 2 else stk_df.iloc[-1]
+                live_bar = stk_df.iloc[-1]
                 b_open = float(eval_bar['open'])
                 b_high = float(eval_bar['high'])
                 b_low = float(eval_bar['low'])
                 b_close = float(eval_bar['close'])
+
+                l_open = float(live_bar['open'])
+                l_high = float(live_bar['high'])
+                l_low = float(live_bar['low'])
+                l_close = float(live_bar['close'])
+
                 # Keep live ticking spot price accurate
                 live_q = self.data_feed.get_live_asset_quote(sym)
-                spot = float(live_q.get('live_spot', stk_df.iloc[-1]['close']))
+                spot = float(live_q.get('live_spot', l_close))
                 cand['spot_price'] = spot
 
+                stock_atr = float(cand.get('stock_atr', self.get_stock_atr(sym, live_q)))
                 rng = max(0.01, b_high - b_low)
+
+                # FLAW #1 FIX (Anti-Parabolic Exhaustion Candle Cap):
+                # Never chase a 3-minute candle that already burned > 35% of the stock's full-day ATR (e.g. Navin Fluorine +143 pts)
+                max_single_candle_rng = round(stock_atr * 0.35, 2)
+                if rng > max_single_candle_rng:
+                    print(
+                        f"  [FLAW #1 ANTI-PARABOLIC REJECTED]: {sym} -> 3m Candle Range {rng:.2f} pts > "
+                        f"35% of Daily ATR ({max_single_candle_rng:.2f} pts). Blow-off trap avoided!"
+                    )
+                    continue
+
+                # Intraday Remaining Runway Check: Ensure stock hasn't already moved > 70% of ATR from day's low/high
+                day_high_3m = max(float(live_q.get('high', spot)), float(stk_df['high'].max()))
+                day_low_3m = min(float(live_q.get('low', spot)), float(stk_df['low'].min())) if float(live_q.get('low', 0)) > 0 else float(stk_df['low'].min())
+                move_already_done = (spot - day_low_3m) if direction == 'CALL' else (day_high_3m - spot)
+                if move_already_done > (stock_atr * 0.70):
+                    print(
+                        f"  [EXHAUSTED RUNWAY REJECTED]: {sym} ({direction}) -> Already moved {move_already_done:.2f} pts "
+                        f"(> 70% of ATR {stock_atr:.1f} pts)"
+                    )
+                    continue
+
+                # FLAW #2 FIX (Live Forming Bar Reversal Check):
+                # Current live forming candle (`iloc[-1]`) & live spot MUST hold in the trade direction (blocks Siemens/Cholafin)
+                if direction == 'CALL':
+                    live_bar_holding = (spot >= b_close) and (l_close >= l_open) and ((l_high - spot) <= (stock_atr * 0.12))
+                else:
+                    live_bar_holding = (spot <= b_close) and (l_close <= l_open) and ((spot - l_low) <= (stock_atr * 0.12))
+
+                if not live_bar_holding:
+                    print(
+                        f"  [FLAW #2 LIVE BAR REVERSAL REJECTED]: {sym} ({direction}) -> "
+                        f"LiveSpot={spot:.2f} vs ClosedBar={b_close:.2f} (LiveOpen={l_open:.2f}, LiveClose={l_close:.2f})"
+                    )
+                    continue
                 body = abs(b_close - b_open)
                 solid_body_ratio = round(body / rng, 2)
                 up_wick = round((b_high - max(b_open, b_close)) / rng, 2)

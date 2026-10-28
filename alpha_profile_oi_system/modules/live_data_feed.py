@@ -146,7 +146,9 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
     idx_map = {
         'NIFTY 50': 'NIFTY',
         'NIFTY BANK': 'BANKNIFTY',
+        'NIFTY FINANCIAL SERVICES': 'FINNIFTY',
         'NIFTY FIN SERVICE': 'FINNIFTY',
+        'NIFTY FINANCIAL SERVICES 25/50': 'FINNIFTY',
         'NIFTY MIDCAP SELECT': 'MIDCPNIFTY',
         'NIFTY NEXT 50': 'NIFTYNXT50'
     }
@@ -158,6 +160,8 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
             idx_name = item.get('index', '')
             if idx_name in idx_map:
                 sym = idx_map[idx_name]
+                if sym in new_cache and idx_name == 'NIFTY FINANCIAL SERVICES 25/50':
+                    continue
                 ltp = float(item.get('last', 0.0) or 0.0)
                 o = float(item.get('open', ltp) or ltp)
                 h = float(item.get('high', ltp) or ltp)
@@ -369,7 +373,7 @@ class LiveMarketDataFeed:
             df_hist = t.history(period='5d', interval='1m')
             if df_hist is not None and not df_hist.empty:
                 df_hist.columns = [c.lower() for c in df_hist.columns]
-                # Compute 5-day average 3-minute bar volume as an institutional baseline
+                # Compute 5-day average 3-minute bar volume as an institutional baseline + 9-EMA
                 df_all_3m = df_hist.resample('3min', origin='start').agg({
                     'open': 'first',
                     'high': 'max',
@@ -377,18 +381,12 @@ class LiveMarketDataFeed:
                     'close': 'last',
                     'volume': 'sum'
                 }).dropna(subset=['open', 'high', 'low', 'close'])
+                df_all_3m['ema9'] = df_all_3m['close'].ewm(span=9, adjust=False).mean()
                 pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
                 hist_avg_3m_vol = float(pos_vols.mean()) if not pos_vols.empty else 0.0
 
                 latest_date = df_hist.index[-1].date()
-                df_today = df_hist[df_hist.index.date == latest_date]
-                df_3m = df_today.resample('3min', origin='start').agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum'
-                }).dropna(subset=['open', 'high', 'low', 'close'])
+                df_3m = df_all_3m[df_all_3m.index.date == latest_date].copy()
 
                 if not df_3m.empty:
                     df_3m.reset_index(inplace=True)
@@ -424,7 +422,7 @@ class LiveMarketDataFeed:
                             df_1m['volume'] = df_1m['volume'].fillna(0.0)
                             df_1m.set_index('datetime', inplace=True)
 
-                            # Compute 5-day average 3-minute bar volume as institutional baseline
+                            # Compute 5-day average 3-minute bar volume as institutional baseline + 9-EMA
                             df_all_3m = df_1m.resample('3min', origin='start').agg({
                                 'open': 'first',
                                 'high': 'max',
@@ -432,19 +430,12 @@ class LiveMarketDataFeed:
                                 'close': 'last',
                                 'volume': 'sum'
                             }).dropna(subset=['open', 'high', 'low', 'close'])
+                            df_all_3m['ema9'] = df_all_3m['close'].ewm(span=9, adjust=False).mean()
                             pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
                             hist_avg_3m_vol = float(pos_vols.mean()) if not pos_vols.empty else 0.0
 
                             latest_date = df_1m.index[-1].date()
-                            df_today_1m = df_1m[df_1m.index.date == latest_date]
-
-                            df_3m = df_today_1m.resample('3min', origin='start').agg({
-                                'open': 'first',
-                                'high': 'max',
-                                'low': 'min',
-                                'close': 'last',
-                                'volume': 'sum'
-                            }).dropna(subset=['open', 'high', 'low', 'close'])
+                            df_3m = df_all_3m[df_all_3m.index.date == latest_date].copy()
 
                             if not df_3m.empty:
                                 df_3m.reset_index(inplace=True)
