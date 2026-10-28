@@ -341,11 +341,12 @@ class DailyAutonomousScreener:
                 wick_ok = (up_wick <= 0.20) if direction == 'CALL' else (dn_wick <= 0.20)
                 single_mom_ok = (solid_body_ratio >= 0.40) and wick_ok and clv_ok
 
+                idx_dist_buffer = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY'] else 90.0
                 if direction == 'CALL':
-                    if b_close >= comp_high:
+                    if (b_close >= comp_high) and (b_close <= comp_high + idx_dist_buffer):
                         is_breakout = True
                 else:
-                    if b_close <= comp_low:
+                    if (b_close <= comp_low) and (b_close >= comp_low - idx_dist_buffer):
                         is_breakout = True
 
                 # Multi-candle cumulative breakout uses base prior to the 2/3-candle sequence
@@ -362,7 +363,8 @@ class DailyAutonomousScreener:
                                  float(b_prev1['close']) <= float(b_prev1['open']) and
                                  b_close <= b_open)
                     last_2_red = (float(b_prev1['close']) <= float(b_prev1['open']) and b_close <= b_open)
-                    broke_range_low = (b_close <= comp_low) or (b_close <= seq_comp_low)
+                    broke_range_low = ((b_close <= comp_low) and (b_close >= comp_low - idx_dist_buffer)) or \
+                                     ((b_close <= seq_comp_low) and (b_close >= seq_comp_low - idx_dist_buffer))
 
                     if (all_3_red and cum_fall_3_pct >= 0.25 and broke_range_low) or (last_2_red and cum_fall_2_pct >= 0.20 and broke_range_low):
                         direction = 'PUT'
@@ -376,7 +378,8 @@ class DailyAutonomousScreener:
                                    float(b_prev1['close']) >= float(b_prev1['open']) and
                                    b_close >= b_open)
                     last_2_green = (float(b_prev1['close']) >= float(b_prev1['open']) and b_close >= b_open)
-                    broke_range_high = (b_close >= comp_high) or (b_close >= seq_comp_high)
+                    broke_range_high = ((b_close >= comp_high) and (b_close <= comp_high + idx_dist_buffer)) or \
+                                      ((b_close >= seq_comp_high) and (b_close <= seq_comp_high + idx_dist_buffer))
 
                     if (all_3_green and cum_rise_3_pct >= 0.25 and broke_range_high) or (last_2_green and cum_rise_2_pct >= 0.20 and broke_range_high):
                         direction = 'CALL'
@@ -723,16 +726,17 @@ class DailyAutonomousScreener:
                 comp_bars = stk_df.iloc[:-2].tail(8)
                 comp_high = float(comp_bars['high'].max())
                 comp_low = float(comp_bars['low'].min())
+                max_dist_buffer = stock_atr * 0.20
 
-                # Pillar 1A: Single 3-Minute Candle Blast Momentum
+                # Pillar 1A: Single 3-Minute Candle Blast Momentum (Anchored within 20% ATR from Base)
                 if direction == 'CALL':
                     single_mom_ok = (b_close >= b_open) and (clv >= 0.72) and (up_wick <= 0.20) and (solid_body_ratio >= 0.40)
-                    broke_comp = (b_close >= comp_high)
+                    broke_comp = (b_close >= comp_high) and (b_close <= comp_high + max_dist_buffer)
                 else:
                     single_mom_ok = (b_close <= b_open) and (clv <= 0.28) and (dn_wick <= 0.20) and (solid_body_ratio >= 0.40)
-                    broke_comp = (b_close <= comp_low)
+                    broke_comp = (b_close <= comp_low) and (b_close >= comp_low - max_dist_buffer)
 
-                # Pillar 1B: Dual & Triple Candle Cumulative Momentum (Slow Grinding Move Support)
+                # Pillar 1B: Dual & Triple Candle Cumulative Momentum (Slow Grinding Move Support within 20% ATR)
                 cum_mom_ok = False
                 if len(stk_df) >= 5:
                     b_prev1 = stk_df.iloc[-3]
@@ -747,7 +751,7 @@ class DailyAutonomousScreener:
                         cum_rise_2_pct = ((b_close - float(b_prev1['open'])) / float(b_prev1['open'])) * 100.0
                         cum_rise_3_pct = ((b_close - float(b_prev2['open'])) / float(b_prev2['open'])) * 100.0
                         cum_mom_ok = (all_3_green and cum_rise_3_pct >= 0.25) or (last_2_green and cum_rise_2_pct >= 0.20)
-                        if cum_mom_ok and (b_close >= seq_comp_high):
+                        if cum_mom_ok and (b_close >= seq_comp_high) and (b_close <= seq_comp_high + max_dist_buffer):
                             broke_comp = True
                     else:
                         last_2_red = (float(b_prev1['close']) <= float(b_prev1['open']) and b_close <= b_open)
@@ -755,7 +759,7 @@ class DailyAutonomousScreener:
                         cum_fall_2_pct = ((float(b_prev1['open']) - b_close) / float(b_prev1['open'])) * 100.0
                         cum_fall_3_pct = ((float(b_prev2['open']) - b_close) / float(b_prev2['open'])) * 100.0
                         cum_mom_ok = (all_3_red and cum_fall_3_pct >= 0.25) or (last_2_red and cum_fall_2_pct >= 0.20)
-                        if cum_mom_ok and (b_close <= seq_comp_low):
+                        if cum_mom_ok and (b_close <= seq_comp_low) and (b_close >= seq_comp_low - max_dist_buffer):
                             broke_comp = True
 
                 cand_mom_pass = (single_mom_ok or cum_mom_ok) and broke_comp
@@ -763,7 +767,7 @@ class DailyAutonomousScreener:
                     print(f"  [5-PILLAR 3M CANDLE REJECTED]: {sym} ({direction}) -> SingleMom={single_mom_ok}, CumMom={cum_mom_ok}, BrokeComp={broke_comp}")
                     continue
 
-                # Pillar 2 & 3 on Real 3-Minute Stock Bars (RVOL & CVD Verification)
+                # Pillar 2: Real 3-Minute Institutional Volume (RVOL >= 1.80x Mandatory - Zero Bypass)
                 hist_base_v = float(stk_df['hist_avg_3m_vol'].iloc[-1]) if 'hist_avg_3m_vol' in stk_df.columns else 0.0
                 prior_10_v = float(stk_df['volume'].iloc[:-2].tail(10).mean()) if len(stk_df) > 2 else 0.0
                 base_3m_v = hist_base_v if hist_base_v > 0 else prior_10_v
@@ -772,8 +776,16 @@ class DailyAutonomousScreener:
                     curr_3m_v = max(curr_3m_v, float(stk_df.iloc[-3].get('volume', 0.0)))
                 real_3m_rvol = round(curr_3m_v / max(1.0, base_3m_v), 2) if base_3m_v > 0 else cand.get('rvol', 2.5)
                 cand['rvol'] = real_3m_rvol
-                if real_3m_rvol < 1.80 and not single_mom_ok:
-                    print(f"  [3M RVOL REJECTED]: {sym} -> 3m RVOL {real_3m_rvol:.2f}x < 1.80x")
+                if real_3m_rvol < 1.80:
+                    print(f"  [3M RVOL REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < 1.80x (No Institutional Volume)")
+                    continue
+
+                # Pillar 3: Real 3-Minute Order Flow CVD Delta Verification
+                bar_cvd = round((2.0 * clv) - 1.0, 2)
+                cand['bar_cvd'] = bar_cvd
+                cvd_pass = (bar_cvd >= 0.40) if direction == 'CALL' else (bar_cvd <= -0.40)
+                if not cvd_pass and not cum_mom_ok:
+                    print(f"  [3M CVD REJECTED]: {sym} ({direction}) -> Bar CVD {bar_cvd:+.2f} fails directional aggression threshold (+/-0.40)")
                     continue
 
             # -------------------------------------------------------------
