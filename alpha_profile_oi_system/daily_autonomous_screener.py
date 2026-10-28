@@ -1063,4 +1063,16 @@ if __name__ == '__main__':
         screener.run_eod_analysis_and_dispatch()
     else:
         ignore_win = ('--ignore-window' in sys.argv)
-        screener.run_screener(ignore_window=ignore_win)
+        ist_now = get_ist_time()
+
+        # अगर वर्तमान समय 09:30-10:15 या 01:15-02:15 स्लैब में है:
+        if is_in_active_trading_slab(ist_now) and not ignore_win:
+            print(f"[ACTIVE SLAB 3-MIN RUNNER]: Starting continuous 3-minute scans for current slab...")
+            while is_in_active_trading_slab(get_ist_time()):
+                screener.run_screener(ignore_window=True)
+                # अगर स्लैब में अभी भी समय बाकी है, तो ठीक 180 सेकंड (3 मिनट) रुको
+                if is_in_active_trading_slab(get_ist_time()):
+                    time.sleep(180)
+            print(f"[SLAB COMPLETED]: Active trading window closed. Clean exit.")
+        else:
+            screener.run_screener(ignore_window=ignore_win)
