@@ -189,23 +189,28 @@ class DailyAutonomousScreener:
             live_3m_red = (l_close < l_open) or (nifty_spot < n_close)
             below_ema9 = (nifty_spot < ema9)
 
-            # Flaw #3 Exact Protection: Block Stock CALLs if NIFTY 3m candle is red OR NIFTY is below 9-EMA OR crashing >= 50 pts from high
-            if prev_3m_red or below_ema9 or (drop_from_high >= 50.0 and live_3m_red):
+            # Strict Macro Compass: Check 9-EMA and Day Open confluence
+            day_open = float(ndf['open'].iloc[0])
+            down_from_open = (nifty_spot < day_open - 15.0)
+            up_from_open = (nifty_spot > day_open + 15.0)
+
+            # Block Stock CALLs if NIFTY is in the red from open, below 9-EMA, or dropping >= 50 pts
+            if prev_3m_red or below_ema9 or down_from_open or (drop_from_high >= 50.0 and live_3m_red):
                 allow_call = False
                 reason = (
                     f"NIFTY_BEARISH_OR_CRASH_REGIME (Spot {nifty_spot:.1f} vs 9-EMA {ema9:.1f} | "
-                    f"Prev3mRed={prev_3m_red} | DropFromHigh=-{drop_from_high:.1f} pts)"
+                    f"DownFromOpen={down_from_open} | Prev3mRed={prev_3m_red} | DropFromHigh=-{drop_from_high:.1f} pts)"
                 )
 
-            # Symmetrical Surge Protection for PUTs (only block PUTs on strong active rally above 9-EMA, NEVER on mild +25 pt open)
+            # Block Stock PUTs on strong active rally above 9-EMA or in strong green day
             prev_3m_strong_green = (n_close - n_open) >= 15.0
             live_3m_green = (l_close >= l_open) and (nifty_spot >= n_close)
             above_ema9_strong = (nifty_spot > (ema9 + 15.0))
-            if above_ema9_strong and prev_3m_strong_green and live_3m_green and rise_from_low >= 75.0:
+            if above_ema9_strong or up_from_open or (prev_3m_strong_green and live_3m_green and rise_from_low >= 60.0):
                 allow_put = False
                 reason = (
                     f"NIFTY_STRONG_RALLY_REGIME (Spot {nifty_spot:.1f} > 9-EMA {ema9:.1f} | "
-                    f"RiseFromLow=+{rise_from_low:.1f} pts)"
+                    f"UpFromOpen={up_from_open} | RiseFromLow=+{rise_from_low:.1f} pts)"
                 )
         elif nq and nifty_spot > 0:
             drop_from_high = round(nifty_high - nifty_spot, 2)
@@ -445,17 +450,15 @@ class DailyAutonomousScreener:
         rvol = float(q.get('rvol', 1.0))
         direction = 'CALL' if pct_chg >= 0 else 'PUT'
 
-        # FLAW #3 FIX (Nifty Macro Tide Gate): Block Stock CALLs if Nifty is crashing/below 9-EMA
-        # PINPOINT FIX: If stock has explosive institutional volume (RVOL >= 2.50x), allow trade even if Nifty tide differs
-        is_high_conviction_stock = (rvol >= 2.50)
+        # FLAW #3 FIX (Nifty Macro Tide Gate): Strictly Block Stock CALLs if Nifty is crashing/bearish
         nifty_regime = self.get_nifty_market_regime(force_refresh=False)
-        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True) and not is_high_conviction_stock:
+        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
             return {
                 'symbol': sym_clean,
                 'passed': False,
                 'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_CALL: {nifty_regime.get('reason')}"
             }
-        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True) and not is_high_conviction_stock:
+        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
             return {
                 'symbol': sym_clean,
                 'passed': False,
@@ -613,7 +616,8 @@ class DailyAutonomousScreener:
         with ThreadPoolExecutor(max_workers=8) as executor:
             eval_results = list(executor.map(self.evaluate_asset, symbols))
 
-        stage1_passed = [r for r in eval_results if r.get('passed', False)]
+        # Elite 90% Win-Probability Gate: Only setups with Score >= 90.0 (or Indices) qualify!
+        stage1_passed = [r for r in eval_results if r.get('passed', False) and (r.get('score', 0.0) >= 90.0 or r.get('is_index', False))]
 
         # Sort ALL qualified candidates across the entire 216 universe by Win-Probability Score & Expected Move
         stage1_passed.sort(
@@ -649,13 +653,12 @@ class DailyAutonomousScreener:
             #  Stocks audited here on genuine 3-min resampled bars!)
             # -------------------------------------------------------------
             if not is_idx:
-                # Re-verify Nifty Macro Tide before evaluating stock (exempt explosive RVOL >= 2.50x)
+                # Re-verify Nifty Macro Tide before evaluating stock
                 cand_rvol = float(cand.get('rvol', 1.0))
-                is_high_conviction = (cand_rvol >= 2.50)
-                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True) and not is_high_conviction:
+                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
                     print(f"  [NIFTY REGIME BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
                     continue
-                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True) and not is_high_conviction:
+                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
                     print(f"  [NIFTY REGIME BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
                     continue
 
@@ -698,10 +701,11 @@ class DailyAutonomousScreener:
                 day_high_3m = max(float(live_q.get('high', spot)), float(stk_df['high'].max()))
                 day_low_3m = min(float(live_q.get('low', spot)), float(stk_df['low'].min())) if float(live_q.get('low', 0)) > 0 else float(stk_df['low'].min())
                 day_total_expansion = day_high_3m - day_low_3m
-                if day_total_expansion > (stock_atr * 1.35):
+                max_expansion_mult = 2.00 if cand_rvol >= 2.50 else 1.35
+                if day_total_expansion > (stock_atr * max_expansion_mult):
                     print(
                         f"  [EXHAUSTED RUNWAY REJECTED]: {sym} ({direction}) -> Day Range {day_total_expansion:.2f} pts "
-                        f"(> 135% of ATR {stock_atr:.1f} pts)"
+                        f"(> {int(max_expansion_mult*100)}% of ATR {stock_atr:.1f} pts)"
                     )
                     continue
 
