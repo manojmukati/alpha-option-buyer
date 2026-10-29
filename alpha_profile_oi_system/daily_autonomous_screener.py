@@ -45,7 +45,7 @@ from modules.telegram_notifier import TelegramNotifier
 from core.pillar5_engine import evaluate_5pillar_gate
 
 CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
-MAX_DAILY_SUPER_TRADES = 5  # Morning + Afternoon combined cap (2 to 5 Super Trades)
+MAX_DAILY_SUPER_TRADES = 8  # Balanced Slab Quota (4 Morning + 4 Afternoon = 8 Total Daily Super Trades)
 
 
 def is_in_active_trading_slab(ist_time):
@@ -306,29 +306,19 @@ class DailyAutonomousScreener:
 
                 direction = 'CALL' if b_close >= b_open else 'PUT'
 
-                max_ext = 130.0 if sym_clean in ['NIFTY', 'FINNIFTY'] else 280.0
-                if direction == 'PUT':
-                    fall_from_high = day_high - cur_p
-                    if fall_from_high >= max_ext:
-                        return {
-                            'symbol': sym_clean,
-                            'passed': False,
-                            'failed_gate': f'EXHAUSTION_TRAP_AVOIDED: Fall {fall_from_high:.1f} pts >= {max_ext:.1f} pts from Day High',
-                            'spot_price': cur_p,
-                            'score': 0.0,
-                            'is_index': True
-                        }
-                else:
-                    rise_from_low = cur_p - day_low
-                    if rise_from_low >= max_ext:
-                        return {
-                            'symbol': sym_clean,
-                            'passed': False,
-                            'failed_gate': f'EXHAUSTION_TRAP_AVOIDED: Rise {rise_from_low:.1f} pts >= {max_ext:.1f} pts from Day Low',
-                            'spot_price': cur_p,
-                            'score': 0.0,
-                            'is_index': True
-                        }
+                # PINPOINT FIX: Measure exhaustion from Local Compression Base (NOT arbitrary 130/280 pts from Day Extremes)
+                # An index with a fresh 24-min tight base can rally 300-500 pts on trending days!
+                comp_width = comp_high - comp_low
+                max_allowed_base_width = 85.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 180.0
+                if comp_width > max_allowed_base_width:
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f'COMPRESSION_BASE_TOO_WIDE: Width {comp_width:.1f} pts > {max_allowed_base_width:.1f} pts',
+                        'spot_price': cur_p,
+                        'score': 0.0,
+                        'is_index': True
+                    }
 
                 pct_chg = round(((b_close - b_open) / max(1.0, b_open)) * 100.0, 2)
                 rng = max(0.01, b_high - b_low)
@@ -456,14 +446,16 @@ class DailyAutonomousScreener:
         direction = 'CALL' if pct_chg >= 0 else 'PUT'
 
         # FLAW #3 FIX (Nifty Macro Tide Gate): Block Stock CALLs if Nifty is crashing/below 9-EMA
+        # PINPOINT FIX: If stock has explosive institutional volume (RVOL >= 2.50x), allow trade even if Nifty tide differs
+        is_high_conviction_stock = (rvol >= 2.50)
         nifty_regime = self.get_nifty_market_regime(force_refresh=False)
-        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
+        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True) and not is_high_conviction_stock:
             return {
                 'symbol': sym_clean,
                 'passed': False,
                 'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_CALL: {nifty_regime.get('reason')}"
             }
-        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
+        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True) and not is_high_conviction_stock:
             return {
                 'symbol': sym_clean,
                 'passed': False,
@@ -596,9 +588,30 @@ class DailyAutonomousScreener:
             self.notifier.send_broadcast_message(standby_msg, is_trade_signal=False)
             return
 
-        already_sent_today = len(self.dispatched_today) + len(self.index_recent_dispatch)
-        if already_sent_today >= MAX_DAILY_SUPER_TRADES and not ignore_window:
-            print(f"[DAILY SUPER-TRADE CAP REACHED]: {already_sent_today}/{MAX_DAILY_SUPER_TRADES} best trades already dispatched today.")
+        # PINPOINT FIX: Balanced Slab Allocation (Max 4 Morning + Max 4 Afternoon = 8 Total Daily Super Trades)
+        # Guarantees afternoon jackpot window (01:15-02:15 PM) is NEVER starved or blocked by morning trades!
+        is_morning = (ist_now.hour == 9 and ist_now.minute >= 30) or (ist_now.hour == 10 and ist_now.minute <= 15)
+        is_afternoon = (ist_now.hour == 13 and ist_now.minute >= 15) or (ist_now.hour == 14 and ist_now.minute <= 15)
+
+        morn_count = 0
+        aft_count = 0
+        for sym_d, ts in self.dispatched_today.items():
+            try:
+                dt = datetime.datetime.fromtimestamp(ts, tz=ist_now.tzinfo)
+                if dt.hour == 9 or (dt.hour == 10 and dt.minute <= 15):
+                    morn_count += 1
+                elif dt.hour >= 13:
+                    aft_count += 1
+            except Exception:
+                pass
+
+        MAX_SLAB_TRADES = 4
+        if is_morning and morn_count >= MAX_SLAB_TRADES and not ignore_window:
+            print(f"[MORNING SLAB CAP REACHED]: {morn_count}/{MAX_SLAB_TRADES} morning trades already dispatched. Reserving 4 slots for afternoon jackpot slab.")
+            return
+
+        if is_afternoon and aft_count >= MAX_SLAB_TRADES and not ignore_window:
+            print(f"[AFTERNOON SLAB CAP REACHED]: {aft_count}/{MAX_SLAB_TRADES} afternoon trades already dispatched.")
             return
 
         print(f"[ACTIVE SLAB REACHED]: Executing Full 216 F&O + Index Scan at {ist_time_str}...")
@@ -632,8 +645,9 @@ class DailyAutonomousScreener:
 
         # STEP 2 (DOWNSIDE): Deep Live Option Chain (-4 | 0 | +4) OI + Volume + Runway Wall & Live LTP Verification
         verified_super_trades = []
-        remaining_daily_slots = max(1, MAX_DAILY_SUPER_TRADES - already_sent_today)
-        slab_cap = min(4, remaining_daily_slots)
+        active_slab_count = morn_count if is_morning else aft_count
+        remaining_slab_slots = max(1, MAX_SLAB_TRADES - active_slab_count)
+        slab_cap = min(4, remaining_slab_slots)
 
         for cand in stage1_passed:
             if len(verified_super_trades) >= slab_cap:
@@ -650,11 +664,13 @@ class DailyAutonomousScreener:
             #  Stocks audited here on genuine 3-min resampled bars!)
             # -------------------------------------------------------------
             if not is_idx:
-                # Re-verify Nifty Macro Tide before evaluating stock
-                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
+                # Re-verify Nifty Macro Tide before evaluating stock (exempt explosive RVOL >= 2.50x)
+                cand_rvol = float(cand.get('rvol', 1.0))
+                is_high_conviction = (cand_rvol >= 2.50)
+                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True) and not is_high_conviction:
                     print(f"  [NIFTY REGIME BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
                     continue
-                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
+                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True) and not is_high_conviction:
                     print(f"  [NIFTY REGIME BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
                     continue
 
@@ -693,23 +709,23 @@ class DailyAutonomousScreener:
                     )
                     continue
 
-                # Intraday Remaining Runway Check: Ensure stock hasn't already moved > 70% of ATR from day's low/high
+                # PINPOINT FIX: Runway is measured by total day expansion vs 1.35x ATR so afternoon trend reversals/breakdowns are not prematurely choked
                 day_high_3m = max(float(live_q.get('high', spot)), float(stk_df['high'].max()))
                 day_low_3m = min(float(live_q.get('low', spot)), float(stk_df['low'].min())) if float(live_q.get('low', 0)) > 0 else float(stk_df['low'].min())
-                move_already_done = (spot - day_low_3m) if direction == 'CALL' else (day_high_3m - spot)
-                if move_already_done > (stock_atr * 0.70):
+                day_total_expansion = day_high_3m - day_low_3m
+                if day_total_expansion > (stock_atr * 1.35):
                     print(
-                        f"  [EXHAUSTED RUNWAY REJECTED]: {sym} ({direction}) -> Already moved {move_already_done:.2f} pts "
-                        f"(> 70% of ATR {stock_atr:.1f} pts)"
+                        f"  [EXHAUSTED RUNWAY REJECTED]: {sym} ({direction}) -> Day Range {day_total_expansion:.2f} pts "
+                        f"(> 135% of ATR {stock_atr:.1f} pts)"
                     )
                     continue
 
-                # FLAW #2 FIX (Live Forming Bar Reversal Check):
+                # FLAW #2 FIX (Live Forming Bar Reversal Check with 25% ATR tolerance):
                 # Current live forming candle (`iloc[-1]`) & live spot MUST hold in the trade direction (blocks Siemens/Cholafin)
                 if direction == 'CALL':
-                    live_bar_holding = (spot >= b_close) and (l_close >= l_open) and ((l_high - spot) <= (stock_atr * 0.12))
+                    live_bar_holding = (spot >= b_close) and (l_close >= l_open) and ((l_high - spot) <= (stock_atr * 0.25))
                 else:
-                    live_bar_holding = (spot <= b_close) and (l_close <= l_open) and ((spot - l_low) <= (stock_atr * 0.12))
+                    live_bar_holding = (spot <= b_close) and (l_close <= l_open) and ((spot - l_low) <= (stock_atr * 0.25))
 
                 if not live_bar_holding:
                     print(

@@ -366,12 +366,22 @@ class LiveMarketDataFeed:
         }
         ticker = yf_map.get(sym_clean, f"{sym_clean}.NS")
 
-        # 1. Primary: yfinance library with automatic session handling
-        try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            df_hist = t.history(period='5d', interval='1m')
-            if df_hist is not None and not df_hist.empty:
+        # 1. Primary: yfinance library with automatic session handling (2-Attempt Resilient Fetch)
+        df_hist = None
+        for attempt in range(2):
+            try:
+                import yfinance as yf
+                t = yf.Ticker(ticker)
+                df_hist = t.history(period='5d', interval='1m')
+                if df_hist is not None and not df_hist.empty:
+                    break
+            except Exception:
+                pass
+            if attempt == 0:
+                time.sleep(0.4)
+
+        if df_hist is not None and not df_hist.empty:
+            try:
                 df_hist.columns = [c.lower() for c in df_hist.columns]
                 # Compute 5-day average 3-minute bar volume as an institutional baseline + 9-EMA
                 df_all_3m = df_hist.resample('3min', origin='start').agg({
@@ -394,14 +404,14 @@ class LiveMarketDataFeed:
                     self._intraday_cache[sym_clean] = df_3m
                     self._intraday_ts[sym_clean] = now
                     return df_3m
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         # 2. Fallback: Yahoo Finance direct REST API
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=5d&interval=1m"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         try:
-            r = requests.get(url, headers=headers, timeout=6, verify=False)
+            r = requests.get(url, headers=headers, timeout=8, verify=False)
             if r.status_code == 200:
                 res = r.json().get('chart', {}).get('result', [])
                 if res:
