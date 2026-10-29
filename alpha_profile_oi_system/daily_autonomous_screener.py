@@ -3,7 +3,7 @@
 Alpha 5-Pillar Autonomous Daily Screener & Pure Signal Dispatched Engine
 ========================================================================
 Operating Windows (Strictly Enforced):
-  - Slab 1 (Morning):   09:15 AM to 10:15 AM IST (03:45 to 04:45 UTC)
+  - Slab 1 (Morning):   09:30 AM to 10:15 AM IST (04:00 to 04:45 UTC)
   - Slab 2 (Afternoon): 01:15 PM to 02:15 PM IST (07:45 to 08:45 UTC)
 
 Strict Rules:
@@ -51,7 +51,7 @@ MAX_DAILY_SUPER_TRADES = 8  # Balanced Slab Quota (4 Morning + 4 Afternoon = 8 T
 def is_in_active_trading_slab(ist_time):
     """
     Checks if current IST time falls strictly within designated trading slabs:
-    - Slab 1 (Morning):   09:15 AM to 10:15 AM IST (555 to 615 mins)
+    - Slab 1 (Morning):   09:30 AM to 10:15 AM IST (570 to 615 mins)
     - Slab 2 (Afternoon): 01:15 PM to 02:15 PM IST (795 to 855 mins)
     Must also be a weekday (Monday to Friday).
     """
@@ -60,7 +60,7 @@ def is_in_active_trading_slab(ist_time):
         return False
 
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (555 <= tot_mins <= 615)
+    slab1 = (570 <= tot_mins <= 615)
     slab2 = (795 <= tot_mins <= 855)
     return slab1 or slab2
 
@@ -569,16 +569,16 @@ class DailyAutonomousScreener:
 
         print(f"=======================================================")
         print(f"  ALPHA SCREENER | {ist_date_str} {ist_time_str}")
-        print(f"  Designated Slabs: 09:15-10:15 AM IST & 01:15-02:15 PM IST")
+        print(f"  Designated Slabs: 09:30-10:15 AM IST & 01:15-02:15 PM IST")
         print(f"=======================================================")
 
         if not ignore_window and not is_in_active_trading_slab(ist_now):
-            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside active trading slabs (09:15-10:15 AM & 01:15-02:15 PM IST). Maintaining complete silence.")
+            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside active trading slabs (09:30-10:15 AM & 01:15-02:15 PM IST). Maintaining complete silence.")
             return
 
         # PINPOINT FIX: Balanced Slab Allocation (Max 4 Morning + Max 4 Afternoon = 8 Total Daily Super Trades)
         # Guarantees afternoon jackpot window (01:15-02:15 PM) is NEVER starved or blocked by morning trades!
-        is_morning = (ist_now.hour == 9 and ist_now.minute >= 15) or (ist_now.hour == 10 and ist_now.minute <= 15)
+        is_morning = (ist_now.hour == 9 and ist_now.minute >= 30) or (ist_now.hour == 10 and ist_now.minute <= 15)
         is_afternoon = (ist_now.hour == 13 and ist_now.minute >= 15) or (ist_now.hour == 14 and ist_now.minute <= 15)
 
         morn_count = 0
@@ -938,7 +938,7 @@ class DailyAutonomousScreener:
     def run_live_slab_loop(self):
         print(f"=======================================================")
         print(f"  ALPHA CONTINUOUS SLAB RUNNER INITIALIZED")
-        print(f"  Designated Slabs: 09:15-10:15 AM IST & 01:15-02:15 PM IST")
+        print(f"  Designated Slabs: 09:30-10:15 AM IST & 01:15-02:15 PM IST")
         print(f"=======================================================")
 
         iteration = 1
@@ -957,9 +957,9 @@ class DailyAutonomousScreener:
                 print(f">>> [ITERATION #{iteration} COMPLETE] Sleeping 180s (3 minutes) until next scan...")
                 time.sleep(180)
                 iteration += 1
-            elif tot_mins < 555:
-                sleep_secs = min(300, (555 - tot_mins) * 60)
-                print(f"\r[STANDBY]: Pre-slab 1. Sleeping {sleep_secs}s until 09:15 AM IST...   ", end='', flush=True)
+            elif tot_mins < 570:
+                sleep_secs = min(300, (570 - tot_mins) * 60)
+                print(f"\r[STANDBY]: Pre-slab 1. Sleeping {sleep_secs}s until 09:30 AM IST...   ", end='', flush=True)
                 time.sleep(sleep_secs)
             elif 615 < tot_mins < 795:
                 rem_mins = 795 - tot_mins
