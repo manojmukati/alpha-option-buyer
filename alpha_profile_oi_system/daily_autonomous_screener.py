@@ -470,6 +470,27 @@ class DailyAutonomousScreener:
         rvol = float(q.get('rvol', 1.0))
         direction = 'CALL' if pct_chg >= 0 else 'PUT'
 
+        # Candle Rejection Wick Shield (Block Deal Buying/Selling Absorption)
+        candle_total_range = b_high - b_low
+        if candle_total_range > 0:
+            # अगर PUT ट्रेड है, लेकिन कैंडल के नीचे लंबा रिजेक्शन विक (Lower Wick > 35%) है,
+            # तो इसका मतलब संस्थागत खरीदारों ने सारा माल सोख लिया है (Absorption) - नो PUT!
+            lower_wick = min(b_open, b_close) - b_low
+            if direction == 'PUT' and (lower_wick / candle_total_range) > 0.35:
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': f'BUYING_ABSORPTION_WICK: Lower wick {lower_wick:.1f} pts is {(lower_wick/candle_total_range)*100:.0f}% of candle'
+                }
+            # अगर CALL ट्रेड है, लेकिन ऊपर लंबा रिजेक्शन विक (Upper Wick > 35%) है - नो CALL!
+            upper_wick = b_high - max(b_open, b_close)
+            if direction == 'CALL' and (upper_wick / candle_total_range) > 0.35:
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': f'SELLING_REJECTION_WICK: Upper wick {upper_wick:.1f} pts is {(upper_wick/candle_total_range)*100:.0f}% of candle'
+                }
+
         # FLAW #3 FIX (Nifty Macro Tide Gate): Strictly Block Stock CALLs if Nifty is crashing/bearish
         nifty_regime = self.get_nifty_market_regime(force_refresh=False)
         if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
@@ -485,32 +506,44 @@ class DailyAutonomousScreener:
                 'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
             }
 
-        # Gate 0: 30+ Points Move Capability (Double-Lock Institutional Shield)
-        # नियम 1: High-ATR शेयर्स (ATR >= 85) जैसे UltraCem, Amber, Supreme 100% स्वतः पास होंगे।
-        # नियम 2: Low-ATR शेयर्स (Reliance ₹1,160) केवल तभी पास होंगे जब:
-        #         (a) सुपर वॉल्यूम RVOL >= 4.0x हो, AND
-        #         (b) न्यूनतम 25.0 अंक की अनिवार्य सीमा हो: max(25.0, round(spot * 0.018, 2))
-        # इससे NBCC (₹68), Canara Bank (₹118), Tata Consumer (₹990) जैसे सस्ते शेयर्स 100% बाहर रहेंगे!
+        # Gate 0: 30+ Points Move Capability (Zero-Tolerance for Low-ATR)
+        # ऑप्शन बायर का नियम: कम से कम 30 अंक का फास्ट मूव केवल High-ATR (ATR >= 85) में संभव है।
+        # TataConsum (ATR 31), Pidilite (ATR 38), ICICI (ATR 28) जैसे सुस्त शेयर्स 100% BLOCKED!
         stock_atr = self.get_stock_atr(sym_clean, q)
-        day_range = round(b_high - b_low, 2)
-        spot_price = float(q.get('last_price', 0.0))
-
-        # डबल-लॉक: न्यूनतम 25 अंक अनिवार्य + 1.8% वास्तविक संस्थागत विस्तार फ़्लोर
-        min_required_move = max(25.0, round(spot_price * 0.018, 2))
-        is_super_expansion = (rvol >= 4.0 and day_range >= min_required_move)
-
-        if stock_atr < 85.0 and not is_super_expansion:
+        if stock_atr < 85.0:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'LOW_ATR_NO_SUPER_VOLUME (ATR {stock_atr:.1f} < 85.0 pts & Day Range {day_range:.1f} < {min_required_move:.1f} pts)'
+                'failed_gate': f'LOW_ATR_STAGNANT_TRAP: ATR {stock_atr:.1f} < 85.0 pts (Theta Decay Hazard)'
             }
 
         delta = 0.60
-        expected_opt_move = max(30.0, round(day_range if is_super_expansion else stock_atr * 0.35, 2))
+        expected_opt_move = max(30.0, round(stock_atr * 0.35, 2))
+
+        # Anti-Climax Parabolic Exhaustion Shield (TataElxsi Top-Buying Trap)
+        # अगर शेयर अपनी 3-मिनट 9-EMA से पहले ही बहुत दूर (Over-Extended) भाग चुका है,
+        # तो उस कैंडल के पीक (Exact Top) पर CALL या बॉटम पर PUT लेना 100% ब्लॉक!
+        spot_price = float(q.get('live_spot', cur_p))
+        ema9_val = float(q.get('ema9', 0.0))
+        if ema9_val > 0:
+            dist_from_ema = spot_price - ema9_val
+            if direction == 'CALL' and dist_from_ema > (stock_atr * 0.35):
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': f'PARABOLIC_CLIMAX_TOP: Extended {dist_from_ema:.1f} pts > 0.35x ATR from 9-EMA'
+                }
+            if direction == 'PUT' and (-dist_from_ema) > (stock_atr * 0.35):
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': f'PARABOLIC_CLIMAX_BOTTOM: Extended {-dist_from_ema:.1f} pts > 0.35x ATR below 9-EMA'
+                }
+
+        day_range = round(b_high - b_low, 2)
         # Anti-Exhaustion Shield: RVOL >= 2.50x gets 2.00x ATR expansion; standard gets 1.35x ATR
         max_expansion = (stock_atr * 2.00) if rvol >= 2.50 else (stock_atr * 1.35)
-        if day_range > max_expansion and not is_super_expansion:
+        if day_range > max_expansion:
             return {
                 'symbol': sym_clean,
                 'passed': False,
@@ -522,7 +555,7 @@ class DailyAutonomousScreener:
         ist_now = get_ist_time()
         is_morning = ist_now.hour < 12
         min_rng_pct = 0.35 if is_morning else 0.60
-        if day_range < (stock_atr * min_rng_pct) and not is_super_expansion:
+        if day_range < (stock_atr * min_rng_pct):
             return {
                 'symbol': sym_clean,
                 'passed': False,
