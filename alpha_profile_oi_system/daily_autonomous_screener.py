@@ -109,8 +109,7 @@ class DailyAutonomousScreener:
                 with open(self.dispatched_cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     if data.get('date') == today_str:
-                        raw_dict = data.get('dispatched', {})
-                        return {k: v for k, v in raw_dict.items() if not k.startswith(indices_prefixes)}
+                        return data.get('dispatched', {})
             except Exception:
                 pass
         return {}
@@ -118,29 +117,23 @@ class DailyAutonomousScreener:
     def _save_dispatched_cache(self):
         ist_now = get_ist_time()
         today_str = ist_now.strftime('%Y-%m-%d')
-        indices_prefixes = ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50')
-        stock_only = {k: v for k, v in self.dispatched_today.items() if not k.startswith(indices_prefixes)}
         try:
             os.makedirs(os.path.dirname(self.dispatched_cache_file), exist_ok=True)
             with open(self.dispatched_cache_file, 'w', encoding='utf-8') as f:
-                json.dump({'date': today_str, 'dispatched': stock_only}, f, indent=2)
+                json.dump({'date': today_str, 'dispatched': self.dispatched_today}, f, indent=2)
         except Exception:
             pass
 
     def is_already_dispatched(self, symbol, contract=''):
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+        last_ts = self.dispatched_today.get(sym_clean, 0.0)
         if sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50']:
-            last_ts = self.index_recent_dispatch.get(sym_clean, 0.0)
             return (time.time() - last_ts) < 2100.0
 
         return sym_clean in self.dispatched_today
 
     def mark_dispatched(self, symbol, contract=''):
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-        if sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50']:
-            self.index_recent_dispatch[sym_clean] = time.time()
-            return
-
         self.dispatched_today[sym_clean] = time.time()
         self._save_dispatched_cache()
 
@@ -194,24 +187,40 @@ class DailyAutonomousScreener:
             down_from_open = (nifty_spot < day_open - 15.0)
             up_from_open = (nifty_spot > day_open + 15.0)
 
-            # Block Stock CALLs if NIFTY is in the red from open, below 9-EMA, or dropping >= 50 pts
-            if prev_3m_red or below_ema9 or down_from_open or (drop_from_high >= 50.0 and live_3m_red):
-                allow_call = False
-                reason = (
-                    f"NIFTY_BEARISH_OR_CRASH_REGIME (Spot {nifty_spot:.1f} vs 9-EMA {ema9:.1f} | "
-                    f"DownFromOpen={down_from_open} | Prev3mRed={prev_3m_red} | DropFromHigh=-{drop_from_high:.1f} pts)"
-                )
+            # NIFTY INTRADAY CHOP / COMPRESSION FILTER
+            # यदि पिछले 6 बार (18 मिनट) में निफ्टी की हाई-लो रेंज < 30 अंक हो और 9-EMA फ्लैट हो,
+            # तो मार्केट साइडवेज़ ट्रैप में है — सभी ब्रेकआउट्स ब्लॉक रहेंगे!
+            is_nifty_choppy = False
+            if len(ndf) >= 6:
+                recent_6 = ndf.tail(6)
+                recent_rng = float(recent_6['high'].max() - recent_6['low'].min())
+                ema_distance = abs(nifty_spot - ema9)
+                if recent_rng < 30.0 and ema_distance <= 10.0:
+                    is_nifty_choppy = True
 
-            # Block Stock PUTs on strong active rally above 9-EMA or in strong green day
-            prev_3m_strong_green = (n_close - n_open) >= 15.0
-            live_3m_green = (l_close >= l_open) and (nifty_spot >= n_close)
-            above_ema9_strong = (nifty_spot > (ema9 + 15.0))
-            if above_ema9_strong or up_from_open or (prev_3m_strong_green and live_3m_green and rise_from_low >= 60.0):
+            if is_nifty_choppy:
+                allow_call = False
                 allow_put = False
-                reason = (
-                    f"NIFTY_STRONG_RALLY_REGIME (Spot {nifty_spot:.1f} > 9-EMA {ema9:.1f} | "
-                    f"UpFromOpen={up_from_open} | RiseFromLow=+{rise_from_low:.1f} pts)"
-                )
+                reason = f"NIFTY_SIDEWAYS_CHOP_TRAP (18m Range {recent_rng:.1f} pts < 30 pts | Spot within {ema_distance:.1f} pts of 9-EMA)"
+            else:
+                # Block Stock CALLs if NIFTY is in the red from open, below 9-EMA, or dropping >= 50 pts
+                if prev_3m_red or below_ema9 or down_from_open or (drop_from_high >= 50.0 and live_3m_red):
+                    allow_call = False
+                    reason = (
+                        f"NIFTY_BEARISH_OR_CRASH_REGIME (Spot {nifty_spot:.1f} vs 9-EMA {ema9:.1f} | "
+                        f"DownFromOpen={down_from_open} | Prev3mRed={prev_3m_red} | DropFromHigh=-{drop_from_high:.1f} pts)"
+                    )
+
+                # Block Stock PUTs on strong active rally above 9-EMA or in strong green day
+                prev_3m_strong_green = (n_close - n_open) >= 15.0
+                live_3m_green = (l_close >= l_open) and (nifty_spot >= n_close)
+                above_ema9_strong = (nifty_spot > (ema9 + 15.0))
+                if above_ema9_strong or up_from_open or (prev_3m_strong_green and live_3m_green and rise_from_low >= 60.0):
+                    allow_put = False
+                    reason = (
+                        f"NIFTY_STRONG_RALLY_REGIME (Spot {nifty_spot:.1f} > 9-EMA {ema9:.1f} | "
+                        f"UpFromOpen={up_from_open} | RiseFromLow=+{rise_from_low:.1f} pts)"
+                    )
         elif nq and nifty_spot > 0:
             drop_from_high = round(nifty_high - nifty_spot, 2)
             p_chg = float(nq.get('pct_change', 0.0))
@@ -228,15 +237,13 @@ class DailyAutonomousScreener:
         return self.nifty_regime_cache
 
     def get_stock_atr(self, symbol, q):
-        atr14 = float(self.atr_cache.get(symbol, 0.0))
-        if atr14 > 0:
-            return atr14
+        cur_p = float(q.get('live_spot', 0))
         h = float(q.get('high', 0))
         l = float(q.get('low', 0))
-        cur_p = float(q.get('live_spot', 0))
         day_rng = round(h - l, 2) if h > 0 and l > 0 else 0.0
         est_atr = round(cur_p * 0.028, 2) if cur_p > 0 else 0.0
-        return max(day_rng, est_atr)
+        cached_atr = float(self.atr_cache.get(symbol, 0.0))
+        return max(cached_atr, day_rng, est_atr)
 
     def evaluate_asset(self, sym_meta, verify_oi_now=False):
         """
@@ -266,6 +273,8 @@ class DailyAutonomousScreener:
         # 1. INDEX-SPECIFIC EVALUATION (35-Minute Compression Breakout Priority)
         # =====================================================================
         if is_idx:
+            # 13:45 का कृत्रिम कटऑफ हटा दिया गया है। इंडेक्स दोनों स्लैब्स (Morning 09:30-10:15 और Afternoon 01:15-02:15) में ट्रेड हो सकते हैं।
+
             idx_df = self.data_feed.get_live_intraday_bars(sym_clean)
             is_breakout = False
             cum_mom_ok = False
@@ -332,11 +341,15 @@ class DailyAutonomousScreener:
                 up_wick = round((b_high - max(b_open, b_close)) / rng, 2)
                 dn_wick = round((min(b_open, b_close) - b_low) / rng, 2)
                 clv = round((b_close - b_low) / rng, 2)
-                clv_ok = (clv >= 0.72) if direction == 'CALL' else (clv <= 0.28)
+                clv_ok = (clv >= 0.75) if direction == 'CALL' else (clv <= 0.25)
                 wick_ok = (up_wick <= 0.20) if direction == 'CALL' else (dn_wick <= 0.20)
-                single_mom_ok = (solid_body_ratio >= 0.40) and wick_ok and clv_ok
+                # ---------------------------------------------------------
+                # मोड 1: फास्ट मार्केट (1 कैंडल मारुबोज़ू ब्लास्ट: Nifty >= 40 pts, BankNifty >= 90 pts)
+                # ---------------------------------------------------------
+                min_fast_bar_pts = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
+                single_mom_ok = (solid_body_ratio >= 0.60) and wick_ok and clv_ok and (rng >= min_fast_bar_pts)
 
-                idx_dist_buffer = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY'] else 90.0
+                idx_dist_buffer = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
                 if direction == 'CALL':
                     if (b_close >= comp_high) and (b_close <= comp_high + idx_dist_buffer):
                         is_breakout = True
@@ -344,7 +357,10 @@ class DailyAutonomousScreener:
                     if (b_close <= comp_low) and (b_close >= comp_low - idx_dist_buffer):
                         is_breakout = True
 
-                # Multi-candle cumulative breakout uses base prior to the 2/3-candle sequence
+                # ---------------------------------------------------------
+                # मोड 2: स्लो मार्केट (2 से 3 कैंडल संस्थागत ग्राइंड: Nifty 50-75 pts, BankNifty 110-160 pts)
+                # ---------------------------------------------------------
+                cum_mom_ok = False
                 if len(idx_df) >= 5:
                     b_prev1 = idx_df.iloc[-3]
                     b_prev2 = idx_df.iloc[-4]
@@ -361,7 +377,10 @@ class DailyAutonomousScreener:
                     broke_range_low = ((b_close <= comp_low) and (b_close >= comp_low - idx_dist_buffer)) or \
                                      ((b_close <= seq_comp_low) and (b_close >= seq_comp_low - idx_dist_buffer))
 
-                    if (all_3_red and cum_fall_3_pct >= 0.25 and broke_range_low) or (last_2_red and cum_fall_2_pct >= 0.20 and broke_range_low):
+                    min_idx_2bar_pct = 0.22
+                    min_idx_3bar_pct = 0.32
+
+                    if (all_3_red and cum_fall_3_pct >= min_idx_3bar_pct and broke_range_low) or (last_2_red and cum_fall_2_pct >= min_idx_2bar_pct and broke_range_low):
                         direction = 'PUT'
                         cum_mom_ok = True
                         is_breakout = True
@@ -376,7 +395,7 @@ class DailyAutonomousScreener:
                     broke_range_high = ((b_close >= comp_high) and (b_close <= comp_high + idx_dist_buffer)) or \
                                       ((b_close >= seq_comp_high) and (b_close <= seq_comp_high + idx_dist_buffer))
 
-                    if (all_3_green and cum_rise_3_pct >= 0.25 and broke_range_high) or (last_2_green and cum_rise_2_pct >= 0.20 and broke_range_high):
+                    if (all_3_green and cum_rise_3_pct >= min_idx_3bar_pct and broke_range_high) or (last_2_green and cum_rise_2_pct >= min_idx_2bar_pct and broke_range_high):
                         direction = 'CALL'
                         cum_mom_ok = True
                         is_breakout = True
@@ -394,13 +413,13 @@ class DailyAutonomousScreener:
                 else:
                     prior_rng = (comp_bars['high'] - comp_bars['low']).mean()
                     idx_rvol = round(rng / max(0.5, prior_rng), 2) if prior_rng > 0 else 2.50
-                    idx_rvol_pass = (idx_rvol >= 1.50) or cum_mom_ok
+                # इंडेक्स के लिए संस्थागत विस्फोट अनिवार्य (कम से कम 2.20x वॉल्यूम/रेंज एक्सपेंशन)
+                idx_rvol_pass = (idx_rvol >= 2.20)
 
                 candle_cvd = round((2.0 * clv) - 1.0, 2)
                 idx_cvd = candle_cvd
                 idx_cvd_pass = (idx_cvd >= 0.45) if direction == 'CALL' else (idx_cvd <= -0.45)
-                if cum_mom_ok:
-                    idx_cvd_pass = True
+                # डायरेक्ट बायर/सेलर आक्रामकता (+/- 0.45) अनिवार्य — कोई बाईपास नहीं!
 
                 stage1_pass = cand_mom_pass and idx_rvol_pass and idx_cvd_pass
                 oi_confluent = True
@@ -412,7 +431,8 @@ class DailyAutonomousScreener:
                     oi_reason = oi_conf.get('reason', '')
 
                 passed = stage1_pass and oi_confluent
-                score = 98.0 if passed else 50.0
+                # इंडेक्स को 98.0 का अंधा स्कोर देने के बजाय वास्तविक ब्रेकआउट स्ट्रेंथ पर स्कोर दें
+                score = round(min(99.0, 75.0 + min(15.0, idx_rvol * 5.0) + (10.0 if abs(idx_cvd) >= 0.60 else 5.0)), 2) if passed else 50.0
 
             else:
                 return {
@@ -465,35 +485,76 @@ class DailyAutonomousScreener:
                 'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
             }
 
-        # Gate 0: Mathematical Expected Option Move >= 30.0 Pts
+        # Gate 0: Mandatory 30+ Points Move Capability (Low-ATR < 85.0 pts 100% Blocked)
         stock_atr = self.get_stock_atr(sym_clean, q)
+        if stock_atr < 85.0:
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f'LOW_ATR_CANNOT_DELIVER_30_PTS (ATR {stock_atr:.1f} < 85.0 pts)'
+            }
         delta = 0.60
-        expected_opt_move = round(stock_atr * delta, 2)
-        if expected_opt_move < 30.0:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'GATE_0_EXPECTED_OPTION_MOVE_BELOW_30_PTS ({expected_opt_move:.1f} < 30.0)'
-            }
-
-        # Anti-Exhaustion Shield: Allow up to 1.15x ATR so afternoon trenders (1:15 PM) are not prematurely choked
+        expected_opt_move = max(30.0, round(stock_atr * 0.35, 2))
+        # Anti-Exhaustion Shield: RVOL >= 2.50x gets 2.00x ATR expansion; standard gets 1.35x ATR
         day_range = round(b_high - b_low, 2)
-        if day_range > (stock_atr * 1.15):
+        max_expansion = (stock_atr * 2.00) if rvol >= 2.50 else (stock_atr * 1.35)
+        if day_range > max_expansion:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'STOCK_MOVE_ALREADY_EXHAUSTED ({day_range:.1f} > 1.15x ATR {stock_atr * 1.15:.1f} pts)'
+                'failed_gate': f'STOCK_MOVE_ALREADY_EXHAUSTED ({day_range:.1f} > {max_expansion:.1f} pts)'
             }
 
-        # Require meaningful intraday directional activity to enter Stage-2 3-min candle audit
-        if abs(pct_chg) < 0.20:
+        # नियम B: टाइम-अडैप्टिव एंटी-साइडवेज़ फ़िल्टर (Dead Sideways Chop Shield)
+        # सुबह (09:30 - 10:15): कम से कम 35% ATR रेंज बनी होनी चाहिए
+        # दोपहर (01:15 - 02:15): कम से कम 60% ATR रेंज बनी होनी चाहिए (वरना मारुति जैसा साइडवेज़ चॉप है)
+        ist_now = get_ist_time()
+        is_morning = ist_now.hour < 12
+        min_rng_pct = 0.35 if is_morning else 0.60
+        if day_range < (stock_atr * min_rng_pct) and rvol < 5.0:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'FLAT_STOCK_NO_MOMENTUM ({pct_chg:+.2f}%)'
+                'failed_gate': f'DEAD_SIDEWAYS_CHOP (Day Range {day_range:.1f} < {int(min_rng_pct*100)}% ATR {stock_atr * min_rng_pct:.1f} pts)'
             }
 
-        score = round(min(99.0, 70.0 + abs(pct_chg) * 5.0 + min(15.0, rvol * 3.0)), 2)
+        # नियम #1: न्यूनतम 0.50% प्रतिशत चाल फ़्लोर (Micro-Move & Theta-Decay Trap Shield)
+        # ऑप्शन बाइंग में थीटा डीके को हराने के लिए कम से कम 0.50% की वास्तविक चाल अनिवार्य है
+        if abs(pct_chg) < 0.50:
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f'SUB_EXPANSION_THETA_TRAP: Intraday move {pct_chg:+.2f}% < 0.50% minimum threshold'
+            }
+
+        # नियम #2: मॉर्निंग रन-अवे चेज़िंग एग्जॉशन कैप (Anti-Chasing Cap)
+        # सुबह 09:30 - 10:15 के बीच जो शेयर पहले ही 3.50% से ज्यादा भाग चुके हैं (जैसे KEI -6.2%, PowerIndia -4.1%),
+        # उनका पीछा करना 'ट्रेन छूटने के बाद दौड़ना' है — उन्हें सुबह 100% ब्लॉक करें!
+        if is_morning and abs(pct_chg) > 3.50:
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f'MORNING_MOVE_ALREADY_EXHAUSTED ({pct_chg:+.2f}% > 3.50% in morning slab)'
+            }
+
+        # नियम #4: दिन में 5.0% से ज्यादा भागे शेयर्स पर नो-एंट्री (Anti-FOMO Top Chasing Cap)
+        # जो स्टॉक दिनभर में पहले ही 5.0% से ज्यादा भाग चुका है (जैसे Mankind +7.02%), उसके टॉप पर कॉल या बॉटम पर पुट लेना ट्रैप है
+        if abs(pct_chg) >= 5.0:
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f'PARABOLIC_MOVE_EXHAUSTED (Move {pct_chg:+.2f}% >= 5.0% day move cap)'
+            }
+
+        # बेस 40 से शुरू: प्राइस वेलोसिटी + संस्थागत RVOL + ऑर्डर फ्लो CVD का वास्तविक संगम
+        base_score = 40.0
+        mom_pts = min(25.0, abs(pct_chg) * 7.0)          # मजबूत प्राइस मोमेंटम (कम से कम 3% मूव)
+        vol_pts = min(25.0, (rvol - 1.0) * 8.0) if rvol > 1.0 else 0.0  # संस्थागत वॉल्यूम (RVOL >= 2.8x होने पर ही पूरे 15+ अंक)
+        cvd_pts = 10.0 if (abs(delta) >= 0.35) else 0.0 # आक्रामक बायर/सेलर ऑर्डर फ्लो का दबदबा
+        score = round(min(99.0, base_score + mom_pts + vol_pts + cvd_pts), 2)
+        # नियम A: संस्थागत सुपर-वॉल्यूम (RVOL >= 5.0x और मजबूत दिशा >= 0.50%) होने पर सीधे 95.0 का एलिट स्कोर दें
+        if rvol >= 5.0 and abs(pct_chg) >= 0.50:
+            score = max(score, 95.0)
 
         return {
             'symbol': sym_clean,
@@ -617,7 +678,16 @@ class DailyAutonomousScreener:
             eval_results = list(executor.map(self.evaluate_asset, symbols))
 
         # Elite 90% Win-Probability Gate: Only setups with Score >= 90.0 (or Indices) qualify!
-        stage1_passed = [r for r in eval_results if r.get('passed', False) and (r.get('score', 0.0) >= 90.0 or r.get('is_index', False))]
+        # Elite 90% Win-Probability Gate: Only setups with Score >= 88.0 qualify!
+        # सिर्फ वही सेटअप्स पास होंगे जिनका वास्तविक संस्थागत स्कोर >= 91.0 होगा (केवल शीर्ष 12-14 जैकपॉट ट्रेड्स)
+        # नियम A: स्कोर >= 91.0 हो या फिर संस्थागत RVOL >= 5.0x और दिशा >= 0.50% हो, तो सीधे स्टेज-2 में पास करें
+        stage1_passed = [
+            r for r in eval_results 
+            if r.get('passed', False) and (
+                r.get('score', 0.0) >= 91.0 or 
+                (float(r.get('rvol', 0.0)) >= 5.0 and abs(float(r.get('pct_change', 0.0))) >= 0.50)
+            )
+        ]
 
         # Sort ALL qualified candidates across the entire 216 universe by Win-Probability Score & Expected Move
         stage1_passed.sort(
@@ -638,6 +708,30 @@ class DailyAutonomousScreener:
         remaining_slab_slots = max(1, MAX_SLAB_TRADES - active_slab_count)
         slab_cap = min(4, remaining_slab_slots)
 
+        # नियम: प्रति स्लैब केवल 1 बेस्ट इंडेक्स ट्रेड (Morning Trend + Afternoon Reversal दोनों को अनुमति)
+        # सुबह (09:30-10:15) में 1 बेस्ट इंडेक्स और दोपहर (01:15-02:15) में 1 बेस्ट इंडेक्स मान्य होगा।
+        # एक ही स्कैन साइकिल/मिनट में 3-4 इंडेक्स का क्लस्टर कभी नहीं जाएगा (केवल #1 बेस्ट स्कोर वाला जाएगा)।
+        index_names = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
+        
+        has_index_in_active_slab = False
+        for idx in index_names:
+            last_ts = self.dispatched_today.get(idx, 0.0)
+            if last_ts > 0:
+                try:
+                    dt = datetime.datetime.fromtimestamp(last_ts, tz=ist_now.tzinfo)
+                    # यदि वर्तमान स्लैब सुबह का है और सुबह कोई इंडेक्स गया है:
+                    if is_morning and (dt.hour == 9 or (dt.hour == 10 and dt.minute <= 15)):
+                        has_index_in_active_slab = True
+                        break
+                    # यदि वर्तमान स्लैब दोपहर का है और दोपहर में कोई इंडेक्स जा चुका है:
+                    elif is_afternoon and (dt.hour >= 13):
+                        has_index_in_active_slab = True
+                        break
+                except Exception:
+                    pass
+
+        has_index_in_this_cycle = False
+
         for cand in stage1_passed:
             if len(verified_super_trades) >= slab_cap:
                 break
@@ -646,6 +740,11 @@ class DailyAutonomousScreener:
             spot = cand['spot_price']
             direction = cand['direction']
             is_idx = cand.get('is_index', False)
+
+            # यदि वर्तमान सत्र में 1 इंडेक्स जा चुका है, या इस स्कैन में 1 इंडेक्स चुना जा चुका है, तो दूसरे इंडेक्स को छोड़ें
+            if is_idx and (has_index_in_active_slab or has_index_in_this_cycle):
+                print(f"  [PER_SLAB_INDEX_EXCLUSIVE]: {sym} bypassed. Active slab already has 1 Top Index.")
+                continue
 
             # -------------------------------------------------------------
             # STAGE 2A: 5-PILLAR REAL 3-MINUTE INTRADAY CANDLE & BREAKOUT AUDIT
@@ -709,6 +808,25 @@ class DailyAutonomousScreener:
                     )
                     continue
 
+                # नियम B: स्टेज-2 में भी टाइम-अडैप्टिव एंटी-साइडवेज़ फ़िल्टर
+                min_rng_pct_stage2 = 0.35 if is_morning else 0.60
+                if day_total_expansion < (stock_atr * min_rng_pct_stage2) and cand_rvol < 5.0:
+                    print(
+                        f"  [DEAD_SIDEWAYS_CHOP REJECTED]: {sym} ({direction}) -> Day Range {day_total_expansion:.2f} pts "
+                        f"(< {int(min_rng_pct_stage2*100)}% of ATR {stock_atr*min_rng_pct_stage2:.1f} pts)"
+                    )
+                    continue
+
+                # नियम #1: काउंटर-ट्रेंड ब्लॉक (Counter-Trend Shield)
+                # यदि स्टॉक दिनभर लाल (pct_chg < 0) है तो CALL कभी नहीं, और यदि हरा (pct_chg > 0) है तो PUT कभी नहीं
+                day_pct = float(cand.get('pct_change', 0.0))
+                if direction == 'CALL' and day_pct < 0:
+                    print(f"  [COUNTER_TREND_BLOCKED]: {sym} (CALL) rejected because stock is in red ({day_pct:+.2f}%)")
+                    continue
+                if direction == 'PUT' and day_pct > 0:
+                    print(f"  [COUNTER_TREND_BLOCKED]: {sym} (PUT) rejected because stock is in green ({day_pct:+.2f}%)")
+                    continue
+
                 # FLAW #2 FIX: Live Forming Bar Reversal Check with 10% ATR spot buffer & 25% ATR wick tolerance
                 # Allows healthy 0.05% bid-ask tick variance so valid breakouts (Trent, Siemens) are not killed
                 spot_buffer = stock_atr * 0.10
@@ -734,15 +852,22 @@ class DailyAutonomousScreener:
                 comp_low = float(comp_bars['low'].min())
                 max_dist_buffer = stock_atr * 0.20
 
-                # Pillar 1A: Single 3-Minute Candle Blast Momentum (Anchored within 20% ATR from Base)
+                # ---------------------------------------------------------
+                # मोड 1: फास्ट मार्केट (1 कैंडल मारुबोज़ू ब्लास्ट: कम से कम 15 अंक का सिंगल बार)
+                # ---------------------------------------------------------
+                min_stock_blast_pts = max(15.0, stock_atr * 0.15)
                 if direction == 'CALL':
-                    single_mom_ok = (b_close >= b_open) and (clv >= 0.72) and (up_wick <= 0.20) and (solid_body_ratio >= 0.40)
+                    single_mom_ok = (b_close >= b_open) and (clv >= 0.75) and (up_wick <= 0.20) and \
+                                    (solid_body_ratio >= 0.60) and (rng >= min_stock_blast_pts)
                     broke_comp = (b_close >= comp_high) and (b_close <= comp_high + max_dist_buffer)
                 else:
-                    single_mom_ok = (b_close <= b_open) and (clv <= 0.28) and (dn_wick <= 0.20) and (solid_body_ratio >= 0.40)
+                    single_mom_ok = (b_close <= b_open) and (clv <= 0.25) and (dn_wick <= 0.20) and \
+                                    (solid_body_ratio >= 0.60) and (rng >= min_stock_blast_pts)
                     broke_comp = (b_close <= comp_low) and (b_close >= comp_low - max_dist_buffer)
 
-                # Pillar 1B: Dual & Triple Candle Cumulative Momentum (Slow Grinding Move Support within 20% ATR)
+                # ---------------------------------------------------------
+                # मोड 2: स्लो मार्केट (2 या 3 कैंडल संस्थागत ग्राइंड: 2 कैंडल >= 0.40% या 3 कैंडल >= 0.60%)
+                # ---------------------------------------------------------
                 cum_mom_ok = False
                 if len(stk_df) >= 5:
                     b_prev1 = stk_df.iloc[-3]
@@ -756,7 +881,7 @@ class DailyAutonomousScreener:
                         all_3_green = (float(b_prev2['close']) >= float(b_prev2['open']) and last_2_green)
                         cum_rise_2_pct = ((b_close - float(b_prev1['open'])) / float(b_prev1['open'])) * 100.0
                         cum_rise_3_pct = ((b_close - float(b_prev2['open'])) / float(b_prev2['open'])) * 100.0
-                        cum_mom_ok = (all_3_green and cum_rise_3_pct >= 0.25) or (last_2_green and cum_rise_2_pct >= 0.20)
+                        cum_mom_ok = (all_3_green and cum_rise_3_pct >= 0.60) or (last_2_green and cum_rise_2_pct >= 0.40)
                         if cum_mom_ok and (b_close >= seq_comp_high) and (b_close <= seq_comp_high + max_dist_buffer):
                             broke_comp = True
                     else:
@@ -764,7 +889,7 @@ class DailyAutonomousScreener:
                         all_3_red = (float(b_prev2['close']) <= float(b_prev2['open']) and last_2_red)
                         cum_fall_2_pct = ((float(b_prev1['open']) - b_close) / float(b_prev1['open'])) * 100.0
                         cum_fall_3_pct = ((float(b_prev2['open']) - b_close) / float(b_prev2['open'])) * 100.0
-                        cum_mom_ok = (all_3_red and cum_fall_3_pct >= 0.25) or (last_2_red and cum_fall_2_pct >= 0.20)
+                        cum_mom_ok = (all_3_red and cum_fall_3_pct >= 0.60) or (last_2_red and cum_fall_2_pct >= 0.40)
                         if cum_mom_ok and (b_close <= seq_comp_low) and (b_close >= seq_comp_low - max_dist_buffer):
                             broke_comp = True
 
@@ -773,7 +898,8 @@ class DailyAutonomousScreener:
                     print(f"  [5-PILLAR 3M CANDLE REJECTED]: {sym} ({direction}) -> SingleMom={single_mom_ok}, CumMom={cum_mom_ok}, BrokeComp={broke_comp}")
                     continue
 
-                # Pillar 2: Real 3-Minute Institutional Volume (RVOL >= 1.80x Mandatory - Zero Bypass)
+                # अडैप्टिव RVOL: फास्ट ब्लास्ट (1 कैंडल) के लिए 3.50x अनिवार्य,
+                # स्लो ग्राइंड (2-3 कैंडल) के लिए 2.80x पर्याप्त (चूँकि वॉल्यूम 3 कैंडल में बंटा है)
                 hist_base_v = float(stk_df['hist_avg_3m_vol'].iloc[-1]) if 'hist_avg_3m_vol' in stk_df.columns else 0.0
                 prior_10_v = float(stk_df['volume'].iloc[:-2].tail(10).mean()) if len(stk_df) > 2 else 0.0
                 base_3m_v = hist_base_v if hist_base_v > 0 else prior_10_v
@@ -782,16 +908,19 @@ class DailyAutonomousScreener:
                     curr_3m_v = max(curr_3m_v, float(stk_df.iloc[-3].get('volume', 0.0)))
                 real_3m_rvol = round(curr_3m_v / max(1.0, base_3m_v), 2) if base_3m_v > 0 else cand.get('rvol', 2.5)
                 cand['rvol'] = real_3m_rvol
-                if real_3m_rvol < 1.80:
-                    print(f"  [3M RVOL REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < 1.80x (No Institutional Volume)")
+                min_rvol_req = 2.80 if cum_mom_ok else 3.50
+                if real_3m_rvol < min_rvol_req:
+                    print(f"  [INSTITUTIONAL_RVOL_REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < {min_rvol_req:.2f}x (Insufficient Momentum)")
                     continue
 
                 # Pillar 3: Real 3-Minute Order Flow CVD Delta Verification
                 bar_cvd = round((2.0 * clv) - 1.0, 2)
                 cand['bar_cvd'] = bar_cvd
-                cvd_pass = (bar_cvd >= 0.40) if direction == 'CALL' else (bar_cvd <= -0.40)
-                if not cvd_pass and not cum_mom_ok:
-                    print(f"  [3M CVD REJECTED]: {sym} ({direction}) -> Bar CVD {bar_cvd:+.2f} fails directional aggression threshold (+/-0.40)")
+                # नियम #2: CVD दिशा अनिवार्य (कोई बाईपास नहीं!)
+                # कॉल के लिए Bar CVD >= +0.35 और पुट के लिए Bar CVD <= -0.35 अनिवार्य
+                cvd_pass = (bar_cvd >= 0.35) if direction == 'CALL' else (bar_cvd <= -0.35)
+                if not cvd_pass:
+                    print(f"  [3M CVD REJECTED]: {sym} ({direction}) -> Bar CVD {bar_cvd:+.2f} fails directional alignment (+/-0.35)")
                     continue
 
             # -------------------------------------------------------------
@@ -816,6 +945,8 @@ class DailyAutonomousScreener:
             cand['oi_reason'] = oi_conf.get('reason', '')
             cand['verified_opt'] = opt
             verified_super_trades.append(cand)
+            if is_idx:
+                has_index_in_this_cycle = True
 
         if not verified_super_trades:
             print("[SCREENER]: 0 signals qualified after full 216 scan & live OI audit. Dispatching 1 status update to BOT only.")
@@ -857,17 +988,21 @@ class DailyAutonomousScreener:
 
             if is_idx:
                 if sym == 'NIFTY':
-                    t1_pts = round(sl_pts * 1.5, 2)
-                    t2_pts = round(sl_pts * 3.5, 2)
-                    target_note = "+100 to +150 pts Spot Target Move"
+                    t1_pts = 80.0
+                    t2_pts = 130.0
+                    target_note = "+80 to +130 pts Spot Target Move"
                 elif sym == 'BANKNIFTY':
-                    t1_pts = round(sl_pts * 2.0, 2)
-                    t2_pts = round(sl_pts * 4.0, 2)
-                    target_note = "+150 to +200 pts Spot Target Move"
-                else:
-                    t1_pts = round(sl_pts * 1.5, 2)
-                    t2_pts = round(sl_pts * 3.5, 2)
-                    target_note = "+80 to +120 pts Spot Target Move"
+                    t1_pts = 150.0
+                    t2_pts = 250.0
+                    target_note = "+150 to +250 pts Spot Target Move"
+                elif sym == 'FINNIFTY':
+                    t1_pts = 80.0
+                    t2_pts = 130.0
+                    target_note = "+80 to +130 pts Spot Target Move"
+                else: # MIDCPNIFTY
+                    t1_pts = 45.0
+                    t2_pts = 75.0
+                    target_note = "+45 to +75 pts Spot Target Move"
             else:
                 t1_pts = round(sl_pts * 2.0, 2)
                 t2_pts = max(30.0, round(sl_pts * 4.0, 2))

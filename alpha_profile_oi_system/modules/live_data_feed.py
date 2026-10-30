@@ -475,17 +475,29 @@ class LiveMarketDataFeed:
             if (time.time() - self._last_oc_fetch.get(sym_clean, 0.0) < 45.0) and (sym_clean in self._oc_cache):
                 return self._oc_cache[sym_clean]
 
-            # 1. Fetch Contract Info to identify current live Expiry Date
+            # 1. Fetch Contract Info to identify current live Expiry Date (with 3-attempt resilient retry)
             info_url = NSE_OC_INFO_URL.format(symbol=sym_clean)
-            info_data = _safe_nse_fetch(info_url, origin_url=NSE_OC_PAGE_URL)
+            info_data = None
+            for attempt in range(3):
+                info_data = _safe_nse_fetch(info_url, origin_url=NSE_OC_PAGE_URL)
+                if info_data and info_data.get('expiryDates'):
+                    break
+                time.sleep(0.5)
+
             if not info_data or not info_data.get('expiryDates'):
                 return None
             curr_expiry = info_data.get('expiryDates')[0]
 
-            # 2. Fetch Live Option Chain v3 payload for current expiry
+            # 2. Fetch Live Option Chain v3 payload for current expiry (with 3-attempt resilient retry)
             oc_url = NSE_OC_V3_URL.format(type=type_str, symbol=sym_clean, expiry=curr_expiry)
-            time.sleep(0.35)
-            oc_data = _safe_nse_fetch(oc_url, origin_url=NSE_OC_PAGE_URL)
+            oc_data = None
+            for attempt in range(3):
+                time.sleep(0.35)
+                oc_data = _safe_nse_fetch(oc_url, origin_url=NSE_OC_PAGE_URL)
+                if oc_data and 'records' in oc_data:
+                    break
+                time.sleep(0.5)
+
             if oc_data and 'records' in oc_data:
                 oc_data['records']['expiryDates'] = [curr_expiry]
                 self._oc_cache[sym_clean] = oc_data
