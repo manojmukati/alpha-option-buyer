@@ -949,20 +949,7 @@ class DailyAutonomousScreener:
                 has_index_in_this_cycle = True
 
         if not verified_super_trades:
-            print("[SCREENER]: 0 signals qualified after full 216 scan & live OI audit. Dispatching 1 status update to BOT only.")
-            bot_zero_msg = (
-                f"🛡️ <b>ALPHA SCREENER STATUS UPDATE</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⏰ <b>SCAN TIME:</b> <b>{ist_time_str}</b>\n"
-                f"📊 <b>UNIVERSE SCANNED:</b> <b>{len(symbols)} F&O Assets (Full NSE Scan)</b>\n"
-                f"🎯 <b>QUALIFIED SIGNALS:</b> <b>0 Setups</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔒 <b>VERDICT:</b> Market in sideways regime or blocked by -4/+4 OI Wall.\n"
-                f"🛡️ <b>CAPITAL DEFENSE:</b> ZERO forced trades. Capital 100% Protected.\n"
-                f"👥 <b>GROUP STATUS:</b> Complete silence maintained (0 messages to Group).\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )
-            self.notifier.send_broadcast_message(bot_zero_msg, is_trade_signal=False)
+            print(f"[SCREENER]: 0 signals qualified after full 216 scan & live OI audit at {ist_time_str}. Maintaining complete silence (0 messages sent to Telegram).")
             return
 
         print(f"[SCREENER]: Verified {len(verified_super_trades)} PURE LIVE SUPER TRADE(S)! Dispatching...")
