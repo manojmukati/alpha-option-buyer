@@ -485,19 +485,27 @@ class DailyAutonomousScreener:
                 'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
             }
 
-        # Gate 0: 30+ Points Move Capability with Super-Volume Exception (RVOL >= 4.0x)
-        # सामान्यतः ATR >= 85 अनिवार्य है ताकि थीटा डीके में 8-10 अंक वाले फ्लैट शेयर्स न फँसें।
-        # लेकिन Reliance (₹1,160) और SBICARD (₹527) जैसे दिग्गजों में जब महीने में 1-2 बार 
-        # संस्थागत सुपर-वॉल्यूम (RVOL >= 4.0x) और कम से कम 20-25 अंक का विस्तार हो, तो उन्हें 100% छूट मिलेगी!
+        # Gate 0: 30+ Points Move Capability (Double-Lock Institutional Shield)
+        # नियम 1: High-ATR शेयर्स (ATR >= 85) जैसे UltraCem, Amber, Supreme 100% स्वतः पास होंगे।
+        # नियम 2: Low-ATR शेयर्स (Reliance ₹1,160) केवल तभी पास होंगे जब:
+        #         (a) सुपर वॉल्यूम RVOL >= 4.0x हो, AND
+        #         (b) न्यूनतम 25.0 अंक की अनिवार्य सीमा हो: max(25.0, round(spot * 0.018, 2))
+        # इससे NBCC (₹68), Canara Bank (₹118), Tata Consumer (₹990) जैसे सस्ते शेयर्स 100% बाहर रहेंगे!
         stock_atr = self.get_stock_atr(sym_clean, q)
         day_range = round(b_high - b_low, 2)
-        is_super_expansion = (rvol >= 4.0 and day_range >= 20.0)
+        spot_price = float(q.get('last_price', 0.0))
+
+        # डबल-लॉक: न्यूनतम 25 अंक अनिवार्य + 1.8% वास्तविक संस्थागत विस्तार फ़्लोर
+        min_required_move = max(25.0, round(spot_price * 0.018, 2))
+        is_super_expansion = (rvol >= 4.0 and day_range >= min_required_move)
+
         if stock_atr < 85.0 and not is_super_expansion:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'LOW_ATR_NO_SUPER_VOLUME (ATR {stock_atr:.1f} < 85.0 pts & RVOL {rvol:.2f}x < 4.0x)'
+                'failed_gate': f'LOW_ATR_NO_SUPER_VOLUME (ATR {stock_atr:.1f} < 85.0 pts & Day Range {day_range:.1f} < {min_required_move:.1f} pts)'
             }
+
         delta = 0.60
         expected_opt_move = max(30.0, round(day_range if is_super_expansion else stock_atr * 0.35, 2))
         # Anti-Exhaustion Shield: RVOL >= 2.50x gets 2.00x ATR expansion; standard gets 1.35x ATR
@@ -509,13 +517,12 @@ class DailyAutonomousScreener:
                 'failed_gate': f'STOCK_MOVE_ALREADY_EXHAUSTED ({day_range:.1f} > {max_expansion:.1f} pts)'
             }
 
-        # नियम B: टाइम-अडैप्टिव एंटी-साइडवेज़ फ़िल्टर (Dead Sideways Chop Shield)
-        # सुबह (09:30 - 10:15): कम से कम 35% ATR रेंज बनी होनी चाहिए
-        # दोपहर (01:15 - 02:15): कम से कम 60% ATR रेंज बनी होनी चाहिए (वरना मारुति जैसा साइडवेज़ चॉप है)
+        # नियम B: सख्त साइडवेज़ चॉप शील्ड (Dead Sideways Chop Shield)
+        # चाहे वॉल्यूम 10x हो, अगर शेयर 1-2 रुपये के बक्से में फंसा है, तो ऑप्शन बायर को NO-ENTRY!
         ist_now = get_ist_time()
         is_morning = ist_now.hour < 12
         min_rng_pct = 0.35 if is_morning else 0.60
-        if day_range < (stock_atr * min_rng_pct) and rvol < 5.0:
+        if day_range < (stock_atr * min_rng_pct) and not is_super_expansion:
             return {
                 'symbol': sym_clean,
                 'passed': False,
