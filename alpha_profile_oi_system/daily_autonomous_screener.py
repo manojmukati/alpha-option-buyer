@@ -60,8 +60,8 @@ def is_in_active_trading_slab(ist_time):
         return False
 
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 615)
-    slab2 = (795 <= tot_mins <= 855)
+    slab1 = (570 <= tot_mins <= 599)
+    slab2 = (795 <= tot_mins <= 840)
     return slab1 or slab2
 
 
@@ -485,20 +485,24 @@ class DailyAutonomousScreener:
                 'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
             }
 
-        # Gate 0: Mandatory 30+ Points Move Capability (Low-ATR < 85.0 pts 100% Blocked)
+        # Gate 0: 30+ Points Move Capability with Super-Volume Exception (RVOL >= 4.0x)
+        # सामान्यतः ATR >= 85 अनिवार्य है ताकि थीटा डीके में 8-10 अंक वाले फ्लैट शेयर्स न फँसें।
+        # लेकिन Reliance (₹1,160) और SBICARD (₹527) जैसे दिग्गजों में जब महीने में 1-2 बार 
+        # संस्थागत सुपर-वॉल्यूम (RVOL >= 4.0x) और कम से कम 20-25 अंक का विस्तार हो, तो उन्हें 100% छूट मिलेगी!
         stock_atr = self.get_stock_atr(sym_clean, q)
-        if stock_atr < 85.0:
+        day_range = round(b_high - b_low, 2)
+        is_super_expansion = (rvol >= 4.0 and day_range >= 20.0)
+        if stock_atr < 85.0 and not is_super_expansion:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'LOW_ATR_CANNOT_DELIVER_30_PTS (ATR {stock_atr:.1f} < 85.0 pts)'
+                'failed_gate': f'LOW_ATR_NO_SUPER_VOLUME (ATR {stock_atr:.1f} < 85.0 pts & RVOL {rvol:.2f}x < 4.0x)'
             }
         delta = 0.60
-        expected_opt_move = max(30.0, round(stock_atr * 0.35, 2))
+        expected_opt_move = max(30.0, round(day_range if is_super_expansion else stock_atr * 0.35, 2))
         # Anti-Exhaustion Shield: RVOL >= 2.50x gets 2.00x ATR expansion; standard gets 1.35x ATR
-        day_range = round(b_high - b_low, 2)
         max_expansion = (stock_atr * 2.00) if rvol >= 2.50 else (stock_atr * 1.35)
-        if day_range > max_expansion:
+        if day_range > max_expansion and not is_super_expansion:
             return {
                 'symbol': sym_clean,
                 'passed': False,
@@ -639,8 +643,11 @@ class DailyAutonomousScreener:
 
         # PINPOINT FIX: Balanced Slab Allocation (Max 4 Morning + Max 4 Afternoon = 8 Total Daily Super Trades)
         # Guarantees afternoon jackpot window (01:15-02:15 PM) is NEVER starved or blocked by morning trades!
-        is_morning = (ist_now.hour == 9 and ist_now.minute >= 30) or (ist_now.hour == 10 and ist_now.minute <= 15)
-        is_afternoon = (ist_now.hour == 13 and ist_now.minute >= 15) or (ist_now.hour == 14 and ist_now.minute <= 15)
+        # नई फ्रेश एंट्री केवल 'मोमेंटम इग्निशन' समय पर होगी (थके हुए अंतिम 15 मिनट में नहीं):
+        # सुबह: 09:30 से 09:59 AM (10:00 से 10:15 के रिवर्सल ट्रैप से 100% सुरक्षा)
+        # दोपहर: 01:15 से 01:55 PM (02:00 के बाद जब सत्र बंद होने वाला हो, तब नो-एंट्री)
+        is_morning = (ist_now.hour == 9 and ist_now.minute >= 30)
+        is_afternoon = (ist_now.hour == 13 and ist_now.minute >= 15) or (ist_now.hour == 14 and ist_now.minute <= 0)
 
         morn_count = 0
         aft_count = 0
