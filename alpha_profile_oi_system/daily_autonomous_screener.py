@@ -949,7 +949,19 @@ class DailyAutonomousScreener:
                 has_index_in_this_cycle = True
 
         if not verified_super_trades:
-            print(f"[SCREENER]: 0 signals qualified after full 216 scan & live OI audit at {ist_time_str}. Maintaining complete silence (0 messages sent to Telegram).")
+            print(f"[SCREENER]: 0 signals qualified after full 216 scan & live OI audit at {ist_time_str}. Dispatching 3-min heartbeat to Chatbot.")
+            bot_zero_msg = (
+                f"🛡️ <b>ALPHA LIVE SCAN UPDATE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ <b>SCAN TIME:</b> <b>{ist_time_str}</b>\n"
+                f"📊 <b>UNIVERSE SCANNED:</b> <b>{len(symbols)} F&O Assets (Full NSE Scan)</b>\n"
+                f"🎯 <b>QUALIFIED SIGNALS:</b> <b>0 Setups (Market in Chop/Compression)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔒 <b>CAPITAL SHIELD:</b> Zero forced trades. Capital 100% Protected.\n"
+                f"👥 <b>GROUP STATUS:</b> Silent (Alerts sent only on confirmed buy signals).\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            self.notifier.send_broadcast_message(bot_zero_msg, is_trade_signal=False)
             return
 
         print(f"[SCREENER]: Verified {len(verified_super_trades)} PURE LIVE SUPER TRADE(S)! Dispatching...")
@@ -1095,6 +1107,9 @@ class DailyAutonomousScreener:
     def run_eod_analysis_and_dispatch(self):
         """Performs daily trade success/failure analysis at 03:35 PM IST and dispatches Report + Excel strictly to Owner Chatbot."""
         ist_now = get_ist_time()
+        if ist_now.weekday() >= 5:
+            print(f"[WEEKEND]: {ist_now.strftime('%A')} market closed. Zero messages sent.")
+            return {"ok": True, "weekend": True}
         ist_time_str = ist_now.strftime('%I:%M:%S %p IST')
         ist_date_str = ist_now.strftime('%d-%b-%Y')
         daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
