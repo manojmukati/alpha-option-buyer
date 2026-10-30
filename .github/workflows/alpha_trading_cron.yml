@@ -42,7 +42,7 @@ permissions:
 jobs:
   run-alpha-trading:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
 
     steps:
       - name: Checkout Repository
