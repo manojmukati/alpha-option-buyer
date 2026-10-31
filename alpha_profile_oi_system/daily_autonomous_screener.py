@@ -322,9 +322,21 @@ class DailyAutonomousScreener:
 
                 # PINPOINT FIX: Measure exhaustion from Local Compression Base (NOT arbitrary 130/280 pts from Day Extremes)
                 # An index with a fresh 24-min tight base can rally 300-500 pts on trending days!
+                # =====================================================================
+                # संस्थागत सुधार #1: इंडेक्स वोलेटिलिटी कैलिब्रेशन व संस्थागत ब्लास्ट अनलॉक
+                # निफ्टी/फिननिफ्टी के लिए 180 अंक और बैंकनिफ्टी (54,000 भाव) के लिए 420 अंक।
+                # यदि ब्रेकआउट कैंडल खुद संस्थागत ब्लास्ट (BN >= 90 pts, Nifty >= 40 pts & Body >= 70%) है,
+                # तो वह ट्रेंडिंग कंटिन्यूएशन है, उसे बेस की चौड़ाई पर कभी ब्लॉक न करें!
+                # =====================================================================
+                rng = max(0.01, b_high - b_low)
+                body = abs(b_close - b_open)
+                solid_body_ratio = round(body / rng, 2)
+                min_fast_bar_pts = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
+                is_institutional_blast = (rng >= min_fast_bar_pts) and (solid_body_ratio >= 0.70)
+
                 comp_width = comp_high - comp_low
-                max_allowed_base_width = 85.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 180.0
-                if comp_width > max_allowed_base_width:
+                max_allowed_base_width = 180.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 420.0
+                if comp_width > max_allowed_base_width and not is_institutional_blast:
                     return {
                         'symbol': sym_clean,
                         'passed': False,
@@ -335,9 +347,6 @@ class DailyAutonomousScreener:
                     }
 
                 pct_chg = round(((b_close - b_open) / max(1.0, b_open)) * 100.0, 2)
-                rng = max(0.01, b_high - b_low)
-                body = abs(b_close - b_open)
-                solid_body_ratio = round(body / rng, 2)
                 up_wick = round((b_high - max(b_open, b_close)) / rng, 2)
                 dn_wick = round((min(b_open, b_close) - b_low) / rng, 2)
                 clv = round((b_close - b_low) / rng, 2)
@@ -783,28 +792,30 @@ class DailyAutonomousScreener:
         remaining_slab_slots = max(1, MAX_SLAB_TRADES - active_slab_count)
         slab_cap = min(4, remaining_slab_slots)
 
-        # नियम: प्रति स्लैब केवल 1 बेस्ट इंडेक्स ट्रेड (Morning Trend + Afternoon Reversal दोनों को अनुमति)
-        # सुबह (09:30-10:15) में 1 बेस्ट इंडेक्स और दोपहर (01:15-02:15) में 1 बेस्ट इंडेक्स मान्य होगा।
+        # =====================================================================
+        # संस्थागत सुधार #3: इंडेक्स और स्टॉक के स्लॉट्स का विकेंद्रीकरण (Decoupled Capacity)
+        # नियम: प्रति स्लैब 1 बेस्ट इंडेक्स + अधिकतम 3 F&O स्टॉक्स (ताकि टॉप 5-7 रनर्स छूटें नहीं)
         # एक ही स्कैन साइकिल/मिनट में 3-4 इंडेक्स का क्लस्टर कभी नहीं जाएगा (केवल #1 बेस्ट स्कोर वाला जाएगा)।
+        # =====================================================================
         index_names = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
         
-        has_index_in_active_slab = False
-        for idx in index_names:
-            last_ts = self.dispatched_today.get(idx, 0.0)
+        active_slab_index_count = 0
+        active_slab_stock_count = 0
+        for sym_d, last_ts in self.dispatched_today.items():
             if last_ts > 0:
                 try:
                     dt = datetime.datetime.fromtimestamp(last_ts, tz=ist_now.tzinfo)
-                    # यदि वर्तमान स्लैब सुबह का है और सुबह कोई इंडेक्स गया है:
-                    if is_morning and (dt.hour == 9 or (dt.hour == 10 and dt.minute <= 15)):
-                        has_index_in_active_slab = True
-                        break
-                    # यदि वर्तमान स्लैब दोपहर का है और दोपहर में कोई इंडेक्स जा चुका है:
-                    elif is_afternoon and (dt.hour >= 13):
-                        has_index_in_active_slab = True
-                        break
+                    in_current_slab = (is_morning and (dt.hour == 9 or (dt.hour == 10 and dt.minute <= 15))) or                                      (is_afternoon and (dt.hour >= 13))
+                    if in_current_slab:
+                        if sym_d in index_names:
+                            active_slab_index_count += 1
+                        else:
+                            active_slab_stock_count += 1
                 except Exception:
                     pass
 
+        MAX_INDEX_PER_SLAB = 1
+        MAX_STOCKS_PER_SLAB = 3
         has_index_in_this_cycle = False
 
         for cand in stage1_passed:
@@ -816,10 +827,16 @@ class DailyAutonomousScreener:
             direction = cand['direction']
             is_idx = cand.get('is_index', False)
 
-            # यदि वर्तमान सत्र में 1 इंडेक्स जा चुका है, या इस स्कैन में 1 इंडेक्स चुना जा चुका है, तो दूसरे इंडेक्स को छोड़ें
-            if is_idx and (has_index_in_active_slab or has_index_in_this_cycle):
-                print(f"  [PER_SLAB_INDEX_EXCLUSIVE]: {sym} bypassed. Active slab already has 1 Top Index.")
-                continue
+            # यदि इंडेक्स है और स्लैब में 1 इंडेक्स पहले ही जा चुका है, तो दूसरा इंडेक्स छोड़ें
+            if is_idx:
+                if active_slab_index_count >= MAX_INDEX_PER_SLAB or has_index_in_this_cycle:
+                    print(f"  [PER_SLAB_INDEX_EXCLUSIVE]: {sym} bypassed. Active slab already has {active_slab_index_count} Top Index.")
+                    continue
+            else:
+                # यदि स्टॉक है और स्टॉक कोटा पूरा हो चुका है, तो अगला स्टॉक छोड़ें
+                if active_slab_stock_count >= MAX_STOCKS_PER_SLAB:
+                    print(f"  [PER_SLAB_STOCK_CAP]: {sym} bypassed. Active slab already has {active_slab_stock_count} Stocks.")
+                    continue
 
             # -------------------------------------------------------------
             # STAGE 2A: 5-PILLAR REAL 3-MINUTE INTRADAY CANDLE & BREAKOUT AUDIT
@@ -913,14 +930,15 @@ class DailyAutonomousScreener:
                     continue
 
                 # =====================================================================
-                # सुधार #2: फ्रेशनेस लॉक (Anti-Late Chasing Cap <= 2.60%)
-                # शेयर दिन के ओपन से 2.60% से ज्यादा नहीं भागा होना चाहिए।
-                # COLPAL (-2.49%) और PAYTM (+0.54%) जैसे फ्रेश जैकपॉट 100% सुरक्षित रहेंगे!
-                # HYUNDAI (+3.05% टॉप चेज़िंग) और BDL (-2.70% बॉटम सेलिंग) पूरी तरह ब्लॉक!
+                # संस्थागत सुधार #2: फ्रेशनेस लॉक (Anti-Late Chasing Cap Dynamic Calibration)
+                # शेयर दिन के ओपन से 2.60% से ज्यादा नहीं भागा होना चाहिए (सिवाय भारी संस्थागत RVOL >= 2.5x के)।
+                # यदि RVOL >= 2.5x है तो 3.20% तक का मूव चेज़िंग नहीं बल्कि डे-हाई मोमेंटम ब्रेकआउट (APOLLOHOSP / DIXON) है!
+                # HYUNDAI (+3.05% कमजोर वॉल्यूम टॉप चेज़िंग) और BDL (-2.70% बॉटम सेलिंग) पूरी तरह ब्लॉक रहेंगे!
                 # =====================================================================
-                if abs(day_pct) > 2.60 and cand_rvol < 5.0:
+                max_allowed_pct = 3.20 if cand_rvol >= 2.50 else 2.60
+                if abs(day_pct) > max_allowed_pct and cand_rvol < 5.0:
                     print(
-                        f"  [LATE_EXHAUSTION_BLOCKED]: {sym} -> Day Move {day_pct:+.2f}% > 2.60% "
+                        f"  [LATE_EXHAUSTION_BLOCKED]: {sym} -> Day Move {day_pct:+.2f}% > {max_allowed_pct:.2f}% "
                         f"(Late blow-off chasing trap avoided!)"
                     )
                     continue
