@@ -831,15 +831,19 @@ class DailyAutonomousScreener:
                 cand_rvol = float(cand.get('rvol', 1.0))
                 cand_pct = abs(float(cand.get('pct_change', 0.0)))
                 cand_atr = float(cand.get('stock_atr', 0.0))
-                is_outperformer = (cand_pct >= 0.50 and cand_rvol >= 1.50 and cand_atr >= 85.0)
-
+                # =====================================================================
+                # सुधार #1: सख्त निफ्टी मैक्रो अलाइनमेंट (Strict Macro Tide Alignment)
+                # केवल असली संस्थागत ब्लॉक डील (RVOL >= 5.0x) ही काउंटर-ट्रेंड चल सकती है।
+                # यदि निफ्टी लाल है, तो कमजोर स्टॉक CALL कभी नहीं ले सकता (TATAELXSI और HYUNDAI ब्लॉक!)
+                # =====================================================================
+                is_block_deal = (cand_rvol >= 5.0)
                 if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-                    if not is_outperformer or "DropFromHigh=-" in str(nifty_regime.get('reason', '')):
-                        print(f"  [NIFTY REGIME BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
+                    if not is_block_deal or "DropFromHigh=-" in str(nifty_regime.get('reason', '')):
+                        print(f"  [NIFTY_MACRO_TIDE_BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
                         continue
                 if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-                    if not is_outperformer or "RiseFromLow=+" in str(nifty_regime.get('reason', '')):
-                        print(f"  [NIFTY REGIME BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
+                    if not is_block_deal or "RiseFromLow=+" in str(nifty_regime.get('reason', '')):
+                        print(f"  [NIFTY_MACRO_TIDE_BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
                         continue
 
                 stk_df = self.data_feed.get_live_intraday_bars(sym)
@@ -908,6 +912,19 @@ class DailyAutonomousScreener:
                     print(f"  [COUNTER_TREND_BLOCKED]: {sym} (PUT) rejected because stock is in green ({day_pct:+.2f}%)")
                     continue
 
+                # =====================================================================
+                # सुधार #2: फ्रेशनेस लॉक (Anti-Late Chasing Cap <= 2.60%)
+                # शेयर दिन के ओपन से 2.60% से ज्यादा नहीं भागा होना चाहिए।
+                # COLPAL (-2.49%) और PAYTM (+0.54%) जैसे फ्रेश जैकपॉट 100% सुरक्षित रहेंगे!
+                # HYUNDAI (+3.05% टॉप चेज़िंग) और BDL (-2.70% बॉटम सेलिंग) पूरी तरह ब्लॉक!
+                # =====================================================================
+                if abs(day_pct) > 2.60 and cand_rvol < 5.0:
+                    print(
+                        f"  [LATE_EXHAUSTION_BLOCKED]: {sym} -> Day Move {day_pct:+.2f}% > 2.60% "
+                        f"(Late blow-off chasing trap avoided!)"
+                    )
+                    continue
+
                 # FLAW #2 FIX: Live Forming Bar Reversal Check with 10% ATR spot buffer & 25% ATR wick tolerance
                 # Allows healthy 0.05% bid-ask tick variance so valid breakouts (Trent, Siemens) are not killed
                 spot_buffer = stock_atr * 0.10
@@ -922,6 +939,21 @@ class DailyAutonomousScreener:
                         f"LiveSpot={spot:.2f} vs ClosedBar={b_close:.2f} (LiveOpen={l_open:.2f}, LiveClose={l_close:.2f})"
                     )
                     continue
+
+                # =====================================================================
+                # सुधार #3: लाइव कैंडल एंटी-डोज़ी थ्रस्ट फ़िल्टर (ANTI-DOJI CHOPPING SHIELD)
+                # यदि लाइव कैंडल 0.4 या 0.6 अंक की डोज़ी बनकर रुक गई, तो वह वॉल्यूम केवल चॉपिंग है!
+                # AUROPHARMA (बॉडी 0.4 pt) और ADANIPORTS (बॉडी 0.6 pt) तुरंत रिजेक्ट होंगे!
+                # =====================================================================
+                live_body = abs(spot - l_open)
+                min_live_thrust = max(1.5, min(12.0, round(stock_atr * 0.03, 1)))
+                if cand_rvol < 5.0 and live_body < min_live_thrust:
+                    print(
+                        f"  [DOJI_CHOPPING_REJECTED]: {sym} -> Live Candle Body is only {live_body:.2f} pts "
+                        f"(< {min_live_thrust:.1f} pts). Stagnant Doji Trap Avoided!"
+                    )
+                    continue
+
                 body = abs(b_close - b_open)
                 solid_body_ratio = round(body / rng, 2)
                 up_wick = round((b_high - max(b_open, b_close)) / rng, 2)
@@ -992,6 +1024,20 @@ class DailyAutonomousScreener:
                 min_rvol_req = 1.50 if cum_mom_ok else 1.75
                 if real_3m_rvol < min_rvol_req:
                     print(f"  [INSTITUTIONAL_RVOL_REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < {min_rvol_req:.2f}x (Insufficient Momentum)")
+                    continue
+
+                # =====================================================================
+                # सुधार #4: वायकॉफ "Effort vs Result" वॉल्यूम-थ्रस्ट कोरिलेशन फ़िल्टर
+                # अगर वॉल्यूम 2.0x से 2.5x+ हो, तो कैंडल में कम से कम 10 से 20 अंक
+                # (या कम से कम 60% सॉलिड बॉडी रेशियो और ATR का 8% थ्रस्ट) होना अनिवार्य है!
+                # =====================================================================
+                min_required_thrust_pts = max(6.0, min(20.0, round(stock_atr * 0.08, 1)))
+                if real_3m_rvol >= 2.0 and body < min_required_thrust_pts:
+                    print(
+                        f"  [VOLUME_WITHOUT_THRUST_REJECTED]: {sym} -> RVOL {real_3m_rvol:.2f}x (High Effort) "
+                        f"but Candle Body is only {body:.2f} pts < {min_required_thrust_pts:.1f} pts (Zero Result). "
+                        f"Dead Stagnant Churn Blocked!"
+                    )
                     continue
 
                 # Pillar 3: Real 3-Minute Order Flow CVD Delta Verification
