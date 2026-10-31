@@ -491,21 +491,6 @@ class DailyAutonomousScreener:
                     'failed_gate': f'SELLING_REJECTION_WICK: Upper wick {upper_wick:.1f} pts is {(upper_wick/candle_total_range)*100:.0f}% of candle'
                 }
 
-        # FLAW #3 FIX (Nifty Macro Tide Gate): Strictly Block Stock CALLs if Nifty is crashing/bearish
-        nifty_regime = self.get_nifty_market_regime(force_refresh=False)
-        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_CALL: {nifty_regime.get('reason')}"
-            }
-        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
-            }
-
         # Gate 0: 30+ Points Move Capability (Zero-Tolerance for Low-ATR)
         # ऑप्शन बायर का नियम: कम से कम 30 अंक का फास्ट मूव केवल High-ATR (ATR >= 85) में संभव है।
         # TataConsum (ATR 31), Pidilite (ATR 38), ICICI (ATR 28) जैसे सुस्त शेयर्स 100% BLOCKED!
@@ -516,6 +501,52 @@ class DailyAutonomousScreener:
                 'passed': False,
                 'failed_gate': f'LOW_ATR_STAGNANT_TRAP: ATR {stock_atr:.1f} < 85.0 pts (Theta Decay Hazard)'
             }
+
+        # FLAW #3 FIX (Calibrated Macro Tide Gate):
+        # केवल तभी स्टॉक CALL ब्लॉक करें जब निफ्टी में वास्तविक क्रैश (Severe Drop >= 60 pts) हो!
+        # अगर शेयर अपने दम पर मजबूत है (PctChg >= +0.50% & RVOL >= 1.5x), तो निफ्टी के मामूली -0.10% पर ब्लॉक नहीं होगा!
+        nifty_regime = self.get_nifty_market_regime(force_refresh=False)
+        is_independent_outperformer = (abs(pct_chg) >= 0.50 and rvol >= 1.50 and stock_atr >= 85.0)
+
+        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
+            if not is_independent_outperformer or "DropFromHigh=-" in str(nifty_regime.get('reason', '')):
+                if "DropFromHigh" in str(nifty_regime.get('reason', '')):
+                    try:
+                        drop_val = float(str(nifty_regime.get('reason')).split('DropFromHigh=-')[1].split(' ')[0])
+                    except Exception:
+                        drop_val = 60.0
+                    if drop_val >= 60.0:
+                        return {
+                            'symbol': sym_clean,
+                            'passed': False,
+                            'failed_gate': f"NIFTY_REAL_CRASH_BLOCKED_CALL: {nifty_regime.get('reason')}"
+                        }
+                elif not is_independent_outperformer:
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_CALL: {nifty_regime.get('reason')}"
+                    }
+
+        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
+            if not is_independent_outperformer or "RiseFromLow=+" in str(nifty_regime.get('reason', '')):
+                if "RiseFromLow" in str(nifty_regime.get('reason', '')):
+                    try:
+                        rise_val = float(str(nifty_regime.get('reason')).split('RiseFromLow=+')[1].split(' ')[0])
+                    except Exception:
+                        rise_val = 60.0
+                    if rise_val >= 60.0:
+                        return {
+                            'symbol': sym_clean,
+                            'passed': False,
+                            'failed_gate': f"NIFTY_REAL_RALLY_BLOCKED_PUT: {nifty_regime.get('reason')}"
+                        }
+                elif not is_independent_outperformer:
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
+                    }
 
         delta = 0.60
         expected_opt_move = max(30.0, round(stock_atr * 0.35, 2))
@@ -550,16 +581,15 @@ class DailyAutonomousScreener:
                 'failed_gate': f'STOCK_MOVE_ALREADY_EXHAUSTED ({day_range:.1f} > {max_expansion:.1f} pts)'
             }
 
-        # नियम B: सख्त साइडवेज़ चॉप शील्ड (Dead Sideways Chop Shield)
-        # चाहे वॉल्यूम 10x हो, अगर शेयर 1-2 रुपये के बक्से में फंसा है, तो ऑप्शन बायर को NO-ENTRY!
-        ist_now = get_ist_time()
-        is_morning = ist_now.hour < 12
-        min_rng_pct = 0.35 if is_morning else 0.60
-        if day_range < (stock_atr * min_rng_pct):
+        # नियम B: वास्तविक साइडवेज़ चॉप शील्ड (Calibrated Dead Sideways Shield)
+        # हाई-ATR शेयर्स (ATR >= 85) के लिए शेयर को 186 अंक भागने के लिए मजबूर न करें!
+        # नियम: शेयर में कम से कम 25 अंक (या 0.15x ATR) की हलचल होनी चाहिए ताकि ऑप्शन बायर शुरुआती मोमेंटम पकड़ सके।
+        min_required_expansion = max(25.0, round(stock_atr * 0.15, 1)) if stock_atr >= 85.0 else max(8.0, round(stock_atr * 0.35, 1))
+        if day_range < min_required_expansion:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'DEAD_SIDEWAYS_CHOP (Day Range {day_range:.1f} < {int(min_rng_pct*100)}% ATR {stock_atr * min_rng_pct:.1f} pts)'
+                'failed_gate': f'DEAD_SIDEWAYS_CHOP (Day Range {day_range:.1f} < {min_required_expansion:.1f} pts Base)'
             }
 
         # नियम #1: न्यूनतम 0.50% प्रतिशत चाल फ़्लोर (Micro-Move & Theta-Decay Trap Shield)
@@ -801,12 +831,18 @@ class DailyAutonomousScreener:
             if not is_idx:
                 # Re-verify Nifty Macro Tide before evaluating stock
                 cand_rvol = float(cand.get('rvol', 1.0))
+                cand_pct = abs(float(cand.get('pct_change', 0.0)))
+                cand_atr = float(cand.get('stock_atr', 0.0))
+                is_outperformer = (cand_pct >= 0.50 and cand_rvol >= 1.50 and cand_atr >= 85.0)
+
                 if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-                    print(f"  [NIFTY REGIME BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
-                    continue
+                    if not is_outperformer or "DropFromHigh=-" in str(nifty_regime.get('reason', '')):
+                        print(f"  [NIFTY REGIME BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
+                        continue
                 if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-                    print(f"  [NIFTY REGIME BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
-                    continue
+                    if not is_outperformer or "RiseFromLow=+" in str(nifty_regime.get('reason', '')):
+                        print(f"  [NIFTY REGIME BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
+                        continue
 
                 stk_df = self.data_feed.get_live_intraday_bars(sym)
                 if stk_df is None or len(stk_df) < 9:
