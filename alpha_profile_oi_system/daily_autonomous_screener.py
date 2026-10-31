@@ -491,22 +491,21 @@ class DailyAutonomousScreener:
                     'failed_gate': f'SELLING_REJECTION_WICK: Upper wick {upper_wick:.1f} pts is {(upper_wick/candle_total_range)*100:.0f}% of candle'
                 }
 
-        # Gate 0: 30+ Points Move Capability (Zero-Tolerance for Low-ATR)
-        # ऑप्शन बायर का नियम: कम से कम 30 अंक का फास्ट मूव केवल High-ATR (ATR >= 85) में संभव है।
-        # TataConsum (ATR 31), Pidilite (ATR 38), ICICI (ATR 28) जैसे सुस्त शेयर्स 100% BLOCKED!
+        # Gate 0: Calibrated Liquid Universe Gate
+        # केवल पेनी/माइक्रो स्टॉक्स (ATR < 15 या भाव < 150) ब्लॉक होंगे; SBI, Reliance, Tata Motors जैसे दिग्गज लार्ज-कैप्स अनलॉक रहेंगे!
         stock_atr = self.get_stock_atr(sym_clean, q)
-        if stock_atr < 85.0:
+        if stock_atr < 15.0 or cur_p < 150.0:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'LOW_ATR_STAGNANT_TRAP: ATR {stock_atr:.1f} < 85.0 pts (Theta Decay Hazard)'
+                'failed_gate': f'PENNY_MICRO_ATR_TRAP: ATR {stock_atr:.1f} < 15.0 pts or Spot {cur_p:.1f} < 150.0 (Theta Decay Hazard)'
             }
 
         # FLAW #3 FIX (Calibrated Macro Tide Gate):
         # केवल तभी स्टॉक CALL ब्लॉक करें जब निफ्टी में वास्तविक क्रैश (Severe Drop >= 60 pts) हो!
         # अगर शेयर अपने दम पर मजबूत है (PctChg >= +0.50% & RVOL >= 1.5x), तो निफ्टी के मामूली -0.10% पर ब्लॉक नहीं होगा!
         nifty_regime = self.get_nifty_market_regime(force_refresh=False)
-        is_independent_outperformer = (abs(pct_chg) >= 0.50 and rvol >= 1.50 and stock_atr >= 85.0)
+        is_independent_outperformer = (abs(pct_chg) >= 0.50 and rvol >= 1.50 and stock_atr >= 15.0)
 
         if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
             if not is_independent_outperformer or "DropFromHigh=-" in str(nifty_regime.get('reason', '')):
@@ -760,8 +759,8 @@ class DailyAutonomousScreener:
         stage1_passed = [
             r for r in eval_results 
             if r.get('passed', False) and (
-                r.get('score', 0.0) >= 91.0 or 
-                (float(r.get('rvol', 0.0)) >= 5.0 and abs(float(r.get('pct_change', 0.0))) >= 0.50)
+                r.get('score', 0.0) >= 78.0 or 
+                (float(r.get('rvol', 0.0)) >= 4.0 and abs(float(r.get('pct_change', 0.0))) >= 0.50)
             )
         ]
 
@@ -937,7 +936,7 @@ class DailyAutonomousScreener:
                 # ---------------------------------------------------------
                 # मोड 1: फास्ट मार्केट (1 कैंडल मारुबोज़ू ब्लास्ट: कम से कम 15 अंक का सिंगल बार)
                 # ---------------------------------------------------------
-                min_stock_blast_pts = max(15.0, stock_atr * 0.15)
+                min_stock_blast_pts = max(6.0, round(stock_atr * 0.08, 1))
                 if direction == 'CALL':
                     single_mom_ok = (b_close >= b_open) and (clv >= 0.75) and (up_wick <= 0.20) and \
                                     (solid_body_ratio >= 0.60) and (rng >= min_stock_blast_pts)
@@ -990,7 +989,7 @@ class DailyAutonomousScreener:
                     curr_3m_v = max(curr_3m_v, float(stk_df.iloc[-3].get('volume', 0.0)))
                 real_3m_rvol = round(curr_3m_v / max(1.0, base_3m_v), 2) if base_3m_v > 0 else cand.get('rvol', 2.5)
                 cand['rvol'] = real_3m_rvol
-                min_rvol_req = 2.80 if cum_mom_ok else 3.50
+                min_rvol_req = 1.50 if cum_mom_ok else 1.75
                 if real_3m_rvol < min_rvol_req:
                     print(f"  [INSTITUTIONAL_RVOL_REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < {min_rvol_req:.2f}x (Insufficient Momentum)")
                     continue
