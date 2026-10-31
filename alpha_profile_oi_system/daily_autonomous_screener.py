@@ -1073,8 +1073,8 @@ class DailyAutonomousScreener:
                 f"🚀 <b>TARGET 2:</b> <b>Rs. {opt_tgt2:,.2f}</b> (+{t2_pts:.2f} pts | {target_note})\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"⏳ <b>BUFFER TIME:</b> <b>4 Minutes Window (Valid till {buffer_end_time})</b>\n"
-                f"⏱️ <b>15-MIN KILL SWITCH:</b> <b>{time_sl_time}</b> (STRICT EXIT if stagnant/red)\n"
-                f"⌛ <b>MAX HOLD:</b> <b>26 Mins MAX</b> (Anti-Theta Defense; Zero Drift)\n"
+                f"⏱️ <b>15-MIN KILL SWITCH:</b> <b>{time_sl_time}</b> (STRICT EXIT ONLY if in Loss/Red)\n"
+                f"🛡️ <b>PROFIT RUNNER LOCK:</b> If in Profit at 15m, <b>Trail SL to Entry (Cost)</b> & Ride to Target 1 (+80-150 pts) & Target 2 (+250 pts)!\n"
                 f"💡 <b>EXECUTION:</b> Place Limit Order near CMP, Set GTT Target 2 & SL-M\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
