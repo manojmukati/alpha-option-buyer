@@ -60,8 +60,8 @@ def is_in_active_trading_slab(ist_time):
         return False
 
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 599)
-    slab2 = (795 <= tot_mins <= 840)
+    slab1 = (570 <= tot_mins <= 615)
+    slab2 = (795 <= tot_mins <= 855)
     return slab1 or slab2
 
 
@@ -713,11 +713,10 @@ class DailyAutonomousScreener:
 
         # PINPOINT FIX: Balanced Slab Allocation (Max 4 Morning + Max 4 Afternoon = 8 Total Daily Super Trades)
         # Guarantees afternoon jackpot window (01:15-02:15 PM) is NEVER starved or blocked by morning trades!
-        # नई फ्रेश एंट्री केवल 'मोमेंटम इग्निशन' समय पर होगी (थके हुए अंतिम 15 मिनट में नहीं):
-        # सुबह: 09:30 से 09:59 AM (10:00 से 10:15 के रिवर्सल ट्रैप से 100% सुरक्षा)
-        # दोपहर: 01:15 से 01:55 PM (02:00 के बाद जब सत्र बंद होने वाला हो, तब नो-एंट्री)
-        is_morning = (ist_now.hour == 9 and ist_now.minute >= 30)
-        is_afternoon = (ist_now.hour == 13 and ist_now.minute >= 15) or (ist_now.hour == 14 and ist_now.minute <= 0)
+        # पूर्ण आधिकारिक ट्रेडिंग स्लैब्स (Morning 09:30-10:15 AM & Afternoon 01:15-02:15 PM IST):
+        tot_mins_now = ist_now.hour * 60 + ist_now.minute
+        is_morning = (570 <= tot_mins_now <= 615)
+        is_afternoon = (795 <= tot_mins_now <= 855)
 
         morn_count = 0
         aft_count = 0
@@ -1289,16 +1288,6 @@ if __name__ == '__main__':
         screener.run_eod_analysis_and_dispatch()
     else:
         ignore_win = ('--ignore-window' in sys.argv)
-        ist_now = get_ist_time()
-
-        # अगर वर्तमान समय 09:30-10:15 या 01:15-02:15 स्लैब में है:
-        if is_in_active_trading_slab(ist_now) and not ignore_win:
-            print(f"[ACTIVE SLAB 3-MIN RUNNER]: Starting continuous 3-minute scans for current slab...")
-            while is_in_active_trading_slab(get_ist_time()):
-                screener.run_screener(ignore_window=True)
-                # अगर स्लैब में अभी भी समय बाकी है, तो ठीक 180 सेकंड (3 मिनट) रुको
-                if is_in_active_trading_slab(get_ist_time()):
-                    time.sleep(180)
-            print(f"[SLAB COMPLETED]: Active trading window closed. Clean exit.")
-        else:
-            screener.run_screener(ignore_window=ignore_win)
+        # आंतरिक 30-मिनट लूप हटाया गया — अब हर कॉल 30-40 सेकंड में पूरी स्कैन करके तुरंत एग्जिट होगी!
+        # cron-job.org जब भी कॉल करेगा, रनर तुरंत खाली मिलेगा और कतार कभी जाम नहीं होगी!
+        screener.run_screener(ignore_window=ignore_win)
