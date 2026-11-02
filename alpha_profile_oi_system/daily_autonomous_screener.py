@@ -359,6 +359,36 @@ class DailyAutonomousScreener:
                 single_mom_ok = (solid_body_ratio >= 0.60) and wick_ok and clv_ok and (rng >= min_fast_bar_pts)
 
                 idx_dist_buffer = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
+
+                # =====================================================================
+                # संस्थागत सुधार #3: ओवर-एक्सटेंशन एग्जॉशन गार्ड (Anti-Climax Shield)
+                # यदि निफ्टी दिन के निचले स्तर से पहले ही +120 अंक या बैंकनिफ्टी +300 अंक
+                # बिना किसी रीटेस्ट के भाग चुका है, तो उस शिखर (Top) पर नया CALL खरीदना ब्लॉक!
+                # =====================================================================
+                rise_from_day_low = b_close - day_low
+                drop_from_day_high = day_high - b_close
+                max_vertical_run = 120.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 300.0
+
+                if direction == 'CALL' and rise_from_day_low > max_vertical_run and (b_close >= day_high - 25.0):
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f'EXHAUSTION_TOP_BUYING: Rallied +{rise_from_day_low:.1f} pts from Low without base',
+                        'spot_price': cur_p,
+                        'score': 0.0,
+                        'is_index': True
+                    }
+
+                if direction == 'PUT' and drop_from_day_high > max_vertical_run and (b_close <= day_low + 25.0):
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f'EXHAUSTION_BOTTOM_SELLING: Dropped -{drop_from_day_high:.1f} pts from High without base',
+                        'spot_price': cur_p,
+                        'score': 0.0,
+                        'is_index': True
+                    }
+
                 if direction == 'CALL':
                     if (b_close >= comp_high) and (b_close <= comp_high + idx_dist_buffer):
                         is_breakout = True
@@ -429,6 +459,31 @@ class DailyAutonomousScreener:
                 idx_cvd = candle_cvd
                 idx_cvd_pass = (idx_cvd >= 0.45) if direction == 'CALL' else (idx_cvd <= -0.45)
                 # डायरेक्ट बायर/सेलर आक्रामकता (+/- 0.45) अनिवार्य — कोई बाईपास नहीं!
+
+                # =====================================================================
+                # संस्थागत सुधार #1A: इंडेक्स मैक्रो टाइड अलाइनमेंट (Index Macro Tide Gate)
+                # यदि मदर निफ्टी (NIFTY 50) लाल है (Day Open से नीचे या 9-EMA के नीचे),
+                # तो BANKNIFTY / FINNIFTY / MIDCPNIFTY में CALL लेना 100% प्रतिबंधित!
+                # =====================================================================
+                nifty_regime = self.get_nifty_market_regime(force_refresh=False)
+                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f"MACRO_TIDE_BLOCKED_INDEX_CALL: {nifty_regime.get('reason')}",
+                        'spot_price': cur_p,
+                        'score': 0.0,
+                        'is_index': True
+                    }
+                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f"MACRO_TIDE_BLOCKED_INDEX_PUT: {nifty_regime.get('reason')}",
+                        'spot_price': cur_p,
+                        'score': 0.0,
+                        'is_index': True
+                    }
 
                 stage1_pass = cand_mom_pass and idx_rvol_pass and idx_cvd_pass
                 oi_confluent = True
@@ -765,11 +820,15 @@ class DailyAutonomousScreener:
         # Elite 90% Win-Probability Gate: Only setups with Score >= 88.0 qualify!
         # सिर्फ वही सेटअप्स पास होंगे जिनका वास्तविक संस्थागत स्कोर >= 91.0 होगा (केवल शीर्ष 12-14 जैकपॉट ट्रेड्स)
         # नियम A: स्कोर >= 91.0 हो या फिर संस्थागत RVOL >= 5.0x और दिशा >= 0.50% हो, तो सीधे स्टेज-2 में पास करें
+        # =====================================================================
+        # संस्थागत सुधार #2: केवल A-Grade (Score >= 90.0) ट्रेड्स ही स्टेज-2 में जाएँगे!
+        # सुबह 09:30 से 10:15 के बीच 78-85 स्कोर वाले कमजोर/चॉपी ट्रेड्स 100% ब्लॉक।
+        # =====================================================================
         stage1_passed = [
             r for r in eval_results 
             if r.get('passed', False) and (
-                r.get('score', 0.0) >= 78.0 or 
-                (float(r.get('rvol', 0.0)) >= 4.0 and abs(float(r.get('pct_change', 0.0))) >= 0.50)
+                r.get('score', 0.0) >= 90.0 or 
+                (float(r.get('rvol', 0.0)) >= 4.5 and abs(float(r.get('pct_change', 0.0))) >= 0.60 and r.get('score', 0.0) >= 88.0)
             )
         ]
 
@@ -831,6 +890,13 @@ class DailyAutonomousScreener:
             if is_idx:
                 if active_slab_index_count >= MAX_INDEX_PER_SLAB or has_index_in_this_cycle:
                     print(f"  [PER_SLAB_INDEX_EXCLUSIVE]: {sym} bypassed. Active slab already has {active_slab_index_count} Top Index.")
+                    continue
+                # संस्थागत सुधार #1B: स्टेज-2 में भी इंडेक्स मैक्रो टाइड की पुनः पुष्टि:
+                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
+                    print(f"  [INDEX_MACRO_TIDE_BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
+                    continue
+                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
+                    print(f"  [INDEX_MACRO_TIDE_BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
                     continue
             else:
                 # यदि स्टॉक है और स्टॉक कोटा पूरा हो चुका है, तो अगला स्टॉक छोड़ें
