@@ -57,6 +57,37 @@ def get_ist_time():
     return utc_now.astimezone(ist_tz)
 
 
+def clean_num(val, default=0.0):
+    """
+    Bulletproof numerical parser for live NSE data.
+    Safely converts pure numbers, strings with commas ('1,252.50'),
+    Lakhs ('479.58 L'), Crores ('5,897.09 Cr'), Thousands ('15.2 K'),
+    dashes ('-'), None, and empty values into valid floats without ever throwing ValueError.
+    """
+    if val is None:
+        return float(default)
+    if isinstance(val, (int, float)):
+        return float(val)
+    val_str = str(val).strip().replace(',', '')
+    if not val_str or val_str == '-':
+        return float(default)
+    multiplier = 1.0
+    val_upper = val_str.upper()
+    if val_upper.endswith('CR') or val_upper.endswith('CRORE'):
+        multiplier = 10000000.0
+        val_str = val_upper.replace('CRORE', '').replace('CR', '').strip()
+    elif val_upper.endswith('L') or val_upper.endswith('LAKH'):
+        multiplier = 100000.0
+        val_str = val_upper.replace('LAKH', '').replace('L', '').strip()
+    elif val_upper.endswith('K'):
+        multiplier = 1000.0
+        val_str = val_upper.replace('K', '').strip()
+    try:
+        return float(val_str) * multiplier
+    except (ValueError, TypeError):
+        return float(default)
+
+
 def _build_browser_headers(referer="https://www.nseindia.com/option-chain"):
     return {
         "User-Agent": random.choice(USER_AGENTS),
@@ -162,12 +193,12 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
                 sym = idx_map[idx_name]
                 if sym in new_cache and idx_name == 'NIFTY FINANCIAL SERVICES 25/50':
                     continue
-                ltp = float(item.get('last', 0.0) or 0.0)
-                o = float(item.get('open', ltp) or ltp)
-                h = float(item.get('high', ltp) or ltp)
-                l = float(item.get('low', ltp) or ltp)
-                prev_c = float(item.get('previousClose', ltp) or ltp)
-                p_chg = float(item.get('percentChange', 0.0) or 0.0)
+                ltp = clean_num(item.get('last', 0.0))
+                o = clean_num(item.get('open'), ltp)
+                h = clean_num(item.get('high'), ltp)
+                l = clean_num(item.get('low'), ltp)
+                prev_c = clean_num(item.get('previousClose'), ltp)
+                p_chg = clean_num(item.get('percentChange', 0.0))
                 rng = max(0.01, h - l)
                 clv = round((ltp - l) / rng, 2)
                 cvd_est = round((2.0 * clv) - 1.0, 2)
@@ -204,15 +235,15 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
             sym = str(item.get('symbol', '')).strip().upper()
             if not sym or 'NIFTY' in sym:
                 continue
-            ltp = float(item.get('lastPrice', 0.0) or 0.0)
+            ltp = clean_num(item.get('lastPrice', 0.0))
             if ltp <= 0:
                 continue
-            prev_c = float(item.get('previousClose', ltp) or ltp)
-            o = float(item.get('open', item.get('basePrice', ltp)) or ltp)
-            h = float(item.get('dayHigh', max(ltp, o)) or max(ltp, o))
-            l = float(item.get('dayLow', min(ltp, o)) or min(ltp, o))
-            tot_vol = float(item.get('totalTradedVolume', 0.0) or 0.0)
-            p_chg = float(item.get('pChange', item.get('pchange', 0.0)) or 0.0)
+            prev_c = clean_num(item.get('previousClose'), ltp)
+            o = clean_num(item.get('open') or item.get('basePrice'), ltp)
+            h = clean_num(item.get('dayHigh'), max(ltp, o))
+            l = clean_num(item.get('dayLow'), min(ltp, o))
+            tot_vol = clean_num(item.get('totalTradedVolumecsv') or item.get('totalTradedVolume', 0.0))
+            p_chg = clean_num(item.get('pChange') or item.get('pchange', 0.0))
 
             rng = max(0.01, h - l)
             clv = round((ltp - l) / rng, 2)
@@ -542,7 +573,7 @@ class LiveMarketDataFeed:
         for item in chain_items:
             if item.get('expiryDates') and item.get('expiryDates') != curr_expiry:
                 continue
-            stk = float(item.get('strikePrice', 0.0))
+            stk = clean_num(item.get('strikePrice', 0.0))
             if stk <= 0:
                 continue
             ce = item.get('CE', {})

@@ -1249,6 +1249,55 @@ class DailyAutonomousScreener:
                 print(f"\n[TRADING SLABS CONCLUDED]: Current time {ist_now.strftime('%I:%M:%S %p IST')} is past 02:15 PM IST. Completed for today.")
                 break
 
+    def run_live_slab_session(self, interval_seconds=300):
+        """
+        Runs a persistent single-runner session throughout the active trading slab.
+        Executes immediate scan, then sleeps interval_seconds (default 300s / 5 mins),
+        and continues scanning until the slab concludes (10:15 AM IST Morning / 02:15 PM IST Afternoon).
+        Guarantees 0% dropped cron scans and requires only 1 VM start per slab!
+        """
+        ist_now = get_ist_time()
+        tot_m = ist_now.hour * 60 + ist_now.minute
+
+        if tot_m <= 615:
+            slab_name = "MORNING SLAB (09:30 - 10:15 AM IST)"
+            end_min = 615
+        elif tot_m <= 855:
+            slab_name = "AFTERNOON SLAB (01:15 - 02:15 PM IST)"
+            end_min = 855
+        else:
+            print(f"[SLAB SESSION]: Current time {ist_now.strftime('%I:%M %p IST')} is outside active slabs. Executing single pass.")
+            self.run_screener(ignore_window=True)
+            return
+
+        print(f"=======================================================")
+        print(f"  ALPHA PERSISTENT SLAB SESSION INITIALIZED: {slab_name}")
+        print(f"  Target End: {end_min // 60:02d}:{end_min % 60:02d} IST | Tick Interval: {interval_seconds}s (5 mins)")
+        print(f"=======================================================")
+
+        scan_num = 1
+        while True:
+            cur_ist = get_ist_time()
+            cur_m = cur_ist.hour * 60 + cur_ist.minute
+            if cur_m > end_min:
+                print(f"[SLAB SESSION CONCLUDED]: Time {cur_ist.strftime('%I:%M:%S %p IST')} passed slab end ({end_min // 60:02d}:{end_min % 60:02d} IST). Session complete.")
+                break
+
+            print(f"\n>>> [SCAN #{scan_num}] Executing 5-Pillar Live Scan at {cur_ist.strftime('%I:%M:%S %p IST')}...")
+            try:
+                self.run_screener(ignore_window=True)
+            except Exception as e:
+                print(f"[SCAN #{scan_num} ERROR]: {e}")
+
+            rem_to_end = (end_min - cur_m) * 60
+            if rem_to_end <= 0:
+                print(f"[SLAB SESSION REACHED END]: Concluding session at {cur_ist.strftime('%I:%M:%S %p IST')}.")
+                break
+            sleep_time = min(interval_seconds, rem_to_end)
+            print(f">>> [SCAN #{scan_num} COMPLETE] Sleeping {sleep_time}s until next 5-min scan (Remaining in slab: {rem_to_end // 60}m)...")
+            time.sleep(sleep_time)
+            scan_num += 1
+
     def run_eod_analysis_and_dispatch(self):
         """Performs daily trade success/failure analysis at 03:35 PM IST and dispatches Report + Excel strictly to Owner Chatbot."""
         ist_now = get_ist_time()
@@ -1345,12 +1394,12 @@ class DailyAutonomousScreener:
 
 if __name__ == '__main__':
     screener = DailyAutonomousScreener()
-    if '--slab-loop' in sys.argv:
+    if '--slab-session' in sys.argv:
+        screener.run_live_slab_session(interval_seconds=300)
+    elif '--slab-loop' in sys.argv:
         screener.run_live_slab_loop()
     elif '--eod-audit' in sys.argv or '--send-journal' in sys.argv:
         screener.run_eod_analysis_and_dispatch()
     else:
         ignore_win = ('--ignore-window' in sys.argv)
-        # आंतरिक 30-मिनट लूप हटाया गया — अब हर कॉल 30-40 सेकंड में पूरी स्कैन करके तुरंत एग्जिट होगी!
-        # cron-job.org जब भी कॉल करेगा, रनर तुरंत खाली मिलेगा और कतार कभी जाम नहीं होगी!
         screener.run_screener(ignore_window=ignore_win)
