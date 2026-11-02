@@ -664,14 +664,13 @@ class DailyAutonomousScreener:
                 'failed_gate': f'SUB_EXPANSION_THETA_TRAP: Intraday move {pct_chg:+.2f}% < 0.50% minimum threshold'
             }
 
-        # नियम #2: मॉर्निंग रन-अवे चेज़िंग एग्जॉशन कैप (Anti-Chasing Cap)
-        # सुबह 09:30 - 10:15 के बीच जो शेयर पहले ही 3.50% से ज्यादा भाग चुके हैं (जैसे KEI -6.2%, PowerIndia -4.1%),
-        # उनका पीछा करना 'ट्रेन छूटने के बाद दौड़ना' है — उन्हें सुबह 100% ब्लॉक करें!
-        if is_morning and abs(pct_chg) > 3.50:
+        # नियम #2: हाई-RVOL रनवे अनलॉक (सुस्त शेयर्स 3.0% पर ब्लॉक, लेकिन RVOL >= 4.5x वाले 5.5% तक पास)
+        max_morning_move = 5.50 if rvol >= 4.50 else 3.00
+        if is_morning and abs(pct_chg) > max_morning_move:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'MORNING_MOVE_ALREADY_EXHAUSTED ({pct_chg:+.2f}% > 3.50% in morning slab)'
+                'failed_gate': f'MORNING_MOVE_EXHAUSTED ({pct_chg:+.2f}% > {max_morning_move:.2f}% cap | RVOL={rvol:.1f}x)'
             }
 
         # नियम #4: दिन में 5.0% से ज्यादा भागे शेयर्स पर नो-एंट्री (Anti-FOMO Top Chasing Cap)
@@ -824,11 +823,12 @@ class DailyAutonomousScreener:
         # संस्थागत सुधार #2: केवल A-Grade (Score >= 90.0) ट्रेड्स ही स्टेज-2 में जाएँगे!
         # सुबह 09:30 से 10:15 के बीच 78-85 स्कोर वाले कमजोर/चॉपी ट्रेड्स 100% ब्लॉक।
         # =====================================================================
+        # केवल उच्च-संभावना संस्थागत ट्रेड्स: इंडेक्स या स्टॉक्स जिनका RVOL >= 4.50x हो!
         stage1_passed = [
             r for r in eval_results 
             if r.get('passed', False) and (
-                r.get('score', 0.0) >= 90.0 or 
-                (float(r.get('rvol', 0.0)) >= 4.5 and abs(float(r.get('pct_change', 0.0))) >= 0.60 and r.get('score', 0.0) >= 88.0)
+                r.get('is_index', False) or 
+                (float(r.get('rvol', 0.0)) >= 4.50 and r.get('score', 0.0) >= 90.0)
             )
         ]
 
@@ -968,7 +968,8 @@ class DailyAutonomousScreener:
                 day_high_3m = max(float(live_q.get('high', spot)), float(stk_df['high'].max()))
                 day_low_3m = min(float(live_q.get('low', spot)), float(stk_df['low'].min())) if float(live_q.get('low', 0)) > 0 else float(stk_df['low'].min())
                 day_total_expansion = day_high_3m - day_low_3m
-                max_expansion_mult = 2.00 if cand_rvol >= 2.50 else 1.35
+                # संस्थागत ऑपरेटर रनवे: RVOL >= 4.5x होने पर 2.75x ATR तक की बड़ी रैली की अनुमति
+                max_expansion_mult = 2.75 if cand_rvol >= 4.50 else 1.35
                 if day_total_expansion > (stock_atr * max_expansion_mult):
                     print(
                         f"  [EXHAUSTED RUNWAY REJECTED]: {sym} ({direction}) -> Day Range {day_total_expansion:.2f} pts "
@@ -1001,8 +1002,10 @@ class DailyAutonomousScreener:
                 # यदि RVOL >= 2.5x है तो 3.20% तक का मूव चेज़िंग नहीं बल्कि डे-हाई मोमेंटम ब्रेकआउट (APOLLOHOSP / DIXON) है!
                 # HYUNDAI (+3.05% कमजोर वॉल्यूम टॉप चेज़िंग) और BDL (-2.70% बॉटम सेलिंग) पूरी तरह ब्लॉक रहेंगे!
                 # =====================================================================
-                max_allowed_pct = 3.20 if cand_rvol >= 2.50 else 2.60
-                if abs(day_pct) > max_allowed_pct and cand_rvol < 5.0:
+                # संस्थागत रनवे क्लियरेंस: यदि RVOL >= 4.5x है, तो 5.50% तक का मूव चेज़िंग नहीं बल्कि सुपर-रॉकेट है!
+                # यदि RVOL < 4.5x है (सुस्त शेयर), तो उसे 2.60% पर ही ब्लॉक करें।
+                max_allowed_pct = 5.50 if cand_rvol >= 4.50 else 2.60
+                if abs(day_pct) > max_allowed_pct:
                     print(
                         f"  [LATE_EXHAUSTION_BLOCKED]: {sym} -> Day Move {day_pct:+.2f}% > {max_allowed_pct:.2f}% "
                         f"(Late blow-off chasing trap avoided!)"
@@ -1105,9 +1108,10 @@ class DailyAutonomousScreener:
                     curr_3m_v = max(curr_3m_v, float(stk_df.iloc[-3].get('volume', 0.0)))
                 real_3m_rvol = round(curr_3m_v / max(1.0, base_3m_v), 2) if base_3m_v > 0 else cand.get('rvol', 2.5)
                 cand['rvol'] = real_3m_rvol
-                min_rvol_req = 1.50 if cum_mom_ok else 1.75
+                # 3-मिनट कैंडल में भी न्यूनतम 4.50x का संस्थागत दबाव अनिवार्य (सुस्त शेयर 100% बाहर)
+                min_rvol_req = 4.50
                 if real_3m_rvol < min_rvol_req:
-                    print(f"  [INSTITUTIONAL_RVOL_REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < {min_rvol_req:.2f}x (Insufficient Momentum)")
+                    print(f"  [INSTITUTIONAL_RVOL_REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < {min_rvol_req:.2f}x (Sluggish Stock Blocked)")
                     continue
 
                 # =====================================================================
