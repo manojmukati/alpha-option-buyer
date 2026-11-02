@@ -1460,12 +1460,24 @@ class DailyAutonomousScreener:
 
 if __name__ == '__main__':
     screener = DailyAutonomousScreener()
-    if '--slab-session' in sys.argv:
-        screener.run_live_slab_session(interval_seconds=300)
-    elif '--slab-loop' in sys.argv:
-        screener.run_live_slab_loop()
-    elif '--eod-audit' in sys.argv or '--send-journal' in sys.argv:
+    if '--eod-audit' in sys.argv or '--send-journal' in sys.argv:
         screener.run_eod_analysis_and_dispatch()
-    else:
+    elif '--single-scan' in sys.argv:
         ignore_win = ('--ignore-window' in sys.argv)
         screener.run_screener(ignore_window=ignore_win)
+    elif '--slab-loop' in sys.argv:
+        screener.run_live_slab_loop()
+    else:
+        # =====================================================================
+        # संस्थागत सुधार: ऑटोमैटिक स्लैब सेशन रनर (No Cron Drop Dependency)
+        # सुबह 09:30 से 10:15 और दोपहर 01:15 से 02:15 के दौरान स्वतः 300s लूप चलाता है
+        # =====================================================================
+        ist_now = get_ist_time()
+        cur_m = ist_now.hour * 60 + ist_now.minute
+        is_morn = (9 * 60 + 30 <= cur_m <= 10 * 60 + 15)
+        is_aft = (13 * 60 + 15 <= cur_m <= 14 * 60 + 15)
+        if is_morn or is_aft or '--slab-session' in sys.argv:
+            screener.run_live_slab_session(interval_seconds=300)
+        else:
+            ignore_win = ('--ignore-window' in sys.argv)
+            screener.run_screener(ignore_window=ignore_win)
