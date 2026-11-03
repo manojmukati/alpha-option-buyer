@@ -353,7 +353,20 @@ class LiveMarketDataFeed:
             except Exception:
                 pass
 
+        # 4. Resilient NSE Live Bulk Snapshot Fallback (Guarantees non-empty universe)
+        if not fo_symbols:
+            try:
+                snap = fetch_bulk_nse_snapshot(force_refresh=True)
+                if snap:
+                    for k in snap.keys():
+                        if k and k not in ['NIFTYFPI', 'SYMBOL']:
+                            fo_symbols.append(k)
+            except Exception:
+                pass
+
         all_assets = sorted(list(set(indices + fo_symbols)))
+        if not all_assets:
+            all_assets = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
         return [{'symbol': s} for s in all_assets]
 
     def get_live_asset_quote(self, symbol):
@@ -442,8 +455,11 @@ class LiveMarketDataFeed:
                     rng_1m = np.maximum(0.01, df_hist['high'] - df_hist['low'])
                     df_hist['delta'] = df_hist['volume'] * ((2.0 * df_hist['close'] - (df_hist['high'] + df_hist['low'])) / rng_1m)
 
-                # Compute 5-day average 3-minute bar volume as an institutional baseline + 9-EMA + Sub-Bar Micro-Delta
-                df_all_3m = df_hist.resample('3min', origin='start').agg({
+                if df_hist.index.tz is not None:
+                    df_hist.index = df_hist.index.tz_convert('Asia/Kolkata')
+
+                # Compute 5-day average 3-minute bar volume as an institutional baseline + 9-EMA
+                df_all_3m = df_hist.resample('3min', label='left', closed='left').agg({
                     'open': 'first',
                     'high': 'max',
                     'low': 'min',
@@ -455,8 +471,18 @@ class LiveMarketDataFeed:
                 pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
                 hist_avg_3m_vol = float(pos_vols.mean()) if not pos_vols.empty else 0.0
 
+                # Isolate today's session strictly (zero cross-day bar contamination)
                 latest_date = df_hist.index[-1].date()
-                df_3m = df_all_3m[df_all_3m.index.date == latest_date].copy()
+                raw_today = df_hist[df_hist.index.date == latest_date]
+                df_3m = raw_today.resample('3min', label='left', closed='left').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum',
+                    'delta': 'sum'
+                }).dropna(subset=['open', 'high', 'low', 'close'])
+                df_3m['ema9'] = df_3m['close'].ewm(span=9, adjust=False).mean()
 
                 if not df_3m.empty:
                     df_3m.reset_index(inplace=True)

@@ -266,12 +266,12 @@ class DailyAutonomousScreener:
             day_open = float(df_nifty['open'].iloc[0])
             move_from_open = round(nifty_spot - day_open, 2)
 
-            # Climax candle check on Nifty (Pillar 3 Anti-Exhaustion)
+            # Climax candle check on Nifty (Pillar 3 Anti-Exhaustion - Calibrated for high-volatility 24,000+ Index)
             n_bar_rng = float(eval_b['high'] - eval_b['low'])
-            if n_bar_rng > 35.0:
+            if n_bar_rng > 65.0:
                 allow_call = False
                 allow_put = False
-                reason = f"NIFTY_CLIMAX_EXHAUSTION_BAR ({n_bar_rng:.1f}pts > 35pts)"
+                reason = f"NIFTY_CLIMAX_EXHAUSTION_BAR ({n_bar_rng:.1f}pts > 65pts)"
             else:
                 recent_rng = round(df_nifty['high'].tail(6).max() - df_nifty['low'].tail(6).min(), 2)
                 ema_distance = abs(nifty_spot - ema9)
@@ -337,13 +337,13 @@ class DailyAutonomousScreener:
         if comp_width > max_allowed_base:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_BASE_TOO_WIDE ({comp_width:.1f} > {max_allowed_base:.1f}pts)', 'is_index': True}
 
-        # Pillar 3 Anti-Exhaustion: Climax Bar Check (Single 3m bar cannot be a blow-off explosion)
-        max_bar_rng = 35.0 if sym_clean != 'BANKNIFTY' else 80.0
+        # Pillar 3 Anti-Exhaustion: Climax Bar Check (Calibrated for real institutional momentum expansion)
+        max_bar_rng = 65.0 if sym_clean != 'BANKNIFTY' else 150.0
         if rng > max_bar_rng:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_CLIMAX_EXHAUSTION_BAR ({rng:.1f} > {max_bar_rng:.1f}pts)', 'is_index': True}
 
         solid_body = round(abs(b_close - b_open) / rng, 2)
-        idx_dist = 20.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 45.0
+        idx_dist = 35.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 80.0
 
         direction = None
         if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high and b_close > b_open:
@@ -536,9 +536,9 @@ class DailyAutonomousScreener:
         near_day_high = (direction == 'CALL' and b_close >= (day_high - stock_atr * 0.12))
         near_day_low = (direction == 'PUT' and b_close <= (day_low + stock_atr * 0.12))
 
-        if is_afternoon:
-            if not (near_day_high or near_day_low):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'AFTERNOON_NOT_DAY_HIGH_LOW_BREAKOUT', 'is_index': False}
+        # BUG 5 FIX: Strict Day High / Day Low Check with 0.12 * ATR Buffer (Applied to Morning & Afternoon to block mid-range chop)
+        if not (near_day_high or near_day_low):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NOT_DAY_HIGH_LOW_BREAKOUT_CHOP_TRAP', 'is_index': False}
 
         # BUG 4 FIX: Dynamic Nifty Macro Check (Pre-computed Context Passed In)
         if nifty_context is None:
