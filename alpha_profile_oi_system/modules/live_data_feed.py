@@ -536,6 +536,53 @@ class LiveMarketDataFeed:
 
         return None
 
+    def get_option_quote(self, symbol, contract_identifier=None, strike=None, side='CE'):
+        """
+        Retrieves real-time option contract quote (bid, ask, ltp, volume, oi) directly from NSE option chain.
+        """
+        sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+        oc_data = self.fetch_live_option_chain_data(sym_clean)
+        if not oc_data or 'records' not in oc_data or 'data' not in oc_data['records']:
+            return None
+
+        target_side = side.upper() if side else 'CE'
+        for item in oc_data['records']['data']:
+            sides_to_check = [target_side] if side else ['CE', 'PE']
+            for s in sides_to_check:
+                side_dict = item.get(s)
+                if not side_dict:
+                    continue
+
+                match = False
+                if contract_identifier:
+                    if side_dict.get('identifier') == contract_identifier:
+                        match = True
+                    elif contract_identifier.endswith(s) and str(int(float(side_dict.get('strikePrice', 0)))) in contract_identifier:
+                        match = True
+                elif strike and float(side_dict.get('strikePrice', 0)) == float(strike):
+                    match = True
+
+                if match:
+                    ltp = float(side_dict.get('lastPrice', 0.0))
+                    bid = float(side_dict.get('buyPrice1', 0.0) or ltp)
+                    ask = float(side_dict.get('sellPrice1', 0.0) or ltp)
+                    return {
+                        'contract': side_dict.get('identifier', contract_identifier),
+                        'symbol': sym_clean,
+                        'strike': float(side_dict.get('strikePrice', 0)),
+                        'side': s,
+                        'ltp': ltp,
+                        'bid': bid if bid > 0 else ltp,
+                        'ask': ask if ask > 0 else ltp,
+                        'volume': int(side_dict.get('totalTradedVolume', 0)),
+                        'oi': int(side_dict.get('openInterest', 0)),
+                        'change_oi': int(side_dict.get('changeinOpenInterest', 0)),
+                        'iv': float(side_dict.get('impliedVolatility', 0.0) or 0.0),
+                        'timestamp': time.time(),
+                        'valid': (ltp > 0.0)
+                    }
+        return None
+
     def get_live_dual_oi_confluence(self, symbol, cur_spot_or_strike, direction='CALL'):
         """
         Pillar 4: True -4 Strike | 0 (ATM/Spot) | +4 Strike Live Option Chain OI & Volume Engine.

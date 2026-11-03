@@ -1,5 +1,6 @@
 import datetime
 import os
+import sys
 import json
 import time
 import requests
@@ -127,7 +128,10 @@ class TelegramNotifier:
     def send_broadcast_message(self, text, parse_mode="HTML", is_trade_signal=False):
         if not self.is_configured():
             print("[TELEGRAM SIMULATED ALERT]:")
-            print(text)
+            try:
+                print(text)
+            except UnicodeEncodeError:
+                print(text.encode(sys.stdout.encoding or 'ascii', errors='replace').decode(sys.stdout.encoding or 'ascii'))
             print("-" * 50)
             return {"ok": True, "simulated": True}
 
