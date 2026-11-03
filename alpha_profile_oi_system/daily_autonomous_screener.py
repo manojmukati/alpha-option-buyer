@@ -902,18 +902,29 @@ class DailyAutonomousScreener:
             f"AllowStockPUT={nifty_regime['allow_stock_put']} | {nifty_regime['reason']}"
         )
 
-        symbols = [x['symbol'] for x in self.universe]
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            eval_results = list(executor.map(self.evaluate_asset, symbols))
+        # PHASE A: DEDICATED INDEX ENGINE (Priority 1: Run 4 Indices First!)
+        # -------------------------------------------------------------
+        index_symbols = [s for s in INDEX_NAMES]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            index_eval_results = list(executor.map(lambda s: self.evaluate_index_engine(s, is_afternoon=is_afternoon), index_symbols))
 
-        # Stage 1 Qualification Filter (Candidates have already passed all 5-Pillar quantitative filters)
-        stage1_passed = [
-            r for r in eval_results 
+        index_candidates = [
+            r for r in index_eval_results 
             if r.get('passed', False) and r.get('score', 0.0) >= 70.0
         ]
+        index_candidates.sort(key=lambda x: (x.get('score', 0.0), x.get('rvol', 0.0)), reverse=True)
 
-        # Priority: Institutional Setup Score first, Cash Turnover second, RVOL third (Blocks slot-theft!)
-        stage1_passed.sort(
+        # PHASE B: DEDICATED STOCK ENGINE (Priority 2: Run Stock F&O Universe Second!)
+        # -------------------------------------------------------------
+        stock_symbols = [x['symbol'] for x in self.universe if x['symbol'] not in INDEX_NAMES]
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            stock_eval_results = list(executor.map(lambda s: self.evaluate_stock_engine(s, is_afternoon=is_afternoon), stock_symbols))
+
+        stock_candidates = [
+            r for r in stock_eval_results 
+            if r.get('passed', False) and r.get('score', 0.0) >= 70.0
+        ]
+        stock_candidates.sort(
             key=lambda x: (
                 x.get('score', 0.0),
                 x.get('turnover_cr', 0.0),
@@ -922,39 +933,83 @@ class DailyAutonomousScreener:
             reverse=True
         )
 
-        print(f"[STAGE-1 COMPLETE]: Scanned {len(symbols)} assets. {len(stage1_passed)} candidates passed discovery.")
+        all_eval_results = index_eval_results + stock_eval_results
+        total_scanned = len(index_symbols) + len(stock_symbols)
+        print(f"[DISCOVERY COMPLETE]: Scanned {total_scanned} assets ({len(index_symbols)} Indices, {len(stock_symbols)} Stocks).")
+        print(f"[QUALIFIED DISCOVERY]: {len(index_candidates)} Index candidate(s), {len(stock_candidates)} Stock candidate(s).")
 
         # STAGE 2: Real 3-Minute Breakout, Live Spot Holding & BVC CVD Audit
         verified_super_trades = []
         stage2_rejections = {}
         active_slab_index = morn_idx_count if is_morning else aft_idx_count
         active_slab_stock = morn_stk_count if is_morning else aft_stk_count
-        remaining_slab_slots = max(0, MAX_SLAB_TRADES - active_slab_count)
-        slab_cap = min(MAX_SLAB_TRADES, remaining_slab_slots)
 
-        for cand in stage1_passed:
-            if len(verified_super_trades) >= slab_cap:
-                break
+        # 1. Evaluate Index Candidates into Dedicated Index Slot (Max 1 per slab)
+        for cand in index_candidates:
+            if active_slab_index >= MAX_INDEX_PER_SLAB:
+                stage2_rejections[cand['symbol']] = "MAX_INDEX_PER_SLAB_CAP_REACHED"
+                continue
 
             sym = cand['symbol']
-            is_idx = cand.get('is_index', False)
-
-            if is_idx and active_slab_index >= MAX_INDEX_PER_SLAB:
-                stage2_rejections[sym] = "MAX_INDEX_PER_SLAB_CAP_REACHED"
-                continue
-            if not is_idx and active_slab_stock >= MAX_STOCKS_PER_SLAB:
-                stage2_rejections[sym] = "MAX_STOCK_PER_SLAB_CAP_REACHED"
-                continue
-
             if self.is_already_dispatched(sym):
                 stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
                 continue
 
-            # -------------------------------------------------------------
-            # STAGE 2: LIVE SPOT HOLDING RE-CONFIRMATION
-            # -------------------------------------------------------------
-            # Engine has already verified RVOL, BVC CVD, Base Runway, Anti-Exhaustion & Macro Tide.
-            # Here we re-confirm live ticking spot holds the breakout boundary.
+            stk_df = self.data_feed.get_live_intraday_bars(sym)
+            if stk_df is None or len(stk_df) < 10:
+                stage2_rejections[sym] = "INSUFFICIENT_3M_BARS_LESS_THAN_10"
+                continue
+
+            live_bar = stk_df.iloc[-1]
+            l_close = float(live_bar['close'])
+            spot = cand['spot_price']
+            direction = cand['direction']
+
+            comp_bars = stk_df.iloc[:-2].tail(8)
+            comp_high = float(comp_bars['high'].max())
+            comp_low = float(comp_bars['low'].min())
+            spot_buffer = 15.0 if sym == 'BANKNIFTY' else 8.0
+
+            if direction == 'CALL':
+                live_holding = (spot >= comp_high - spot_buffer) and (l_close >= comp_high - spot_buffer)
+            else:
+                live_holding = (spot <= comp_low + spot_buffer) and (l_close <= comp_low + spot_buffer)
+
+            if not live_holding:
+                stage2_rejections[sym] = f"LIVE_SPOT_FAILED_HOLDING (Spot {spot:.2f} vs Base Level)"
+                continue
+
+            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction)
+            if not oi_conf.get('confluent', False):
+                stage2_rejections[sym] = f"OI_RUNWAY_REJECTED: {oi_conf.get('reason')}"
+                continue
+
+            opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym)
+            if not opt or not opt.get('is_live_chain_verified', False) or float(opt.get('entry_price', 0.0)) < 2.0:
+                stage2_rejections[sym] = "LIVE_OPTION_CHAIN_LTP_UNAVAILABLE"
+                continue
+
+            contract = opt['contract']
+            if self.is_already_dispatched(sym, contract):
+                stage2_rejections[sym] = "CONTRACT_ALREADY_DISPATCHED"
+                continue
+
+            cand['verified_opt'] = opt
+            cand['oi_confluent'] = True
+            verified_super_trades.append(cand)
+            active_slab_index += 1
+
+        # 2. Evaluate Stock Candidates into Dedicated Stock Slots (Max 2 per slab)
+        for cand in stock_candidates:
+            if active_slab_stock >= MAX_STOCKS_PER_SLAB:
+                stage2_rejections[cand['symbol']] = "MAX_STOCK_PER_SLAB_CAP_REACHED"
+                continue
+
+            sym = cand['symbol']
+            if self.is_already_dispatched(sym):
+                stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
+                continue
+
             stk_df = self.data_feed.get_live_intraday_bars(sym)
             if stk_df is None or len(stk_df) < 10:
                 stage2_rejections[sym] = "INSUFFICIENT_3M_BARS_LESS_THAN_10"
@@ -969,7 +1024,7 @@ class DailyAutonomousScreener:
             comp_high = float(comp_bars['high'].max())
             comp_low = float(comp_bars['low'].min())
             stock_atr = float(cand.get('stock_atr', 30.0))
-            spot_buffer = (stock_atr * 0.05) if not is_idx else (15.0 if sym == 'BANKNIFTY' else 8.0)
+            spot_buffer = stock_atr * 0.05
 
             if direction == 'CALL':
                 live_holding = (spot >= comp_high - spot_buffer) and (l_close >= comp_high - spot_buffer)
@@ -980,17 +1035,12 @@ class DailyAutonomousScreener:
                 stage2_rejections[sym] = f"LIVE_SPOT_FAILED_HOLDING (Spot {spot:.2f} vs Base Level)"
                 continue
 
-
-            # -------------------------------------------------------------
-            # STAGE 3: LIVE OPTION CHAIN, OI CONFLUENCE & REAL LTP AUDIT
-            # -------------------------------------------------------------
-            direction = cand['direction']
-            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, cand['spot_price'], direction=direction)
+            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction)
             if not oi_conf.get('confluent', False):
                 stage2_rejections[sym] = f"OI_RUNWAY_REJECTED: {oi_conf.get('reason')}"
                 continue
 
-            opt = self.data_feed.compute_option_pricing(cand['spot_price'], direction=direction, symbol=sym)
+            opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym)
             if not opt or not opt.get('is_live_chain_verified', False) or float(opt.get('entry_price', 0.0)) < 2.0:
                 stage2_rejections[sym] = "LIVE_OPTION_CHAIN_LTP_UNAVAILABLE"
                 continue
@@ -1003,15 +1053,26 @@ class DailyAutonomousScreener:
             cand['verified_opt'] = opt
             cand['oi_confluent'] = True
             verified_super_trades.append(cand)
-
-            if is_idx: active_slab_index += 1
-            else: active_slab_stock += 1
+            active_slab_stock += 1
 
         # Log Full Diagnostic Audit
-        self._log_rejection_audit(ist_now, eval_results, verified_super_trades, stage2_rejections)
+        self._log_rejection_audit(ist_now, all_eval_results, verified_super_trades, stage2_rejections)
 
         if not verified_super_trades:
-            print(f"[SCREENER]: 0 signals qualified after full 217 scan & live OI audit at {ist_time_str}. Capital 100% Protected.")
+            print(f"[SCREENER]: 0 signals qualified after separate Index & Stock scan at {ist_time_str}. Capital 100% Protected.")
+            # Dispatches confirmation heartbeat strictly to Owner Chatbot (Never spams Group)
+            heartbeat_msg = (
+                f"🛡️ <b>ALPHA 5-PILLAR SCANNER STATUS</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ <b>Execution Time:</b> {ist_time_str}\n"
+                f"📊 <b>Universe Scanned:</b> {total_scanned} Assets\n"
+                f"🏛️ <b>Index Engine:</b> 4 Indices Evaluated (Slots: {active_slab_index}/{MAX_INDEX_PER_SLAB})\n"
+                f"📈 <b>Stock Engine:</b> {len(stock_symbols)} Stocks Evaluated (Slots: {active_slab_stock}/{MAX_STOCKS_PER_SLAB})\n"
+                f"🛡️ <b>Status:</b> Zero 5-Pillar Confluent Breakouts\n"
+                f"🔒 <b>Capital Protection:</b> 100% Active (Zero Forced Trades)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            self.notifier.send_broadcast_message(heartbeat_msg, is_trade_signal=False)
             return
 
         print(f"[SCREENER]: Verified {len(verified_super_trades)} INSTITUTIONAL SUPER TRADE(S)! Dispatching...")
