@@ -106,23 +106,9 @@ def compute_bar_delta_proxy(df_bars, is_index=False):
     rngs = np.maximum(0.01, highs - lows)
     tot_vol = np.sum(vols)
 
-    if tot_vol > 0:
-        if 'delta' in df_bars.columns:
-            deltas = df_bars['delta'].values.astype(float)
-            method_str = 'BVC_SUBBAR_MICRO_DELTA'
-        else:
-            deltas = vols * ((2.0 * closes - (highs + lows)) / rngs)
-            method_str = 'BVC_VOLUME_DELTA'
-        session_cvd_raw = float(np.sum(deltas))
-        session_cvd_ratio = round(session_cvd_raw / max(1.0, tot_vol), 3)
-
-        rec_n = min(3, len(df_bars))
-        rec_vol = float(np.sum(vols[-rec_n:]))
-        rec_delta = float(np.sum(deltas[-rec_n:]))
-        recent_cvd_ratio = round(rec_delta / max(1.0, rec_vol), 3)
-    else:
+    if is_index or tot_vol == 0:
         if is_index:
-            # Spot Index Range Proxy: Preserves Index breakouts when spot volume is 0
+            # Spot Index Range Proxy: True institutional delta proxy from spot price action
             deltas = (2.0 * closes - (highs + lows))
             tot_rng = float(np.sum(rngs))
             session_cvd_raw = float(np.sum(deltas))
@@ -143,6 +129,20 @@ def compute_bar_delta_proxy(df_bars, is_index=False):
                 'reason': 'STOCK_VOLUME_UNAVAILABLE_OR_ZERO',
                 'method': 'NONE'
             }
+    else:
+        if 'delta' in df_bars.columns:
+            deltas = df_bars['delta'].values.astype(float)
+            method_str = 'BVC_SUBBAR_MICRO_DELTA'
+        else:
+            deltas = vols * ((2.0 * closes - (highs + lows)) / rngs)
+            method_str = 'BVC_VOLUME_DELTA'
+        session_cvd_raw = float(np.sum(deltas))
+        session_cvd_ratio = round(session_cvd_raw / max(1.0, tot_vol), 3)
+
+        rec_n = min(3, len(df_bars))
+        rec_vol = float(np.sum(vols[-rec_n:]))
+        rec_delta = float(np.sum(deltas[-rec_n:]))
+        recent_cvd_ratio = round(rec_delta / max(1.0, rec_vol), 3)
 
     cvd_dir = 'NEUTRAL'
     if recent_cvd_ratio >= 0.15 and session_cvd_ratio >= 0.0:
@@ -361,13 +361,14 @@ class DailyAutonomousScreener:
             n_open = float(df_nifty['open'].iloc[0])
             move_from_open = n_spot - n_open
 
-            # Block CALL if Nifty is below 9EMA and has dropped >= 50 pts or moving down strongly from open
-            if direction == 'CALL' and ((n_spot < n_ema9 and drop_from_high >= 50.0) or (move_from_open < -40.0 and n_spot < n_ema9)):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_DOWNTREND: Nifty < 9EMA & move={move_from_open:.1f}pts', 'is_index': True}
+            # Anti-Trap Gap-Down / Gap-Up Dead-Cat Bounce Protection
+            # Block CALL if Nifty is down > 40 pts from open OR below 9-EMA with 50+ pts drop
+            if direction == 'CALL' and (move_from_open < -40.0 or (n_spot < n_ema9 and drop_from_high >= 50.0)):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_DOWNTREND_BLOCKED (Nifty move {move_from_open:+.1f}pts from open)', 'is_index': True}
 
-            # Block PUT if Nifty is above 9EMA and has risen >= 50 pts or moving up strongly from open
-            if direction == 'PUT' and ((n_spot > n_ema9 and rise_from_low >= 50.0) or (move_from_open > +40.0 and n_spot > n_ema9)):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_UPTREND: Nifty > 9EMA & move={move_from_open:+.1f}pts', 'is_index': True}
+            # Block PUT if Nifty is up > 40 pts from open OR above 9-EMA with 50+ pts rise
+            if direction == 'PUT' and (move_from_open > +40.0 or (n_spot > n_ema9 and rise_from_low >= 50.0)):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_UPTREND_BLOCKED (Nifty move {move_from_open:+.1f}pts from open)', 'is_index': True}
 
         # BVC Cumulative Volume Delta for Index
         cvd_res = compute_bar_delta_proxy(idx_df.iloc[:-1], is_index=True)
@@ -431,10 +432,12 @@ class DailyAutonomousScreener:
                 'is_index': False
             }
 
-        # BUG 6 FIX: Fast Pre-Filter for 213 Stocks (Zero Network calls for dead/flat stocks)
-        pct_change = abs(float(q.get('pct_change', 0.0)))
-        if pct_change < 0.35:
+        # BUG 6 FIX: Fast Pre-Filter for 213 Stocks (Zero Network calls for dead/flat or overextended stocks)
+        pct_change = float(q.get('pct_change', 0.0))
+        if abs(pct_change) < 0.35:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INSIGNIFICANT_DAY_MOVE ({pct_change:.2f}% < 0.35%)', 'is_index': False}
+        if abs(pct_change) > 3.00:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'EXTREME_DAY_MOVE_OVEREXTENDED ({pct_change:+.2f}% > 3.00%)', 'is_index': False}
 
         stk_df = self.data_feed.get_live_intraday_bars(sym_clean)
         if stk_df is None or len(stk_df) < 10:
@@ -499,12 +502,10 @@ class DailyAutonomousScreener:
         real_rvol = round(curr_v / base_v, 2)
         turnover_cr = round((curr_v * cur_p) / 1e7, 2)
 
-        if real_rvol < 1.50:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_BELOW_INSTITUTIONAL_FLOOR ({real_rvol:.2f}x < 1.50x)', 'is_index': False}
+        if real_rvol < 1.80:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_BELOW_INSTITUTIONAL_FLOOR ({real_rvol:.2f}x < 1.80x)', 'is_index': False}
         if turnover_cr < 3.0:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TURNOVER_BELOW_FLOOR (Rs {turnover_cr:.1f}Cr < 3.0Cr)', 'is_index': False}
-        if real_rvol < 1.80 and turnover_cr < 6.0:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_INSUFFICIENT ({real_rvol:.2f}x < 1.80x, Turn {turnover_cr:.1f}Cr)', 'is_index': False}
 
         # BUG 1 FIX: True Breakout Bar Delta Ratio directly from BVC Microstructure formula
         completed_bars = stk_df.iloc[:-1]
@@ -550,16 +551,16 @@ class DailyAutonomousScreener:
         n_drop = nifty_context.get('drop_high', 0.0)
         n_rise = nifty_context.get('rise_low', 0.0)
 
-        # Mega heavyweights CANNOT trade against Nifty macro tide
+        # Mega heavyweights CANNOT trade against Nifty macro direction
         if sym_clean in NIFTY_HEAVYWEIGHTS:
-            if direction == 'CALL' and ((n_spot < n_ema9 and n_drop >= 60.0) or n_move < -50.0):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty drop {n_drop:.1f}pts below EMA9', 'is_index': False}
-            if direction == 'PUT' and ((n_spot > n_ema9 and n_rise >= 60.0) or n_move > +50.0):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty rise {n_rise:.1f}pts above EMA9', 'is_index': False}
+            if direction == 'CALL' and n_move < -15.0:
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty move {n_move:.1f}pts', 'is_index': False}
+            if direction == 'PUT' and n_move > +15.0:
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty move {n_move:+.1f}pts', 'is_index': False}
 
         # Decoupled Alpha Outperformer (SUPREMEIND rule)
-        is_counter = (direction == 'CALL' and (n_move < -50.0 or n_spot < n_ema9 - 25.0)) or \
-                     (direction == 'PUT' and (n_move > +50.0 or n_spot > n_ema9 + 25.0))
+        is_counter = (direction == 'CALL' and (n_move < -30.0 or n_spot < n_ema9 - 25.0)) or \
+                     (direction == 'PUT' and (n_move > +30.0 or n_spot > n_ema9 + 25.0))
         if is_counter:
             if not ((near_day_high or near_day_low) and turnover_cr >= 4.0 and abs(bar_delta_ratio) >= 0.35):
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'COUNTER_TREND_NOT_ALIGNED: Nifty move {n_move:+.1f} pts', 'is_index': False}
@@ -895,7 +896,17 @@ class DailyAutonomousScreener:
         self.update_open_paper_trades()
 
         if not ignore_window and not is_in_active_trading_slab(ist_now):
-            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside active trading slabs. Maintaining complete silence.")
+            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside active trading slabs.")
+            outside_msg = (
+                f"🛡️ <b>ALPHA CRON RUNNER ACTIVE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ <b>Trigger Time:</b> {ist_time_str}\n"
+                f"📌 <b>Status:</b> Outside Designated Trading Slab\n"
+                f"⏳ <b>Next Active Window:</b> 09:30-10:15 AM or 01:15-02:15 PM IST\n"
+                f"🔒 <b>Capital Protection:</b> 100% Active (Quiet in Group)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            self.notifier.send_broadcast_message(outside_msg, is_trade_signal=False)
             return
 
         # Balanced Slab Allocation
@@ -930,6 +941,15 @@ class DailyAutonomousScreener:
         active_slab_count = morn_count if is_morning else aft_count
         if active_slab_count >= MAX_SLAB_TRADES and not ignore_window:
             print(f"[SLAB CAP REACHED]: {active_slab_count}/{MAX_SLAB_TRADES} trades already dispatched in this slab. Capital protected.")
+            cap_msg = (
+                f"🛡️ <b>ALPHA SLAB ALLOCATION COMPLETE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ <b>Execution Time:</b> {ist_time_str}\n"
+                f"📌 <b>Status:</b> Slab Cap ({active_slab_count}/{MAX_SLAB_TRADES}) Reached\n"
+                f"🔒 <b>Capital Protection:</b> Active (Zero Overtrading)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            self.notifier.send_broadcast_message(cap_msg, is_trade_signal=False)
             return
 
         # STAGE 1: Consolidated NSE Bulk Snapshot Fetch

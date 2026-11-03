@@ -391,9 +391,15 @@ class LiveMarketDataFeed:
 
         yf_map = {
             'NIFTY': '^NSEI',
+            'NSEI': '^NSEI',
+            'NIFTY 50': '^NSEI',
             'BANKNIFTY': '^NSEBANK',
+            'NSEBANK': '^NSEBANK',
+            'NIFTY BANK': '^NSEBANK',
             'FINNIFTY': 'NIFTY_FIN_SERVICE.NS',
-            'MIDCPNIFTY': 'NIFTY_MID_SELECT.NS'
+            'NIFTY_FIN_SERVICE': 'NIFTY_FIN_SERVICE.NS',
+            'MIDCPNIFTY': 'NIFTY_MID_SELECT.NS',
+            'NIFTY_MID_SELECT': 'NIFTY_MID_SELECT.NS'
         }
         ticker = yf_map.get(sym_clean, f"{sym_clean}.NS")
 
@@ -415,7 +421,9 @@ class LiveMarketDataFeed:
             try:
                 df_hist.columns = [c.lower() for c in df_hist.columns]
 
-                # Enrich Index with real ETF constituent volume & order-flow delta
+                is_spot_index = sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NSEI', 'NSEBANK']
+
+                # Enrich Index with real ETF constituent volume
                 if sym_clean in ['NIFTY', 'BANKNIFTY']:
                     try:
                         etf_sym = 'NIFTYBEES.NS' if sym_clean == 'NIFTY' else 'BANKBEES.NS'
@@ -423,14 +431,14 @@ class LiveMarketDataFeed:
                         df_etf = t_etf.history(period='5d', interval='1m')
                         if df_etf is not None and not df_etf.empty:
                             df_etf.columns = [c.lower() for c in df_etf.columns]
-                            rng_e = np.maximum(0.01, df_etf['high'] - df_etf['low'])
-                            df_etf['delta'] = df_etf['volume'] * ((2.0 * df_etf['close'] - (df_etf['high'] + df_etf['low'])) / rng_e)
                             df_hist['volume'] = df_etf['volume'].reindex(df_hist.index).fillna(0)
-                            df_hist['delta'] = df_etf['delta'].reindex(df_hist.index).fillna(0)
                     except Exception:
                         pass
 
-                if 'delta' not in df_hist.columns:
+                if is_spot_index:
+                    # True Range-weighted Order-Flow Delta for spot indices (Never multiply by 0 volume!)
+                    df_hist['delta'] = (2.0 * df_hist['close'] - (df_hist['high'] + df_hist['low']))
+                elif 'delta' not in df_hist.columns:
                     rng_1m = np.maximum(0.01, df_hist['high'] - df_hist['low'])
                     df_hist['delta'] = df_hist['volume'] * ((2.0 * df_hist['close'] - (df_hist['high'] + df_hist['low'])) / rng_1m)
 
@@ -485,8 +493,12 @@ class LiveMarketDataFeed:
                             df_1m['volume'] = df_1m['volume'].fillna(0.0)
                             df_1m.set_index('datetime', inplace=True)
 
-                            rng_1m = np.maximum(0.01, df_1m['high'] - df_1m['low'])
-                            df_1m['delta'] = df_1m['volume'] * ((2.0 * df_1m['close'] - (df_1m['high'] + df_1m['low'])) / rng_1m)
+                            is_spot_index = sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NSEI', 'NSEBANK']
+                            if is_spot_index:
+                                df_1m['delta'] = (2.0 * df_1m['close'] - (df_1m['high'] + df_1m['low']))
+                            else:
+                                rng_1m = np.maximum(0.01, df_1m['high'] - df_1m['low'])
+                                df_1m['delta'] = df_1m['volume'] * ((2.0 * df_1m['close'] - (df_1m['high'] + df_1m['low'])) / rng_1m)
 
                             # Compute 5-day average 3-minute bar volume as institutional baseline + 9-EMA + Sub-Bar Micro-Delta
                             df_all_3m = df_1m.resample('3min', origin='start').agg({

@@ -129,14 +129,18 @@ def check_index_signal(sym, df_today, bar_idx, nifty_day_bars, nifty_spot):
     n_ema9 = float(nifty_day_bars['ema9'].iloc[bar_idx]) if 'ema9' in nifty_day_bars.columns else nifty_spot
     drop_from_high = n_day_high - nifty_spot
     rise_from_low = nifty_spot - n_day_low
-    move_from_open = nifty_spot - n_day_open
+    n_move = nifty_spot - n_day_open
+    idx_day_open = float(df_today.iloc[0]['open'])
+    idx_move = cur_p - idx_day_open
 
-    # Heavy Gap-down / Macro downtrend blocks CALLs; Gap-up blocks PUTs
+    # Strict Macro & Day Open Alignment:
+    # CALL requires Index and Nifty to be green / non-negative (idx_move >= -10.0 and n_move >= -15.0)
     if direction == 'CALL':
-        if (nifty_spot < n_ema9 and drop_from_high >= 50.0) or (move_from_open < -40.0 and nifty_spot < n_ema9):
+        if idx_move < -10.0 or n_move < -15.0 or (nifty_spot < n_ema9 and drop_from_high >= 50.0):
             return None
+    # PUT requires Index and Nifty to be red / non-positive (idx_move <= +10.0 and n_move <= +15.0)
     if direction == 'PUT':
-        if (nifty_spot > n_ema9 and rise_from_low >= 50.0) or (move_from_open > +40.0 and nifty_spot > n_ema9):
+        if idx_move > +10.0 or n_move > +15.0 or (nifty_spot > n_ema9 and rise_from_low >= 50.0):
             return None
 
     # Range Expansion RVOL (Calculated against session median consolidation baseline)
@@ -188,12 +192,16 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
     if spot < MIN_STOCK_PRICE or atr_pct < 1.0:
         return None
 
-    # BUG 6 FIX: Fast Pre-Filter (Insignificant day move < 0.35%)
+    # Anti-Exhaustion Cap: Blocks crashed (-6%) or vertically extended (+6%) stocks
     day_open = float(df_today['open'].iloc[0])
-    pct_from_open = abs((spot - day_open) / max(1.0, day_open)) * 100.0
-    if pct_from_open < 0.35:
+    day_pct_move = ((spot - day_open) / max(1.0, day_open)) * 100.0
+    stk_day_high = float(df_today.iloc[:bar_idx + 1]['high'].max())
+    stk_day_low = float(df_today.iloc[:bar_idx + 1]['low'].min())
+    day_range = stk_day_high - stk_day_low
+    if abs(day_pct_move) > 4.50 or day_range > stock_atr * 1.30:
         return None
 
+    # Pillar 3: 8-Bar Base Compression & Live Spot Holding
     comp_bars = df_today.iloc[:bar_idx - 1].tail(8)
     comp_high = float(comp_bars['high'].max())
     comp_low = float(comp_bars['low'].min())
@@ -203,7 +211,6 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
 
     max_dist_buffer = stock_atr * 0.20
     direction = None
-    # BUG 2 FIX: Real-time Live Spot (spot) Holding Check
     if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and spot >= (comp_high - stock_atr * 0.05):
         direction = 'CALL'
     elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and spot <= (comp_low + stock_atr * 0.05):
@@ -222,25 +229,16 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
     if p3_move > stock_atr * 0.60:
         return None
 
-    # BUG 3 FIX: Full-Day Anti-Exhaustion Check (Move > 3.20% or Day Range > 1.30 * ATR)
-    day_pct_move = ((spot - day_open) / max(1.0, day_open)) * 100.0
-    stk_day_high = float(df_today.iloc[:bar_idx + 1]['high'].max())
-    stk_day_low = float(df_today.iloc[:bar_idx + 1]['low'].min())
-    day_range = stk_day_high - stk_day_low
-    if abs(day_pct_move) > 3.20 or day_range > stock_atr * 1.30:
-        return None
-
     curr_3m_v = float(eval_b.get('volume', 0.0))
     prior_10_bars = df_today.iloc[:bar_idx - 1].tail(10)
     base_10_v = float(prior_10_bars['volume'].mean()) if len(prior_10_bars) > 0 else 1000.0
     real_3m_rvol = round(curr_3m_v / max(1.0, base_10_v), 2)
     turnover_cr = round((curr_3m_v * spot) / 1e7, 2)
 
-    if real_3m_rvol < 1.50:
+    # Pillar 1: Strict Institutional RVOL Floor (No Turnover exceptions allowing low volume!)
+    if real_3m_rvol < 1.80:
         return None
     if turnover_cr < 3.0:
-        return None
-    if real_3m_rvol < 1.80 and turnover_cr < 6.0:
         return None
 
     # BUG 1 FIX: True Breakout Bar Delta Ratio from BVC formula
@@ -267,14 +265,15 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
     n_move = nifty_spot - nifty_day_open
     n_ema = nifty_ema9 if nifty_ema9 is not None else nifty_spot
 
+    # Mega heavyweights CANNOT trade against Nifty macro direction
     if sym in NIFTY_HEAVYWEIGHTS:
-        if direction == 'CALL' and ((nifty_spot < n_ema and nifty_drop >= 60.0) or n_move < -50.0):
+        if direction == 'CALL' and n_move < -15.0:
             return None
-        if direction == 'PUT' and ((nifty_spot > n_ema and nifty_rise >= 60.0) or n_move > +50.0):
+        if direction == 'PUT' and n_move > +15.0:
             return None
 
-    is_counter = (direction == 'CALL' and (n_move < -50.0 or nifty_spot < n_ema - 25.0)) or \
-                 (direction == 'PUT' and (n_move > +50.0 or nifty_spot > n_ema + 25.0))
+    is_counter = (direction == 'CALL' and (n_move < -30.0 or nifty_spot < n_ema - 25.0)) or \
+                 (direction == 'PUT' and (n_move > +30.0 or nifty_spot > n_ema + 25.0))
     if is_counter:
         if not ((near_day_high or near_day_low) and turnover_cr >= 4.0 and abs(bar_delta_ratio) >= 0.35):
             return None
