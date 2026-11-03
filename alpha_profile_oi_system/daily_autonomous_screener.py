@@ -112,8 +112,13 @@ def compute_bar_delta_proxy(df_bars, is_index=False):
     tot_vol = np.sum(vols)
 
     if tot_vol > 0:
-        # Standard Institutional BVC Volume Delta from completed bars
-        deltas = vols * ((2.0 * closes - (highs + lows)) / rngs)
+        # Institutional Sub-Bar Micro-Delta if available, else BVC Volume Delta
+        if 'delta' in df_bars.columns:
+            deltas = df_bars['delta'].values.astype(float)
+            method_str = 'BVC_SUBBAR_MICRO_DELTA'
+        else:
+            deltas = vols * ((2.0 * closes - (highs + lows)) / rngs)
+            method_str = 'BVC_VOLUME_DELTA'
         session_cvd_raw = float(np.sum(deltas))
         session_cvd_ratio = round(session_cvd_raw / max(1.0, tot_vol), 3)
 
@@ -121,7 +126,6 @@ def compute_bar_delta_proxy(df_bars, is_index=False):
         rec_vol = float(np.sum(vols[-rec_n:]))
         rec_delta = float(np.sum(deltas[-rec_n:]))
         recent_cvd_ratio = round(rec_delta / max(1.0, rec_vol), 3)
-        method_str = 'BVC_VOLUME_DELTA'
     else:
         if is_index:
             # Spot Index Proxy (when Volume = 0 in index spot feed): Range-Weighted Proxy

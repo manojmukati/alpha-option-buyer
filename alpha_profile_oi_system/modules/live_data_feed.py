@@ -24,6 +24,7 @@ import datetime
 import threading
 import requests
 import pandas as pd
+import numpy as np
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -413,13 +414,34 @@ class LiveMarketDataFeed:
         if df_hist is not None and not df_hist.empty:
             try:
                 df_hist.columns = [c.lower() for c in df_hist.columns]
-                # Compute 5-day average 3-minute bar volume as an institutional baseline + 9-EMA
+
+                # Enrich Index with real ETF constituent volume & order-flow delta
+                if sym_clean in ['NIFTY', 'BANKNIFTY']:
+                    try:
+                        etf_sym = 'NIFTYBEES.NS' if sym_clean == 'NIFTY' else 'BANKBEES.NS'
+                        t_etf = yf.Ticker(etf_sym)
+                        df_etf = t_etf.history(period='5d', interval='1m')
+                        if df_etf is not None and not df_etf.empty:
+                            df_etf.columns = [c.lower() for c in df_etf.columns]
+                            rng_e = np.maximum(0.01, df_etf['high'] - df_etf['low'])
+                            df_etf['delta'] = df_etf['volume'] * ((2.0 * df_etf['close'] - (df_etf['high'] + df_etf['low'])) / rng_e)
+                            df_hist['volume'] = df_etf['volume'].reindex(df_hist.index).fillna(0)
+                            df_hist['delta'] = df_etf['delta'].reindex(df_hist.index).fillna(0)
+                    except Exception:
+                        pass
+
+                if 'delta' not in df_hist.columns:
+                    rng_1m = np.maximum(0.01, df_hist['high'] - df_hist['low'])
+                    df_hist['delta'] = df_hist['volume'] * ((2.0 * df_hist['close'] - (df_hist['high'] + df_hist['low'])) / rng_1m)
+
+                # Compute 5-day average 3-minute bar volume as an institutional baseline + 9-EMA + Sub-Bar Micro-Delta
                 df_all_3m = df_hist.resample('3min', origin='start').agg({
                     'open': 'first',
                     'high': 'max',
                     'low': 'min',
                     'close': 'last',
-                    'volume': 'sum'
+                    'volume': 'sum',
+                    'delta': 'sum'
                 }).dropna(subset=['open', 'high', 'low', 'close'])
                 df_all_3m['ema9'] = df_all_3m['close'].ewm(span=9, adjust=False).mean()
                 pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
@@ -430,6 +452,7 @@ class LiveMarketDataFeed:
 
                 if not df_3m.empty:
                     df_3m.reset_index(inplace=True)
+                    df_3m.columns = [c.lower() for c in df_3m.columns]
                     df_3m['hist_avg_3m_vol'] = hist_avg_3m_vol
                     self._intraday_cache[sym_clean] = df_3m
                     self._intraday_ts[sym_clean] = now
@@ -462,13 +485,17 @@ class LiveMarketDataFeed:
                             df_1m['volume'] = df_1m['volume'].fillna(0.0)
                             df_1m.set_index('datetime', inplace=True)
 
-                            # Compute 5-day average 3-minute bar volume as institutional baseline + 9-EMA
+                            rng_1m = np.maximum(0.01, df_1m['high'] - df_1m['low'])
+                            df_1m['delta'] = df_1m['volume'] * ((2.0 * df_1m['close'] - (df_1m['high'] + df_1m['low'])) / rng_1m)
+
+                            # Compute 5-day average 3-minute bar volume as institutional baseline + 9-EMA + Sub-Bar Micro-Delta
                             df_all_3m = df_1m.resample('3min', origin='start').agg({
                                 'open': 'first',
                                 'high': 'max',
                                 'low': 'min',
                                 'close': 'last',
-                                'volume': 'sum'
+                                'volume': 'sum',
+                                'delta': 'sum'
                             }).dropna(subset=['open', 'high', 'low', 'close'])
                             df_all_3m['ema9'] = df_all_3m['close'].ewm(span=9, adjust=False).mean()
                             pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
@@ -538,49 +565,94 @@ class LiveMarketDataFeed:
 
     def get_option_quote(self, symbol, contract_identifier=None, strike=None, side='CE'):
         """
-        Retrieves real-time option contract quote (bid, ask, ltp, volume, oi) directly from NSE option chain.
+        Retrieves real-time option contract quote (bid, ask, ltp, volume, oi, iv) directly from NSE option chain.
+        Supports all identifier formats:
+        - Exact NSE identifier: 'OPTIDXNIFTY03-11-2026CE23650.00'
+        - Standard compact symbol: 'CHOLAFIN26NOV1500CE'
+        - Formatted journal name: 'MARUTI 11200 PE'
+        - Direct strike & side arguments: strike=23650, side='CE'
         """
+        import re
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         oc_data = self.fetch_live_option_chain_data(sym_clean)
         if not oc_data or 'records' not in oc_data or 'data' not in oc_data['records']:
             return None
 
+        target_strike = float(strike) if strike is not None else None
         target_side = side.upper() if side else 'CE'
+
+        if contract_identifier:
+            c_str = str(contract_identifier).strip()
+            # 1. First check if exact identifier matches
+            for item in oc_data['records']['data']:
+                for s in ['CE', 'PE']:
+                    side_dict = item.get(s)
+                    if side_dict and side_dict.get('identifier') == c_str:
+                        ltp = float(side_dict.get('lastPrice', 0.0))
+                        bid = float(side_dict.get('buyPrice1', 0.0) or ltp)
+                        ask = float(side_dict.get('sellPrice1', 0.0) or ltp)
+                        return {
+                            'contract': side_dict.get('identifier', c_str),
+                            'symbol': sym_clean,
+                            'strike': float(side_dict.get('strikePrice', 0)),
+                            'side': s,
+                            'ltp': ltp,
+                            'bid': bid if bid > 0 else ltp,
+                            'ask': ask if ask > 0 else ltp,
+                            'volume': int(side_dict.get('totalTradedVolume', 0)),
+                            'oi': int(side_dict.get('openInterest', 0)),
+                            'change_oi': int(side_dict.get('changeinOpenInterest', 0)),
+                            'iv': float(side_dict.get('impliedVolatility', 0.0) or 0.0),
+                            'timestamp': time.time(),
+                            'valid': (ltp > 0.0 or bid > 0.0)
+                        }
+
+            # 2. Parse strike & side from contract string
+            m_after = re.search(r'(CE|PE)(\d+(?:\.\d+)?)', c_str, re.IGNORECASE)
+            m_before = re.search(r'(\d+(?:\.\d+)?)\s*(CE|PE)', c_str, re.IGNORECASE)
+
+            if m_after and ('OPT' in c_str or '03-11' in c_str or '23-11' in c_str):
+                target_side = m_after.group(1).upper()
+                target_strike = float(m_after.group(2))
+            elif m_before:
+                target_strike = float(m_before.group(1))
+                target_side = m_before.group(2).upper()
+            elif m_after:
+                target_side = m_after.group(1).upper()
+                target_strike = float(m_after.group(2))
+
+        # Match by target_strike and target_side
         for item in oc_data['records']['data']:
-            sides_to_check = [target_side] if side else ['CE', 'PE']
-            for s in sides_to_check:
-                side_dict = item.get(s)
-                if not side_dict:
-                    continue
+            side_dict = item.get(target_side)
+            if not side_dict:
+                continue
 
-                match = False
-                if contract_identifier:
-                    if side_dict.get('identifier') == contract_identifier:
-                        match = True
-                    elif contract_identifier.endswith(s) and str(int(float(side_dict.get('strikePrice', 0)))) in contract_identifier:
-                        match = True
-                elif strike and float(side_dict.get('strikePrice', 0)) == float(strike):
+            match = False
+            if target_strike is not None:
+                if float(side_dict.get('strikePrice', 0)) == target_strike:
                     match = True
+            else:
+                match = True
 
-                if match:
-                    ltp = float(side_dict.get('lastPrice', 0.0))
-                    bid = float(side_dict.get('buyPrice1', 0.0) or ltp)
-                    ask = float(side_dict.get('sellPrice1', 0.0) or ltp)
-                    return {
-                        'contract': side_dict.get('identifier', contract_identifier),
-                        'symbol': sym_clean,
-                        'strike': float(side_dict.get('strikePrice', 0)),
-                        'side': s,
-                        'ltp': ltp,
-                        'bid': bid if bid > 0 else ltp,
-                        'ask': ask if ask > 0 else ltp,
-                        'volume': int(side_dict.get('totalTradedVolume', 0)),
-                        'oi': int(side_dict.get('openInterest', 0)),
-                        'change_oi': int(side_dict.get('changeinOpenInterest', 0)),
-                        'iv': float(side_dict.get('impliedVolatility', 0.0) or 0.0),
-                        'timestamp': time.time(),
-                        'valid': (ltp > 0.0)
-                    }
+            if match:
+                ltp = float(side_dict.get('lastPrice', 0.0))
+                bid = float(side_dict.get('buyPrice1', 0.0) or ltp)
+                ask = float(side_dict.get('sellPrice1', 0.0) or ltp)
+                return {
+                    'contract': side_dict.get('identifier', contract_identifier or f"{sym_clean}_{int(target_strike or 0)}_{target_side}"),
+                    'symbol': sym_clean,
+                    'strike': float(side_dict.get('strikePrice', 0)),
+                    'side': target_side,
+                    'ltp': ltp,
+                    'bid': bid if bid > 0 else ltp,
+                    'ask': ask if ask > 0 else ltp,
+                    'volume': int(side_dict.get('totalTradedVolume', 0)),
+                    'oi': int(side_dict.get('openInterest', 0)),
+                    'change_oi': int(side_dict.get('changeinOpenInterest', 0)),
+                    'iv': float(side_dict.get('impliedVolatility', 0.0) or 0.0),
+                    'timestamp': time.time(),
+                    'valid': (ltp > 0.0 or bid > 0.0)
+                }
         return None
 
     def get_live_dual_oi_confluence(self, symbol, cur_spot_or_strike, direction='CALL'):
