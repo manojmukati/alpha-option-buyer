@@ -872,7 +872,7 @@ class DailyAutonomousScreener:
                         f"⏰ <b>TIME:</b> {ist_now.strftime('%I:%M:%S %p IST')}\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
-                    self.notifier.send_broadcast_message(exit_msg, is_trade_signal=False)
+                    self.notifier.send_broadcast_message(exit_msg, is_trade_signal=True)
                     print(f"[TRADE CLOSED]: {contract} -> {outcome} ({pts_cap:+.2f} pts | Rs {net_pnl:+,.2f})")
 
             if updated_any:
@@ -1246,6 +1246,20 @@ class DailyAutonomousScreener:
         ist_now = get_ist_time()
         tot_m = ist_now.hour * 60 + ist_now.minute
 
+        # 1. Pre-Slab Warmup Buffer (Handles GitHub Actions launching 5-10 mins early)
+        if 560 <= tot_m < 570:
+            wait_sec = max(5, (570 - tot_m) * 60 - ist_now.second)
+            print(f"[PRE-SLAB WARMUP]: Launched early at {ist_now.strftime('%I:%M:%S %p IST')}. Sleeping {wait_sec}s until Morning Slab opens at 09:30:00 AM IST...")
+            time.sleep(wait_sec)
+            ist_now = get_ist_time()
+            tot_m = ist_now.hour * 60 + ist_now.minute
+        elif 785 <= tot_m < 795:
+            wait_sec = max(5, (795 - tot_m) * 60 - ist_now.second)
+            print(f"[PRE-SLAB WARMUP]: Launched early at {ist_now.strftime('%I:%M:%S %p IST')}. Sleeping {wait_sec}s until Afternoon Slab opens at 01:15:00 PM IST...")
+            time.sleep(wait_sec)
+            ist_now = get_ist_time()
+            tot_m = ist_now.hour * 60 + ist_now.minute
+
         if 570 <= tot_m <= 615:
             slab_name = "MORNING SLAB (09:30 - 10:15 AM IST)"
             end_min = 615
@@ -1253,13 +1267,26 @@ class DailyAutonomousScreener:
             slab_name = "AFTERNOON SLAB (01:15 - 02:15 PM IST)"
             end_min = 855
         else:
-            print(f"[SLAB SESSION]: Current time {ist_now.strftime('%I:%M %p IST')} is outside active slabs (09:30-10:15 AM & 01:15-02:15 PM IST). No trades dispatched.")
+            print(f"[SLAB SESSION]: Current time {ist_now.strftime('%I:%M %p IST')} is outside active slabs (09:30-10:15 AM & 01:15-02:15 PM IST). Executing single status scan.")
+            self.run_screener(ignore_window=True)
             return
 
         print(f"=======================================================")
         print(f"  STARTING PERSISTENT SLAB RUNNER: {slab_name}")
         print(f"  Cadence: Exact {interval_seconds}s (3-Minute Resampled Candles)")
         print(f"=======================================================")
+
+        # Send Slab Initiation Heartbeat strictly to Owner Chatbot
+        init_msg = (
+            f"⚡ <b>ALPHA PERSISTENT SLAB RUNNER STARTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏛️ <b>Session:</b> {slab_name}\n"
+            f"⏰ <b>Start Time:</b> {ist_now.strftime('%I:%M:%S %p IST')}\n"
+            f"⏱️ <b>Cadence:</b> Every {interval_seconds}s (Resampled 3-Min Candles)\n"
+            f"🎯 <b>Active Until:</b> {datetime.time(end_min // 60, end_min % 60).strftime('%I:%M %p IST')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        self.notifier.send_broadcast_message(init_msg, is_trade_signal=False)
 
         while True:
             cur_time = get_ist_time()
@@ -1279,14 +1306,30 @@ class DailyAutonomousScreener:
             if cur_mins > end_min:
                 if has_open_trades and cur_mins <= 925:  # 03:25 PM IST
                     print(f"[POSITION MONITORING]: Slab concluded, but open positions remain! Monitoring positions till target/SL or 03:25 PM...")
-                    self.update_open_paper_trades()
+                    try:
+                        self.update_open_paper_trades()
+                    except Exception as e:
+                        print(f"[POSITION MONITOR ERROR]: {e}")
                     time.sleep(interval_seconds)
                     continue
                 else:
                     print(f"[SLAB CONCLUDED]: {slab_name} completed at {cur_time.strftime('%I:%M:%S %p IST')}.")
+                    conclusion_msg = (
+                        f"🏁 <b>ALPHA SLAB RUNNER COMPLETED</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🏛️ <b>Session:</b> {slab_name}\n"
+                        f"⏰ <b>Finish Time:</b> {cur_time.strftime('%I:%M:%S %p IST')}\n"
+                        f"📊 <b>Positions Status:</b> {'Open trades being monitored' if has_open_trades else 'All trades concluded'}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    self.notifier.send_broadcast_message(conclusion_msg, is_trade_signal=False)
                     break
 
-            self.run_screener(ignore_window=True)
+            try:
+                self.run_screener(ignore_window=True)
+            except Exception as scan_err:
+                print(f"[SLAB SCAN EXCEPTION]: {scan_err}. Retrying in next 3-minute candle...")
+
             print(f"[SLEEP]: Waiting {interval_seconds}s for next 3-minute candle close...")
             time.sleep(interval_seconds)
 
@@ -1324,8 +1367,13 @@ if __name__ == '__main__':
     screener = DailyAutonomousScreener()
     if '--send-journal' in sys.argv:
         screener.send_eod_journal()
-    elif '--slab-session' in sys.argv:
-        screener.run_live_slab_session(interval_seconds=180)
+    elif '--single-pass' in sys.argv:
+        screener.run_screener(ignore_window=('--ignore-window' in sys.argv))
+    elif '--slab-session' in sys.argv or os.environ.get('GITHUB_ACTIONS') == 'true':
+        if '--ignore-window' in sys.argv:
+            screener.run_screener(ignore_window=True)
+        else:
+            screener.run_live_slab_session(interval_seconds=180)
     else:
         ignore_win = ('--ignore-window' in sys.argv)
         screener.run_screener(ignore_window=ignore_win)
