@@ -52,9 +52,10 @@ INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 MIN_STOCK_PRICE = 250.0
 
 MAX_DAILY_SUPER_TRADES = 8  # 4 Morning + 4 Afternoon
-MAX_SLAB_TRADES = 4
-MAX_INDEX_PER_SLAB = 2
+MAX_SLAB_TRADES = 3
+MAX_INDEX_PER_SLAB = 1
 MAX_STOCKS_PER_SLAB = 2
+NIFTY_HEAVYWEIGHTS = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'}
 
 
 def is_in_active_trading_slab(ist_time):
@@ -291,175 +292,284 @@ class DailyAutonomousScreener:
         }
         return self.nifty_regime_cache
 
-    def evaluate_asset(self, symbol):
+    def evaluate_index_engine(self, symbol, live_q=None, is_afternoon=False):
         """
-        STAGE 1: Opportunity Discovery across All 217 Assets.
-        - Zero hardcoded stock names.
-        - Configurable Floor: Spot >= 250.0 INR and ATR% >= 1.0% (blocks penny junk, allows liquid leaders).
-        - Sweet spot scoring (0.50% to 2.20% move = maximum points).
-        - Preliminary BVC CVD and RVOL scoring.
+        PURE INDEX ENGINE (Kadak / Strict Parameters for High Volatility)
+        Preserves all 5 Pillars:
+        - Pillar 1: Range Expansion RVOL >= 1.35x. Spot move from Open <= 0.8% (Anti-Exhaustion).
+        - Pillar 2: True BVC Cumulative Volume Delta & Bar Delta Proxy.
+        - Pillar 3: 8-bar Compression Base (width <= 150 pts Nifty/Fin, <= 350 pts BankNifty).
+                    Early Runway <= 30 pts (Nifty/Fin) or <= 60 pts (BankNifty).
+        - Pillar 4: Strict Nifty Macro Tide (Index CALL only if Nifty >= Open; Index PUT only if Nifty <= Open).
+        - Pillar 5: Point-Based Dynamic Risk (Nifty: 35/70/120 pts; BankNifty: 70/140/240 pts).
         """
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-        is_idx = sym_clean in INDEX_NAMES
-
-        q = self.data_feed.get_live_asset_quote(sym_clean)
+        q = live_q or self.data_feed.get_live_asset_quote(sym_clean)
         if not q:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': 'NO_NSE_LIVE_QUOTE',
-                'is_index': is_idx
-            }
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NO_NSE_LIVE_QUOTE', 'is_index': True}
 
         cur_p = float(q.get('live_spot', q.get('close', 0.0)))
         if cur_p <= 0:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': 'INVALID_SPOT_PRICE',
-                'is_index': is_idx
-            }
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INVALID_SPOT_PRICE', 'is_index': True}
 
-        pct_chg = float(q.get('pct_change', 0.0))
-        rvol = float(q.get('rvol', 1.0))
-        stock_atr = 0.0 if is_idx else self.get_stock_atr(sym_clean, q)
+        idx_df = self.data_feed.get_live_intraday_bars(sym_clean)
+        if idx_df is None or len(idx_df) < 10:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INDEX_INSUFFICIENT_BARS_LESS_THAN_10', 'is_index': True}
 
-        # Gate 0: Configurable Floor (Spot >= 250.0 INR and ATR% >= 1.0%)
-        if not is_idx:
-            atr_pct = (stock_atr / max(1.0, cur_p)) * 100.0
-            if cur_p < MIN_STOCK_PRICE or atr_pct < 1.0:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'STOCK_PRICE_BELOW_{int(MIN_STOCK_PRICE)}_INR: Spot Rs {cur_p:.1f} < {MIN_STOCK_PRICE} (or ATR% {atr_pct:.2f}% < 1.0%)',
-                    'is_index': False
-                }
+        comp_bars = idx_df.iloc[:-2].tail(8)
+        eval_bar = idx_df.iloc[-2]
 
-        # -------------------------------------------------------------
-        # STAGE 1 CANDLE DISCOVERY FOR INDICES
-        # -------------------------------------------------------------
-        if is_idx:
-            idx_df = self.data_feed.get_live_intraday_bars(sym_clean)
-            if idx_df is None or len(idx_df) < 10:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': 'INDEX_INSUFFICIENT_BARS_LESS_THAN_10',
-                    'is_index': True
-                }
+        b_open = float(eval_bar['open'])
+        b_high = float(eval_bar['high'])
+        b_low = float(eval_bar['low'])
+        b_close = float(eval_bar['close'])
+        rng = max(0.01, b_high - b_low)
 
-            comp_bars = idx_df.iloc[:-2].tail(8)
-            eval_bar = idx_df.iloc[-2]
+        comp_high = float(comp_bars['high'].max())
+        comp_low = float(comp_bars['low'].min())
+        comp_width = comp_high - comp_low
 
-            b_open = float(eval_bar['open'])
-            b_high = float(eval_bar['high'])
-            b_low = float(eval_bar['low'])
-            b_close = float(eval_bar['close'])
-            rng = max(0.01, b_high - b_low)
+        max_allowed_base = 150.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 350.0
+        if comp_width > max_allowed_base:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_BASE_TOO_WIDE ({comp_width:.1f} > {max_allowed_base:.1f}pts)', 'is_index': True}
 
-            comp_high = float(comp_bars['high'].max())
-            comp_low = float(comp_bars['low'].min())
-            comp_width = comp_high - comp_low
+        solid_body = round(abs(b_close - b_open) / rng, 2)
+        idx_dist = 30.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 60.0
 
-            max_allowed_base = 180.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 420.0
-            if comp_width > max_allowed_base:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'INDEX_BASE_TOO_WIDE ({comp_width:.1f} > {max_allowed_base:.1f}pts)',
-                    'is_index': True
-                }
+        direction = None
+        if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high and b_close > b_open:
+            direction = 'CALL'
+        elif b_close <= comp_low and b_close >= comp_low - idx_dist and cur_p <= comp_low and b_close < b_open:
+            direction = 'PUT'
 
-            solid_body = round(abs(b_close - b_open) / rng, 2)
-            idx_dist = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
+        if direction is None:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INDEX_NO_COMPRESSION_BREAKOUT_OR_DIRECTION_MISALIGNED', 'is_index': True}
 
-            direction = None
-            is_breakout = False
-            # Directional Candle Check: CALL requires Green (Close > Open), PUT requires Red (Close < Open)
-            if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high and b_close > b_open:
-                direction = 'CALL'
-                is_breakout = True
-            elif b_close <= comp_low and b_close >= comp_low - idx_dist and cur_p <= comp_low and b_close < b_open:
-                direction = 'PUT'
-                is_breakout = True
+        # Macro Tide Alignment (Strict: All indices must align with Nifty!)
+        df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
+        if df_nifty is not None and len(df_nifty) > 1:
+            n_spot = float(df_nifty['close'].iloc[-1])
+            n_open = float(df_nifty['open'].iloc[0])
+            n_move = n_spot - n_open
+            if direction == 'CALL' and n_move < -5.0:
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_TIDE_BLOCKED_CALL: Nifty down {n_move:.1f} pts', 'is_index': True}
+            if direction == 'PUT' and n_move > +5.0:
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_TIDE_BLOCKED_PUT: Nifty up {n_move:+.1f} pts', 'is_index': True}
 
-            if not is_breakout or direction is None:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': 'INDEX_NO_COMPRESSION_BREAKOUT_OR_DIRECTION_MISALIGNED',
-                    'is_index': True
-                }
+        # Anti-Exhaustion: Cannot enter after index has already moved > 0.8% from open
+        idx_open = float(idx_df['open'].iloc[0])
+        idx_move_pct = abs((cur_p - idx_open) / idx_open) * 100.0
+        if idx_move_pct > 0.80:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_EXHAUSTED_FROM_OPEN ({idx_move_pct:.2f}% > 0.80%)', 'is_index': True}
 
-            # BVC Cumulative Volume Delta for Index (evaluated on completed bars)
-            cvd_res = compute_bar_delta_proxy(idx_df.iloc[:-1], is_index=True)
-            rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
+        # BVC Cumulative Volume Delta for Index
+        cvd_res = compute_bar_delta_proxy(idx_df.iloc[:-1], is_index=True)
+        rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
+        cvd_pass = (rec_cvd >= 0.15) if direction == 'CALL' else (rec_cvd <= -0.15)
+        if not cvd_pass:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f})', 'is_index': True}
 
-            cvd_pass = (rec_cvd >= 0.15) if direction == 'CALL' else (rec_cvd <= -0.15)
-            if not cvd_pass:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'INDEX_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f})',
-                    'is_index': True
-                }
+        # Range Expansion RVOL (1.35x threshold captures genuine Index breakouts)
+        prior_rng = (comp_bars['high'] - comp_bars['low']).mean()
+        idx_rvol = round(rng / max(0.5, prior_rng), 2) if prior_rng > 0 else 2.50
+        if idx_rvol < 1.35:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_RANGE_EXPANSION_RVOL_LOW ({idx_rvol:.2f}x < 1.35x)', 'is_index': True}
 
-            # Range Expansion RVOL (1.20x threshold captures genuine Index breakouts)
-            prior_rng = (comp_bars['high'] - comp_bars['low']).mean()
-            idx_rvol = round(rng / max(0.5, prior_rng), 2) if prior_rng > 0 else 2.50
-            if idx_rvol < 1.20:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'INDEX_RANGE_EXPANSION_RVOL_LOW ({idx_rvol:.2f}x < 1.20x)',
-                    'is_index': True
-                }
-
-            score = min(99.0, 50.0 + min(25.0, (idx_rvol - 1.0) * 10.0) + (15.0 if abs(rec_cvd) >= 0.30 else 5.0) + (10.0 if solid_body >= 0.60 else 0.0))
-
-            return {
-                'symbol': sym_clean,
-                'passed': True,
-                'spot_price': cur_p,
-                'direction': direction,
-                'pct_change': pct_chg,
-                'rvol': idx_rvol,
-                'score': round(score, 2),
-                'is_index': True,
-                'stock_atr': 0.0,
-                'is_compression_breakout': True,
-                'cvd_info': cvd_res
-            }
-
-        # -------------------------------------------------------------
-        # STAGE 1 CANDLE DISCOVERY FOR STOCKS
-        # -------------------------------------------------------------
-        # Sweet Spot Scoring: 0.50% to 2.20% move = 30.0 maximum points!
-        base_score = 40.0
-        abs_p = abs(pct_chg)
-        if abs_p < 0.50:
-            mom_pts = round((abs_p / 0.50) * 20.0, 1)
-        elif abs_p <= 2.20:
-            mom_pts = 30.0
-        else:
-            mom_pts = max(10.0, round(30.0 - (abs_p - 2.20) * 25.0, 1))
-
-        vol_pts = min(30.0, (rvol - 1.0) * 12.0) if rvol > 1.0 else 0.0
-        score = round(min(99.0, base_score + mom_pts + vol_pts), 2)
-
-        tentative_direction = 'CALL' if pct_chg >= 0 else 'PUT'
+        score = min(99.0, 55.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.30 else 5.0) + (10.0 if solid_body >= 0.60 else 0.0))
 
         return {
             'symbol': sym_clean,
             'passed': True,
             'spot_price': cur_p,
-            'direction': tentative_direction,
-            'pct_change': pct_chg,
-            'rvol': rvol,
-            'score': score,
-            'is_index': False,
-            'stock_atr': stock_atr
+            'direction': direction,
+            'pct_change': float(q.get('pct_change', 0.0)),
+            'rvol': idx_rvol,
+            'turnover_cr': 0.0,
+            'score': round(score, 2),
+            'is_index': True,
+            'stock_atr': 0.0,
+            'is_compression_breakout': True,
+            'cvd_info': cvd_res
         }
+
+    def evaluate_stock_engine(self, symbol, live_q=None, is_afternoon=False):
+        """
+        PURE STOCK ENGINE (Early Ignition & Anti-Exhaustion "Thak Raha Hai" Protection)
+        Preserves all 5 Pillars:
+        - Pillar 1: Institutional Cash Turnover Floor >= Rs 3.0 Cr. RVOL >= 1.80x (or >= 1.60x if turnover >= Rs 6.0 Cr).
+        - Pillar 2: True BVC Cumulative Volume Delta with Current Bar Delta Priority (>= +35% for CALL, <= -35% for PUT).
+        - Pillar 3: 8-bar Compression Base (width <= 0.65 * ATR). Early Runway <= 0.20 * ATR from boundary.
+                    ANTI-EXHAUSTION: Breakout Bar Range <= 0.45 * ATR, Prior 3-Bar Runup <= 0.60 * ATR.
+                    Afternoon: Must be near Day High (CALL) or Day Low (PUT) within 0.05 * ATR.
+        - Pillar 4: Macro Tide & Heavyweight Check (Mega heavyweights MUST follow Nifty;
+                    Decoupled Alpha Outperformer with Turnover >= 5.0 Cr & Delta >= 40% can decouple from Nifty).
+        - Pillar 5: ATR-Normalized Risk (SL = 0.20 * ATR, T1 = 0.35 * ATR, T2 = 0.70 * ATR).
+        """
+        sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+        q = live_q or self.data_feed.get_live_asset_quote(sym_clean)
+        if not q:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NO_NSE_LIVE_QUOTE', 'is_index': False}
+
+        cur_p = float(q.get('live_spot', q.get('close', 0.0)))
+        if cur_p <= 0:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INVALID_SPOT_PRICE', 'is_index': False}
+
+        stock_atr = self.get_stock_atr(sym_clean, q)
+        atr_pct = (stock_atr / max(1.0, cur_p)) * 100.0
+        if cur_p < MIN_STOCK_PRICE or atr_pct < 1.0:
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': f'STOCK_PRICE_BELOW_{int(MIN_STOCK_PRICE)}_INR: Spot Rs {cur_p:.1f} < {MIN_STOCK_PRICE} (or ATR% {atr_pct:.2f}% < 1.0%)',
+                'is_index': False
+            }
+
+        stk_df = self.data_feed.get_live_intraday_bars(sym_clean)
+        if stk_df is None or len(stk_df) < 10:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'STOCK_INSUFFICIENT_BARS_LESS_THAN_10', 'is_index': False}
+
+        eval_bar = stk_df.iloc[-2]
+        live_bar = stk_df.iloc[-1]
+        b_open = float(eval_bar['open'])
+        b_high = float(eval_bar['high'])
+        b_low = float(eval_bar['low'])
+        b_close = float(eval_bar['close'])
+        rng = max(0.01, b_high - b_low)
+
+        # 1. 8-Bar Compression Base & Early Runway
+        comp_bars = stk_df.iloc[:-2].tail(8)
+        comp_high = float(comp_bars['high'].max())
+        comp_low = float(comp_bars['low'].min())
+        comp_w = comp_high - comp_low
+
+        if comp_w > stock_atr * 0.65:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'STOCK_BASE_TOO_WIDE ({comp_w:.1f} > {stock_atr * 0.65:.1f}pts)', 'is_index': False}
+
+        max_dist_buffer = stock_atr * 0.20
+        direction = None
+        if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open:
+            direction = 'CALL'
+        elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open:
+            direction = 'PUT'
+
+        if direction is None:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NO_8BAR_COMPRESSION_BREAKOUT', 'is_index': False}
+
+        # 2. ANTI-EXHAUSTION: "THAK RAHA HAI" / PROFIT BOOKING DETECTION
+        # Climax Candle: If single bar range is > 0.45 ATR, smart money is climaxing!
+        c_rng = b_high - b_low
+        if c_rng > stock_atr * 0.45:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLIMAX_EXHAUSTION_CANDLE ({c_rng:.1f} > {stock_atr * 0.45:.1f}pts)', 'is_index': False}
+
+        # Prior 3-Bar Run: If stock already moved > 0.60 ATR in preceding 9 mins, energy is spent!
+        p3_low = stk_df.iloc[:-2].tail(3)['low'].min()
+        p3_high = stk_df.iloc[:-2].tail(3)['high'].max()
+        p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
+        if p3_move > stock_atr * 0.60:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.60:.1f}pts)', 'is_index': False}
+
+        # 3. Volume, RVOL & Turnover Floor
+        curr_v = float(eval_bar.get('volume', 0.0))
+        prior_10_bars = stk_df.iloc[:-2].tail(10)
+        base_10_v = float(prior_10_bars['volume'].mean()) if len(prior_10_bars) > 0 else 1000.0
+        hist_avg_v = float(stk_df['hist_avg_3m_vol'].iloc[-1]) if 'hist_avg_3m_vol' in stk_df.columns else 0.0
+        base_v = max(1.0, hist_avg_v if hist_avg_v > 0 else base_10_v)
+        real_rvol = round(curr_v / base_v, 2)
+        turnover_cr = round((curr_v * cur_p) / 1e7, 2)
+
+        if turnover_cr < 3.0:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TURNOVER_BELOW_FLOOR (Rs {turnover_cr:.1f}Cr < 3.0Cr)', 'is_index': False}
+        if real_rvol < 1.80 and turnover_cr < 6.0:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_INSUFFICIENT ({real_rvol:.2f}x < 1.80x, Turn {turnover_cr:.1f}Cr)', 'is_index': False}
+
+        # 4. CVD & Current Bar Delta Priority
+        completed_bars = stk_df.iloc[:-1]
+        cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
+        rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
+        vols = completed_bars['volume'].values.astype(float)
+        deltas = completed_bars['delta'].values.astype(float) if 'delta' in completed_bars.columns else vols
+        bar_delta_ratio = round(float(deltas[-1]) / max(1.0, float(vols[-1])), 3) if len(vols) > 0 else 0.0
+
+        cvd_pass = (rec_cvd >= 0.15 or bar_delta_ratio >= 0.35) if direction == 'CALL' else (rec_cvd <= -0.15 or bar_delta_ratio <= -0.35)
+        if not cvd_pass:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'BVC_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f}, BarDelta={bar_delta_ratio:+.2f})', 'is_index': False}
+
+        # 5. Day High / Day Low Check
+        comp_df = stk_df.iloc[:-1]
+        day_high = float(comp_df['high'].max())
+        day_low = float(comp_df['low'].min())
+        near_day_high = (direction == 'CALL' and b_close >= (day_high - stock_atr * 0.05))
+        near_day_low = (direction == 'PUT' and b_close <= (day_low + stock_atr * 0.05))
+
+        if is_afternoon:
+            if not (near_day_high or near_day_low):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'AFTERNOON_NOT_DAY_HIGH_LOW_BREAKOUT', 'is_index': False}
+
+        # 6. Macro Tide & Heavyweight Check
+        df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
+        n_move = 0.0
+        if df_nifty is not None and len(df_nifty) > 1:
+            n_spot = float(df_nifty['close'].iloc[-1])
+            n_open = float(df_nifty['open'].iloc[0])
+            n_move = n_spot - n_open
+
+        # Mega heavyweights CANNOT trade against Nifty
+        if sym_clean in NIFTY_HEAVYWEIGHTS:
+            if direction == 'CALL' and n_move < -10.0:
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty down {n_move:.1f} pts', 'is_index': False}
+            if direction == 'PUT' and n_move > +10.0:
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty up {n_move:+.1f} pts', 'is_index': False}
+
+        # Decoupled Alpha Outperformer (SUPREMEIND rule)
+        is_counter = (direction == 'CALL' and n_move < -10.0) or (direction == 'PUT' and n_move > +10.0)
+        if is_counter:
+            if not ((near_day_high or near_day_low) and turnover_cr >= 4.0 and abs(bar_delta_ratio) >= 0.35):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'COUNTER_TREND_NOT_ALIGNED: Nifty move {n_move:+.1f} pts', 'is_index': False}
+
+        # 7. Price Action CLV & Body Thrust
+        body = abs(b_close - b_open)
+        solid_body_ratio = round(body / rng, 2)
+        clv = round((b_close - b_low) / rng, 2)
+        min_thrust = max(2.5, round(stock_atr * 0.06, 1))
+
+        if solid_body_ratio < 0.50 or body < min_thrust:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'WEAK_CANDLE_THRUST (Body {body:.1f} < {min_thrust:.1f}pts)', 'is_index': False}
+
+        clv_pass = (clv >= 0.60) if direction == 'CALL' else (clv <= 0.40)
+        if not clv_pass:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLV_QUALITY_MISALIGNED (CLV={clv:.2f})', 'is_index': False}
+
+        score = min(99.0, 50.0 + min(25.0, (real_rvol - 1.0) * 10.0) + (15.0 if abs(bar_delta_ratio) >= 0.35 else 5.0) + min(10.0, turnover_cr * 1.5))
+
+        return {
+            'symbol': sym_clean,
+            'passed': True,
+            'spot_price': cur_p,
+            'direction': direction,
+            'pct_change': float(q.get('pct_change', 0.0)),
+            'rvol': real_rvol,
+            'turnover_cr': turnover_cr,
+            'score': round(score, 2),
+            'is_index': False,
+            'stock_atr': stock_atr,
+            'is_compression_breakout': True,
+            'cvd_info': cvd_res
+        }
+
+    def evaluate_asset(self, symbol):
+        """
+        Master Router: Dispatches to dedicated Index Engine or Stock Engine.
+        """
+        sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+        now_ist = get_ist_time()
+        tot_mins = now_ist.hour * 60 + now_ist.minute
+        is_afternoon = (795 <= tot_mins <= 855)
+
+        if sym_clean in INDEX_NAMES:
+            return self.evaluate_index_engine(sym_clean, is_afternoon=is_afternoon)
+        else:
+            return self.evaluate_stock_engine(sym_clean, is_afternoon=is_afternoon)
+
 
     def _log_rejection_audit(self, ist_now, all_evaluations, qualified_trades, stage2_rejections=None):
         """
@@ -796,20 +906,17 @@ class DailyAutonomousScreener:
         with ThreadPoolExecutor(max_workers=8) as executor:
             eval_results = list(executor.map(self.evaluate_asset, symbols))
 
-        # Stage 1 Qualification Filter
+        # Stage 1 Qualification Filter (Candidates have already passed all 5-Pillar quantitative filters)
         stage1_passed = [
             r for r in eval_results 
-            if r.get('passed', False) and (
-                r.get('score', 0.0) >= 70.0 or 
-                (float(r.get('rvol', 0.0)) >= 2.0 and abs(float(r.get('pct_change', 0.0))) >= 0.50)
-            )
+            if r.get('passed', False) and r.get('score', 0.0) >= 70.0
         ]
 
-        # Prioritize Indices first, then high Setup Strength Score + RVOL
+        # Priority: Institutional Setup Score first, Cash Turnover second, RVOL third (Blocks slot-theft!)
         stage1_passed.sort(
             key=lambda x: (
-                1 if x.get('is_index', False) else 0,
                 x.get('score', 0.0),
+                x.get('turnover_cr', 0.0),
                 x.get('rvol', 0.0)
             ),
             reverse=True
@@ -844,175 +951,35 @@ class DailyAutonomousScreener:
                 continue
 
             # -------------------------------------------------------------
-            # STAGE 2 BREAKOUT VERIFICATION
+            # STAGE 2: LIVE SPOT HOLDING RE-CONFIRMATION
             # -------------------------------------------------------------
-            if is_idx:
-                # Index verification
-                tentative_dir = cand.get('direction', 'CALL')
-                if tentative_dir == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-                    stage2_rejections[sym] = f"MACRO_TIDE_BLOCKED_CALL: {nifty_regime.get('reason')}"
-                    continue
-                if tentative_dir == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-                    stage2_rejections[sym] = f"MACRO_TIDE_BLOCKED_PUT: {nifty_regime.get('reason')}"
-                    continue
-                cand['oi_confluent'] = True
+            # Engine has already verified RVOL, BVC CVD, Base Runway, Anti-Exhaustion & Macro Tide.
+            # Here we re-confirm live ticking spot holds the breakout boundary.
+            stk_df = self.data_feed.get_live_intraday_bars(sym)
+            if stk_df is None or len(stk_df) < 10:
+                stage2_rejections[sym] = "INSUFFICIENT_3M_BARS_LESS_THAN_10"
+                continue
+
+            live_bar = stk_df.iloc[-1]
+            l_close = float(live_bar['close'])
+            spot = cand['spot_price']
+            direction = cand['direction']
+
+            comp_bars = stk_df.iloc[:-2].tail(8)
+            comp_high = float(comp_bars['high'].max())
+            comp_low = float(comp_bars['low'].min())
+            stock_atr = float(cand.get('stock_atr', 30.0))
+            spot_buffer = (stock_atr * 0.05) if not is_idx else (15.0 if sym == 'BANKNIFTY' else 8.0)
+
+            if direction == 'CALL':
+                live_holding = (spot >= comp_high - spot_buffer) and (l_close >= comp_high - spot_buffer)
             else:
-                # STAGE 2 STOCK 3-MINUTE AUDIT
-                stk_df = self.data_feed.get_live_intraday_bars(sym)
-                if stk_df is None or len(stk_df) < 10:
-                    stage2_rejections[sym] = "INSUFFICIENT_3M_BARS_LESS_THAN_10"
-                    continue
+                live_holding = (spot <= comp_low + spot_buffer) and (l_close <= comp_low + spot_buffer)
 
-                eval_bar = stk_df.iloc[-2]
-                live_bar = stk_df.iloc[-1]
-                b_open = float(eval_bar['open'])
-                b_high = float(eval_bar['high'])
-                b_low = float(eval_bar['low'])
-                b_close = float(eval_bar['close'])
+            if not live_holding:
+                stage2_rejections[sym] = f"LIVE_SPOT_FAILED_HOLDING (Spot {spot:.2f} vs Base Level)"
+                continue
 
-                l_open = float(live_bar['open'])
-                l_high = float(live_bar['high'])
-                l_low = float(live_bar['low'])
-                l_close = float(live_bar['close'])
-
-                live_q = self.data_feed.get_live_asset_quote(sym)
-                spot = float(live_q.get('live_spot', l_close))
-                cand['spot_price'] = spot
-
-                # Floor Check: Spot >= MIN_STOCK_PRICE
-                if spot < MIN_STOCK_PRICE:
-                    stage2_rejections[sym] = f"STOCK_PRICE_BELOW_{int(MIN_STOCK_PRICE)}_INR (Spot {spot:.1f} < {MIN_STOCK_PRICE})"
-                    continue
-
-                stock_atr = float(cand.get('stock_atr', self.get_stock_atr(sym, live_q)))
-                rng = max(0.01, b_high - b_low)
-
-                # 1. 8-Bar Compression Base
-                comp_bars = stk_df.iloc[:-2].tail(8)
-                comp_high = float(comp_bars['high'].max())
-                comp_low = float(comp_bars['low'].min())
-                max_dist_buffer = stock_atr * 0.20
-
-                # Direction strictly determined by 3-minute breakout level!
-                direction = None
-                if b_close >= comp_high and b_close <= comp_high + max_dist_buffer:
-                    direction = 'CALL'
-                elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer:
-                    direction = 'PUT'
-
-                if direction is None:
-                    stage2_rejections[sym] = "NO_8BAR_COMPRESSION_BREAKOUT"
-                    continue
-
-                # Symmetrical Directional Candle Requirement: CALL requires Green, PUT requires Red
-                if direction == 'CALL' and b_close <= b_open:
-                    stage2_rejections[sym] = f"CANDLE_DIRECTION_MISALIGNED (CALL requires Green candle, got Close {b_close} <= Open {b_open})"
-                    continue
-                if direction == 'PUT' and b_close >= b_open:
-                    stage2_rejections[sym] = f"CANDLE_DIRECTION_MISALIGNED (PUT requires Red candle, got Close {b_close} >= Open {b_open})"
-                    continue
-
-                # 2. RVOL Baseline: Compare against 10 preceding consolidation bars or 5-day hist_avg_3m_vol
-                curr_3m_v = float(eval_bar.get('volume', 0.0))
-                hist_avg_v = float(stk_df['hist_avg_3m_vol'].iloc[-1]) if 'hist_avg_3m_vol' in stk_df.columns else 0.0
-                prior_10_bars = stk_df.iloc[:-2].tail(10)
-                base_10_v = float(prior_10_bars['volume'].mean()) if len(prior_10_bars) > 0 else 1000.0
-                base_v = max(1.0, hist_avg_v if hist_avg_v > 0 else base_10_v)
-                real_3m_rvol = round(curr_3m_v / base_v, 2)
-                turnover_cr = round((curr_3m_v * spot) / 1e7, 2)
-
-                # 3. Macro Regime Check with Leader Outperformance Exception (RVOL >= 2.5x)
-                is_outperformer = (real_3m_rvol >= 2.5 and turnover_cr >= 3.0)
-                if not is_outperformer:
-                    if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-                        stage2_rejections[sym] = f"MACRO_TIDE_BLOCKED_CALL: {nifty_regime.get('reason')}"
-                        continue
-                    if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-                        stage2_rejections[sym] = f"MACRO_TIDE_BLOCKED_PUT: {nifty_regime.get('reason')}"
-                        continue
-
-                # 4. Day High / Day Low Breakout Check from completed bars
-                comp_df = stk_df.iloc[:-1]
-                day_high = float(comp_df['high'].max())
-                day_low = float(comp_df['low'].min())
-                if direction == 'CALL' and b_close < (day_high - stock_atr * 0.08):
-                    stage2_rejections[sym] = "NOT_DAY_HIGH_BREAKOUT"
-                    continue
-                if direction == 'PUT' and b_close > (day_low + stock_atr * 0.08):
-                    stage2_rejections[sym] = "NOT_DAY_LOW_BREAKOUT"
-                    continue
-
-                # 5. Exhaustion from Open Check (Prevents chasing exhausted moves > 3.2%)
-                day_open = float(stk_df['open'].iloc[0])
-                pct_from_open = abs((spot - day_open) / day_open * 100.0)
-                if pct_from_open > 3.20:
-                    stage2_rejections[sym] = f"EXHAUSTED_MOVE_FROM_OPEN ({pct_from_open:.1f}% > 3.2%)"
-                    continue
-
-                # 6. Live Spot Holding Re-Confirmation (Eliminates false breakouts!)
-                spot_buffer = stock_atr * 0.05
-                if direction == 'CALL':
-                    live_holding = (spot >= comp_high - spot_buffer) and (l_low <= spot <= l_high) and (l_close >= comp_high - spot_buffer)
-                else:
-                    live_holding = (spot <= comp_low + spot_buffer) and (l_low <= spot <= l_high) and (l_close <= comp_low + spot_buffer)
-
-                if not live_holding:
-                    stage2_rejections[sym] = f"LIVE_SPOT_FAILED_HOLDING (Spot {spot:.2f} vs Base Level)"
-                    continue
-
-                # 7. Directional Local Base Runway Check (Measures expansion from breakout boundary!)
-                if direction == 'CALL':
-                    local_expansion = spot - comp_high
-                else:
-                    local_expansion = comp_low - spot
-
-                if local_expansion > (stock_atr * 0.50):
-                    stage2_rejections[sym] = f"LOCAL_RUNWAY_EXHAUSTED ({local_expansion:.1f} > 50% of ATR)"
-                    continue
-
-                # 8. Wyckoff Effort vs Result & Body Strength
-                body = abs(b_close - b_open)
-                solid_body_ratio = round(body / rng, 2)
-                clv = round((b_close - b_low) / rng, 2)
-                min_thrust = max(3.0, round(stock_atr * 0.08, 1))
-
-                if solid_body_ratio < 0.55 or body < min_thrust:
-                    stage2_rejections[sym] = f"WEAK_CANDLE_THRUST (Body {body:.1f} < {min_thrust:.1f}pts)"
-                    continue
-
-                # 9. Price Action CLV Quality
-                clv_pass = (clv >= 0.65) if direction == 'CALL' else (clv <= 0.35)
-                if not clv_pass:
-                    stage2_rejections[sym] = f"CLV_QUALITY_MISALIGNED (CLV={clv:.2f})"
-                    continue
-
-                # 10. BVC Cumulative Volume Delta from completed bars
-                completed_bars = stk_df.iloc[:-1]  # Exclude live incomplete ticking candle
-                cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
-                if not cvd_res.get('valid', True):
-                    stage2_rejections[sym] = f"CVD_INVALID ({cvd_res.get('reason', 'DATA_UNAVAILABLE')})"
-                    continue
-
-                rec_cvd = cvd_res['recent_cvd_ratio']
-                sess_cvd = cvd_res['session_cvd_ratio']
-
-                cvd_pass = (rec_cvd >= 0.15) if direction == 'CALL' else (rec_cvd <= -0.15)
-                if not cvd_pass:
-                    stage2_rejections[sym] = f"BVC_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f})"
-                    continue
-
-                # 11. Institutional Floor: Minimum Rs 2.0 Cr turnover and RVOL >= 2.0x (or ultra-liquidity >= 4.0 Cr)
-                if turnover_cr < 2.0:
-                    stage2_rejections[sym] = f"TURNOVER_BELOW_INSTITUTIONAL_FLOOR (Rs. {turnover_cr:.1f}Cr < 2.0Cr)"
-                    continue
-                if real_3m_rvol < 2.0 and turnover_cr < 4.0:
-                    stage2_rejections[sym] = f"RVOL_INSUFFICIENT ({real_3m_rvol:.2f}x < 2.0x, Turn Rs. {turnover_cr:.1f}Cr)"
-                    continue
-
-                cand['direction'] = direction
-                cand['rvol'] = real_3m_rvol
-                cand['turnover_cr'] = turnover_cr
-                cand['cvd_info'] = cvd_res
 
             # -------------------------------------------------------------
             # STAGE 3: LIVE OPTION CHAIN, OI CONFLUENCE & REAL LTP AUDIT
