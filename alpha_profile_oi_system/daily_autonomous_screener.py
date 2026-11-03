@@ -25,6 +25,7 @@ import json
 import random
 import datetime
 import math
+import urllib.request
 import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
@@ -513,15 +514,20 @@ class DailyAutonomousScreener:
         if turnover_cr < 3.0:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TURNOVER_BELOW_FLOOR (Rs {turnover_cr:.1f}Cr < 3.0Cr)', 'is_index': False}
 
-        # BUG 1 FIX: True Breakout Bar Delta Ratio directly from BVC Microstructure formula
+        # BUG 1 FIX: True Breakout Bar Delta Ratio directly from BVC Microstructure formula with CVD Non-Divergence Lock
         completed_bars = stk_df.iloc[:-1]
         cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
         rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
         bar_delta_ratio = round((2.0 * b_close - (b_high + b_low)) / rng, 3)
 
-        cvd_pass = (rec_cvd >= 0.15 or bar_delta_ratio >= 0.35) if direction == 'CALL' else (rec_cvd <= -0.15 or bar_delta_ratio <= -0.35)
+        if direction == 'CALL':
+            cvd_pass = (rec_cvd >= 0.15 or bar_delta_ratio >= 0.35) and (rec_cvd >= 0.0)
+        else:
+            cvd_pass = (rec_cvd <= -0.15 or bar_delta_ratio <= -0.35) and (rec_cvd <= 0.0)
+
         if not cvd_pass:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'BVC_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f}, BarDelta={bar_delta_ratio:+.2f})', 'is_index': False}
+            reason = "BVC_CVD_COUNTER_DIVERGENCE" if ((direction == 'CALL' and rec_cvd < 0.0) or (direction == 'PUT' and rec_cvd > 0.0)) else "BVC_CVD_MISALIGNED"
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'{reason} (RecCVD={rec_cvd:+.2f}, BarDelta={bar_delta_ratio:+.2f})', 'is_index': False}
 
         # BUG 5 FIX: Day High / Day Low Check with 0.12 * ATR Buffer
         comp_df = stk_df.iloc[:-1]
@@ -1237,23 +1243,51 @@ class DailyAutonomousScreener:
             print(f"[BROADCAST]: Dispatching {contract} @ Rs. {opt_entry:,.2f}...")
             self.notifier.send_broadcast_message(pure_signal_msg, is_trade_signal=True)
 
+    def _check_concurrent_github_run(self):
+        """
+        Concurrency shield: Checks if an older GitHub Actions run is already actively running.
+        Prevents duplicate parallel executions during active slab hours.
+        """
+        run_id_str = os.environ.get('GITHUB_RUN_ID', '').strip()
+        if not run_id_str:
+            return False
+        try:
+            cur_run_id = int(run_id_str)
+            url = 'https://api.github.com/repos/manojmukati/alpha-option-buyer/actions/runs?status=in_progress'
+            req = urllib.request.Request(url, headers={'User-Agent': 'AlphaOptionBuyer/1.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                for r in data.get('workflow_runs', []):
+                    r_id = r.get('id', 0)
+                    if r_id != cur_run_id and r_id < cur_run_id:
+                        print(f"[CONCURRENCY SHIELD]: Active runner detected (Run #{r.get('run_number')} ID {r_id}). Yielding execution.")
+                        return True
+        except Exception:
+            pass
+        return False
+
     def run_live_slab_session(self, interval_seconds=180):
         """
         Runs a persistent single-runner session throughout the active trading slab.
         Executes immediate scan, then sleeps interval_seconds (default 180s / 3 mins).
         If open positions exist when the slab ends, continues monitoring positions until 03:25 PM IST!
         """
+        if os.environ.get('GITHUB_ACTIONS') == 'true':
+            if self._check_concurrent_github_run():
+                print("[CONCURRENCY SHIELD]: Exiting gracefully to let the primary runner execute.")
+                return
+
         ist_now = get_ist_time()
         tot_m = ist_now.hour * 60 + ist_now.minute
 
-        # 1. Pre-Slab Warmup Buffer (Handles GitHub Actions launching 5-10 mins early)
-        if 560 <= tot_m < 570:
+        # 1. Pre-Slab Warmup Buffer (Handles GitHub Actions or local schedulers launching up to 30 mins early)
+        if 540 <= tot_m < 570:
             wait_sec = max(5, (570 - tot_m) * 60 - ist_now.second)
             print(f"[PRE-SLAB WARMUP]: Launched early at {ist_now.strftime('%I:%M:%S %p IST')}. Sleeping {wait_sec}s until Morning Slab opens at 09:30:00 AM IST...")
             time.sleep(wait_sec)
             ist_now = get_ist_time()
             tot_m = ist_now.hour * 60 + ist_now.minute
-        elif 785 <= tot_m < 795:
+        elif 765 <= tot_m < 795:
             wait_sec = max(5, (795 - tot_m) * 60 - ist_now.second)
             print(f"[PRE-SLAB WARMUP]: Launched early at {ist_now.strftime('%I:%M:%S %p IST')}. Sleeping {wait_sec}s until Afternoon Slab opens at 01:15:00 PM IST...")
             time.sleep(wait_sec)
@@ -1369,11 +1403,10 @@ if __name__ == '__main__':
         screener.send_eod_journal()
     elif '--single-pass' in sys.argv:
         screener.run_screener(ignore_window=('--ignore-window' in sys.argv))
-    elif '--slab-session' in sys.argv or os.environ.get('GITHUB_ACTIONS') == 'true':
+    else:
+        # Default production execution mode for both GitHub Actions and Local:
+        # Executes persistent slab session (09:30-10:15 & 01:15-02:15) with 3-minute candle cadence
         if '--ignore-window' in sys.argv:
             screener.run_screener(ignore_window=True)
         else:
             screener.run_live_slab_session(interval_seconds=180)
-    else:
-        ignore_win = ('--ignore-window' in sys.argv)
-        screener.run_screener(ignore_window=ignore_win)
