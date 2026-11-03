@@ -48,8 +48,8 @@ CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 # Only 4 Official Indices Hardcoded (Zero stock names hardcoded)
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
-# Configurable Price Floor: Blocks penny stocks (< Rs 250), allows liquid F&O leaders (SBIN, TATA, SUPREMEIND)
-MIN_STOCK_PRICE = 250.0
+# Configurable Price Floor: Blocks penny and noisy PSU stocks (< Rs 350), allows liquid F&O leaders
+MIN_STOCK_PRICE = 350.0
 
 MAX_DAILY_SUPER_TRADES = 8  # 4 Morning + 4 Afternoon
 MAX_SLAB_TRADES = 3
@@ -240,9 +240,10 @@ class DailyAutonomousScreener:
     def get_nifty_market_regime(self, force_refresh=False):
         """
         Symmetrical Macro Trend Filter from NIFTY 50 3-minute completed bars:
-        - Downtrend: Spot < 9-EMA, down >= 35 pts from open, and drop >= 60 pts from high -> blocks CALLs
-        - Uptrend: Spot > 9-EMA, up >= 35 pts from open, and rise >= 60 pts from low -> blocks PUTs
-        - Chop Trap: 18-minute range < 30 pts -> blocks both CALL and PUT
+        - Climax Candle: If last completed bar range > 35 pts, smart money is blowing off; blocks both CALL and PUT.
+        - Downtrend: Spot < 9-EMA and move from open < -10 pts -> blocks CALLs
+        - Uptrend: Spot > 9-EMA and move from open > +10 pts -> blocks PUTs
+        - Chop Trap: 18-minute range < 22 pts and distance from EMA < 12 pts -> blocks both CALL and PUT
         """
         now = time.time()
         if not force_refresh and (now - self.nifty_regime_cache.get('timestamp', 0.0) < 60.0):
@@ -258,31 +259,33 @@ class DailyAutonomousScreener:
 
         if df_nifty is not None and len(df_nifty) >= 6:
             live_b = df_nifty.iloc[-1]
+            eval_b = df_nifty.iloc[-2]
             nifty_spot = float(live_b['close'])
-            ema9 = float(df_nifty['ema9'].iloc[-1]) if 'ema9' in df_nifty.columns else float(df_nifty['close'].ewm(span=9).mean().iloc[-1])
+            ema9 = float(df_nifty['ema9'].iloc[-1]) if 'ema9' in df_nifty.columns else float(df_nifty['close'].ewm(span=9, adjust=False).mean().iloc[-1])
             day_open = float(df_nifty['open'].iloc[0])
-            day_high = float(df_nifty['high'].max())
-            day_low = float(df_nifty['low'].min())
+            move_from_open = round(nifty_spot - day_open, 2)
 
-            drop_from_high = round(day_high - nifty_spot, 2)
-            rise_from_low = round(nifty_spot - day_low, 2)
-            down_from_open = (nifty_spot < day_open - 35.0)
-            up_from_open = (nifty_spot > day_open + 35.0)
-
-            recent_rng = round(df_nifty['high'].tail(6).max() - df_nifty['low'].tail(6).min(), 2)
-            ema_distance = abs(nifty_spot - ema9)
-
-            if recent_rng < 30.0 and ema_distance < 15.0:
+            # Climax candle check on Nifty (Pillar 3 Anti-Exhaustion)
+            n_bar_rng = float(eval_b['high'] - eval_b['low'])
+            if n_bar_rng > 35.0:
                 allow_call = False
                 allow_put = False
-                reason = f"NIFTY_SIDEWAYS_CHOP_TRAP (18m Range {recent_rng:.1f} pts < 30 pts)"
+                reason = f"NIFTY_CLIMAX_EXHAUSTION_BAR ({n_bar_rng:.1f}pts > 35pts)"
             else:
-                if (nifty_spot < ema9) and down_from_open and drop_from_high >= 60.0:
+                recent_rng = round(df_nifty['high'].tail(6).max() - df_nifty['low'].tail(6).min(), 2)
+                ema_distance = abs(nifty_spot - ema9)
+
+                if recent_rng < 22.0 and ema_distance < 12.0:
                     allow_call = False
-                    reason = f"NIFTY_ACTIVE_DOWNTREND (Spot {nifty_spot:.1f} < 9EMA {ema9:.1f} | Drop={drop_from_high:.1f}pts)"
-                elif (nifty_spot > ema9) and up_from_open and rise_from_low >= 60.0:
                     allow_put = False
-                    reason = f"NIFTY_ACTIVE_UPTREND (Spot {nifty_spot:.1f} > 9EMA {ema9:.1f} | Rise={rise_from_low:.1f}pts)"
+                    reason = f"NIFTY_SIDEWAYS_CHOP_TRAP (18m Range {recent_rng:.1f} pts < 22 pts)"
+                else:
+                    if move_from_open < -10.0 or nifty_spot < ema9 - 15.0:
+                        allow_call = False
+                        reason = f"NIFTY_ACTIVE_DOWNTREND (Move {move_from_open:+.1f}pts from open | Spot {nifty_spot:.1f} vs EMA {ema9:.1f})"
+                    elif move_from_open > +10.0 or nifty_spot > ema9 + 15.0:
+                        allow_put = False
+                        reason = f"NIFTY_ACTIVE_UPTREND (Move {move_from_open:+.1f}pts from open | Spot {nifty_spot:.1f} vs EMA {ema9:.1f})"
 
         self.nifty_regime_cache = {
             'allow_stock_call': allow_call,
@@ -329,12 +332,17 @@ class DailyAutonomousScreener:
         comp_low = float(comp_bars['low'].min())
         comp_width = comp_high - comp_low
 
-        max_allowed_base = 150.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 350.0
+        max_allowed_base = 120.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 280.0
         if comp_width > max_allowed_base:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_BASE_TOO_WIDE ({comp_width:.1f} > {max_allowed_base:.1f}pts)', 'is_index': True}
 
+        # Pillar 3 Anti-Exhaustion: Climax Bar Check (Single 3m bar cannot be a blow-off explosion)
+        max_bar_rng = 35.0 if sym_clean != 'BANKNIFTY' else 80.0
+        if rng > max_bar_rng:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_CLIMAX_EXHAUSTION_BAR ({rng:.1f} > {max_bar_rng:.1f}pts)', 'is_index': True}
+
         solid_body = round(abs(b_close - b_open) / rng, 2)
-        idx_dist = 35.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 75.0
+        idx_dist = 20.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 45.0
 
         direction = None
         if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high and b_close > b_open:
@@ -348,26 +356,24 @@ class DailyAutonomousScreener:
         if solid_body < 0.45:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_WEAK_CANDLE_BODY ({solid_body:.2f} < 0.45)', 'is_index': True}
 
+        # Pillar 4 Macro Alignment: Index CALL only if Index >= Own Open and Nifty not dumping
+        idx_day_open = float(idx_df['open'].iloc[0])
+        if direction == 'CALL' and cur_p < idx_day_open:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INDEX_CALL_BELOW_OWN_DAY_OPEN', 'is_index': True}
+        if direction == 'PUT' and cur_p > idx_day_open:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INDEX_PUT_ABOVE_OWN_DAY_OPEN', 'is_index': True}
+
         # Macro Tide Alignment (Dynamic Intraday Trend - Replaces static Day Open)
         df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
         if df_nifty is not None and len(df_nifty) > 2:
             n_spot = float(df_nifty['close'].iloc[-1])
-            n_day_high = float(df_nifty['high'].max())
-            n_day_low = float(df_nifty['low'].min())
-            df_nifty_ema = df_nifty['close'].ewm(span=9, adjust=False).mean()
-            n_ema9 = float(df_nifty_ema.iloc[-1])
-            drop_from_high = n_day_high - n_spot
-            rise_from_low = n_spot - n_day_low
             n_open = float(df_nifty['open'].iloc[0])
             move_from_open = n_spot - n_open
 
             # Anti-Trap Gap-Down / Gap-Up Dead-Cat Bounce Protection
-            # Block CALL if Nifty is down > 40 pts from open OR below 9-EMA with 50+ pts drop
-            if direction == 'CALL' and (move_from_open < -40.0 or (n_spot < n_ema9 and drop_from_high >= 50.0)):
+            if direction == 'CALL' and move_from_open < -10.0:
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_DOWNTREND_BLOCKED (Nifty move {move_from_open:+.1f}pts from open)', 'is_index': True}
-
-            # Block PUT if Nifty is up > 40 pts from open OR above 9-EMA with 50+ pts rise
-            if direction == 'PUT' and (move_from_open > +40.0 or (n_spot > n_ema9 and rise_from_low >= 50.0)):
+            if direction == 'PUT' and move_from_open > +10.0:
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_UPTREND_BLOCKED (Nifty move {move_from_open:+.1f}pts from open)', 'is_index': True}
 
         # BVC Cumulative Volume Delta for Index
@@ -457,32 +463,32 @@ class DailyAutonomousScreener:
         comp_low = float(comp_bars['low'].min())
         comp_w = comp_high - comp_low
 
-        if comp_w > stock_atr * 0.65:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'STOCK_BASE_TOO_WIDE ({comp_w:.1f} > {stock_atr * 0.65:.1f}pts)', 'is_index': False}
+        if comp_w > stock_atr * 0.60:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'STOCK_BASE_TOO_WIDE ({comp_w:.1f} > {stock_atr * 0.60:.1f}pts)', 'is_index': False}
 
-        max_dist_buffer = stock_atr * 0.20
+        # Anti-Chase Buffer: Maximum 0.08 * ATR runway above base (Zero chasing candle tops!)
+        max_dist_buffer = stock_atr * 0.08
         direction = None
-        # BUG 2 FIX: Real-time Live Spot (cur_p) Holding Check added
-        if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and cur_p >= (comp_high - stock_atr * 0.05):
+        if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and cur_p >= (comp_high - stock_atr * 0.03):
             direction = 'CALL'
-        elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and cur_p <= (comp_low + stock_atr * 0.05):
+        elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and cur_p <= (comp_low + stock_atr * 0.03):
             direction = 'PUT'
 
         if direction is None:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NO_8BAR_COMPRESSION_BREAKOUT', 'is_index': False}
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NO_8BAR_COMPRESSION_BREAKOUT_OR_CHASED', 'is_index': False}
 
         # 2. ANTI-EXHAUSTION: "THAK RAHA HAI" / PROFIT BOOKING DETECTION
-        # Climax Candle: If single bar range is > 0.45 ATR, smart money is climaxing!
+        # Climax Candle: If single bar range is > 0.40 ATR, smart money is climaxing!
         c_rng = b_high - b_low
-        if c_rng > stock_atr * 0.45:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLIMAX_EXHAUSTION_CANDLE ({c_rng:.1f} > {stock_atr * 0.45:.1f}pts)', 'is_index': False}
+        if c_rng > stock_atr * 0.40:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLIMAX_EXHAUSTION_CANDLE ({c_rng:.1f} > {stock_atr * 0.40:.1f}pts)', 'is_index': False}
 
-        # Prior 3-Bar Run: If stock already moved > 0.60 ATR in preceding 9 mins, energy is spent!
+        # Prior 3-Bar Run: If stock already moved > 0.55 ATR in preceding 9 mins, energy is spent!
         p3_low = stk_df.iloc[:-2].tail(3)['low'].min()
         p3_high = stk_df.iloc[:-2].tail(3)['high'].max()
         p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
-        if p3_move > stock_atr * 0.60:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.60:.1f}pts)', 'is_index': False}
+        if p3_move > stock_atr * 0.55:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.55:.1f}pts)', 'is_index': False}
 
         # BUG 3 FIX: Full-Day Anti-Exhaustion Check (Move > 3.20% or Day Range > 1.30 * ATR)
         stk_open = float(stk_df['open'].iloc[0])
@@ -551,19 +557,22 @@ class DailyAutonomousScreener:
         n_drop = nifty_context.get('drop_high', 0.0)
         n_rise = nifty_context.get('rise_low', 0.0)
 
+        # Pillar 4: Symmetrical Macro Gate Alignment
+        allow_call = nifty_context.get('allow_stock_call', True) if nifty_context else True
+        allow_put = nifty_context.get('allow_stock_put', True) if nifty_context else True
+        regime_reason = nifty_context.get('regime_reason', 'NORMAL') if nifty_context else 'NORMAL'
+
+        if direction == 'CALL' and not allow_call:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'MACRO_REGIME_BLOCKS_CALL: {regime_reason}', 'is_index': False}
+        if direction == 'PUT' and not allow_put:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'MACRO_REGIME_BLOCKS_PUT: {regime_reason}', 'is_index': False}
+
         # Mega heavyweights CANNOT trade against Nifty macro direction
         if sym_clean in NIFTY_HEAVYWEIGHTS:
-            if direction == 'CALL' and n_move < -15.0:
+            if direction == 'CALL' and n_move < -10.0:
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty move {n_move:.1f}pts', 'is_index': False}
-            if direction == 'PUT' and n_move > +15.0:
+            if direction == 'PUT' and n_move > +10.0:
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty move {n_move:+.1f}pts', 'is_index': False}
-
-        # Decoupled Alpha Outperformer (SUPREMEIND rule)
-        is_counter = (direction == 'CALL' and (n_move < -30.0 or n_spot < n_ema9 - 25.0)) or \
-                     (direction == 'PUT' and (n_move > +30.0 or n_spot > n_ema9 + 25.0))
-        if is_counter:
-            if not ((near_day_high or near_day_low) and turnover_cr >= 4.0 and abs(bar_delta_ratio) >= 0.35):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'COUNTER_TREND_NOT_ALIGNED: Nifty move {n_move:+.1f} pts', 'is_index': False}
 
         # 7. Price Action CLV & Body Thrust
         body = abs(b_close - b_open)
@@ -975,7 +984,12 @@ class DailyAutonomousScreener:
         # PHASE B: DEDICATED STOCK ENGINE (Priority 2: Run Stock F&O Universe Second!)
         # -------------------------------------------------------------
         df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
-        nifty_context = {'spot': 0.0, 'open': 0.0, 'move': 0.0, 'ema9': 0.0, 'drop_high': 0.0, 'rise_low': 0.0}
+        nifty_context = {
+            'spot': 0.0, 'open': 0.0, 'move': 0.0, 'ema9': 0.0, 'drop_high': 0.0, 'rise_low': 0.0,
+            'allow_stock_call': nifty_regime.get('allow_stock_call', True),
+            'allow_stock_put': nifty_regime.get('allow_stock_put', True),
+            'regime_reason': nifty_regime.get('reason', 'NORMAL')
+        }
         if df_nifty is not None and len(df_nifty) > 1:
             n_spot = float(df_nifty['close'].iloc[-1])
             n_open = float(df_nifty['open'].iloc[0])
@@ -988,7 +1002,10 @@ class DailyAutonomousScreener:
                 'move': n_spot - n_open,
                 'ema9': n_ema9,
                 'drop_high': n_high - n_spot,
-                'rise_low': n_spot - n_low
+                'rise_low': n_spot - n_low,
+                'allow_stock_call': nifty_regime.get('allow_stock_call', True),
+                'allow_stock_put': nifty_regime.get('allow_stock_put', True),
+                'regime_reason': nifty_regime.get('reason', 'NORMAL')
             }
 
         stock_symbols = [x['symbol'] for x in self.universe if x['symbol'] not in INDEX_NAMES]
@@ -1171,9 +1188,9 @@ class DailyAutonomousScreener:
             # Realistic Option Targets calibrated via Delta (0.52 for Index, Risk:Reward for Stock)
             if is_idx:
                 delta = 0.52
-                spot_t1 = 140.0 if sym == 'BANKNIFTY' else (70.0 if sym in ['NIFTY', 'FINNIFTY'] else 40.0)
-                spot_t2 = 240.0 if sym == 'BANKNIFTY' else (120.0 if sym in ['NIFTY', 'FINNIFTY'] else 70.0)
-                spot_sl = 70.0 if sym == 'BANKNIFTY' else (35.0 if sym in ['NIFTY', 'FINNIFTY'] else 20.0)
+                spot_t1 = 75.0 if sym == 'BANKNIFTY' else 35.0
+                spot_t2 = 150.0 if sym == 'BANKNIFTY' else 70.0
+                spot_sl = 60.0 if sym == 'BANKNIFTY' else 30.0
 
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * delta)), 2)
                 opt_tgt1 = round(opt_entry + (spot_t1 * delta), 2)

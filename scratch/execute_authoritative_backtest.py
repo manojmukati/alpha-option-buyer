@@ -2,11 +2,13 @@
 """
 scratch/execute_authoritative_backtest.py
 ==========================================
-Sequential Decoupled 5-Day Historical Backtest Engine for Alpha Option Buyer.
-Executes the exact 5-Pillar quantitative model from daily_autonomous_screener.py:
+Authoritative 5-Day Historical Backtest Engine for Alpha 5-Pillar Option Buyer.
+Mirrors the exact 5-Pillar quantitative model from daily_autonomous_screener.py:
   1. Priority 1: Isolated 4-Index Evaluation (MAX_INDEX_PER_SLAB = 1)
   2. Priority 2: Isolated Stock F&O Universe Evaluation (MAX_STOCKS_PER_SLAB = 2)
-  3. Dynamic Risk: 1.5R T1 (Cost Trail), 3.5R T2 (Jackpot), -1.0R SL, 15-Min Stagnant Exit, EOD 15:20 Square-Off
+  3. Strict Symmetrical Macro Trend Gate (Nifty Day Open + 9-EMA alignment; Climax candle block)
+  4. Anti-Chase Buffer (Max 0.08 * ATR for Stocks; Max 20 pts for Indices)
+  5. Calibrated Dynamic Risk & Target 1 Profit Locking (T1 Cost Trail, T2 Jackpot, 15M Time SL)
 """
 
 import os
@@ -22,7 +24,7 @@ REPORT_DIR = r"C:\Users\Mohit\.gemini\antigravity\brain\49080d4e-cdec-428a-901b-
 ATR_CACHE_FILE = r"c:\Users\Mohit\.gemini\antigravity\playground\aphelion-zenith\alpha_profile_oi_system\config\stock_atr_cache.json"
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-MIN_STOCK_PRICE = 250.0
+MIN_STOCK_PRICE = 350.0
 MAX_INDEX_PER_SLAB = 1
 MAX_STOCKS_PER_SLAB = 2
 NIFTY_HEAVYWEIGHTS = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'}
@@ -86,7 +88,41 @@ def compute_bar_delta_proxy(df_bars, is_index=False):
     return {'recent_cvd_ratio': recent_cvd_ratio, 'session_cvd_ratio': session_cvd_ratio}
 
 
-def check_index_signal(sym, df_today, bar_idx, nifty_day_bars, nifty_spot):
+def get_nifty_regime(nifty_day, b_idx):
+    live_b = nifty_day.iloc[b_idx]
+    eval_b = nifty_day.iloc[b_idx - 1]
+    n_spot = float(live_b['close'])
+    ema9 = float(nifty_day['ema9'].iloc[b_idx])
+    day_open = float(nifty_day['open'].iloc[0])
+    move_from_open = n_spot - day_open
+
+    # Climax candle check on Nifty (Pillar 3 Anti-Exhaustion)
+    n_last_bar_rng = float(eval_b['high'] - eval_b['low'])
+    if n_last_bar_rng > 35.0:
+        return {'allow_call': False, 'allow_put': False, 'reason': 'NIFTY_CLIMAX_EXHAUSTION', 'move': move_from_open, 'spot': n_spot, 'open': day_open}
+
+    # 18m chop check
+    recent_rng = nifty_day['high'].iloc[max(0, b_idx - 5):b_idx + 1].max() - nifty_day['low'].iloc[max(0, b_idx - 5):b_idx + 1].min()
+    ema_dist = abs(n_spot - ema9)
+
+    if recent_rng < 22.0 and ema_dist < 12.0:
+        return {'allow_call': False, 'allow_put': False, 'reason': 'CHOP_TRAP', 'move': move_from_open, 'spot': n_spot, 'open': day_open}
+
+    allow_call = (move_from_open >= -10.0) and (n_spot >= ema9 - 15.0)
+    allow_put = (move_from_open <= +10.0) and (n_spot <= ema9 + 15.0)
+
+    return {
+        'allow_call': allow_call,
+        'allow_put': allow_put,
+        'reason': 'NORMAL',
+        'spot': n_spot,
+        'ema9': ema9,
+        'open': day_open,
+        'move': move_from_open
+    }
+
+
+def check_index_signal(sym, df_today, bar_idx, regime):
     if bar_idx < 10:
         return None
 
@@ -99,16 +135,22 @@ def check_index_signal(sym, df_today, bar_idx, nifty_day_bars, nifty_spot):
     cur_p = float(live_b['close'])
     rng = max(0.01, b_high - b_low)
 
+    # Climax candle limit
+    max_bar_rng = 35.0 if sym != 'BANKNIFTY' else 80.0
+    if rng > max_bar_rng:
+        return None
+
     comp_bars = df_today.iloc[:bar_idx - 1].tail(8)
     comp_high = float(comp_bars['high'].max())
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    max_allowed_base = 150.0 if sym != 'BANKNIFTY' else 350.0
+    max_allowed_base = 120.0 if sym != 'BANKNIFTY' else 280.0
     if comp_width > max_allowed_base:
         return None
 
-    idx_dist = 35.0 if sym != 'BANKNIFTY' else 75.0
+    # Anti-chase runway
+    idx_dist = 20.0 if sym != 'BANKNIFTY' else 45.0
     direction = None
     if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high and b_close > b_open:
         direction = 'CALL'
@@ -118,36 +160,17 @@ def check_index_signal(sym, df_today, bar_idx, nifty_day_bars, nifty_spot):
     if direction is None:
         return None
 
+    # Strict Macro Gate
+    idx_day_open = float(df_today['open'].iloc[0])
+    if direction == 'CALL':
+        if not regime['allow_call'] or cur_p < idx_day_open:
+            return None
+    elif direction == 'PUT':
+        if not regime['allow_put'] or cur_p > idx_day_open:
+            return None
+
     solid_body_ratio = round(abs(b_close - b_open) / rng, 2)
     if solid_body_ratio < 0.45:
-        return None
-
-    # Macro alignment: Dynamic Intraday Trend & Gap-Day Protection
-    n_day_open = float(nifty_day_bars.iloc[0]['open'])
-    n_day_high = float(nifty_day_bars.iloc[:bar_idx + 1]['high'].max())
-    n_day_low = float(nifty_day_bars.iloc[:bar_idx + 1]['low'].min())
-    n_ema9 = float(nifty_day_bars['ema9'].iloc[bar_idx]) if 'ema9' in nifty_day_bars.columns else nifty_spot
-    drop_from_high = n_day_high - nifty_spot
-    rise_from_low = nifty_spot - n_day_low
-    n_move = nifty_spot - n_day_open
-    idx_day_open = float(df_today.iloc[0]['open'])
-    idx_move = cur_p - idx_day_open
-
-    # Strict Macro & Day Open Alignment:
-    # CALL requires Index and Nifty to be green / non-negative (idx_move >= -10.0 and n_move >= -15.0)
-    if direction == 'CALL':
-        if idx_move < -10.0 or n_move < -15.0 or (nifty_spot < n_ema9 and drop_from_high >= 50.0):
-            return None
-    # PUT requires Index and Nifty to be red / non-positive (idx_move <= +10.0 and n_move <= +15.0)
-    if direction == 'PUT':
-        if idx_move > +10.0 or n_move > +15.0 or (nifty_spot > n_ema9 and rise_from_low >= 50.0):
-            return None
-
-    # Range Expansion RVOL (Calculated against session median consolidation baseline)
-    session_rngs = df_today.iloc[:bar_idx]['high'] - df_today.iloc[:bar_idx]['low']
-    median_rng = float(session_rngs.median()) if len(session_rngs) > 0 else 15.0
-    idx_rvol = round(rng / max(0.5, median_rng), 2)
-    if idx_rvol < 1.15:
         return None
 
     # BVC CVD
@@ -157,8 +180,14 @@ def check_index_signal(sym, df_today, bar_idx, nifty_day_bars, nifty_spot):
     if not cvd_pass:
         return None
 
-    score = min(99.0, 55.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.25 else 5.0) + (10.0 if solid_body_ratio >= 0.55 else 0.0))
-    idx_open = float(df_today['open'].iloc[0])
+    # RVOL
+    session_rngs = df_today.iloc[:bar_idx]['high'] - df_today.iloc[:bar_idx]['low']
+    median_rng = float(session_rngs.median()) if len(session_rngs) > 0 else 15.0
+    idx_rvol = round(rng / max(0.5, median_rng), 2)
+    if idx_rvol < 1.15:
+        return None
+
+    score = min(99.0, 60.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.25 else 5.0))
     return {
         'symbol': sym,
         'direction': direction,
@@ -169,13 +198,15 @@ def check_index_signal(sym, df_today, bar_idx, nifty_day_bars, nifty_spot):
         'stock_atr': 0.0,
         'rvol': idx_rvol,
         'turnover_cr': 0.0,
-        'pct_chg': round(((cur_p - idx_open) / max(1.0, idx_open)) * 100.0, 2),
+        'pct_chg': round(((cur_p - idx_day_open) / max(1.0, idx_day_open)) * 100.0, 2),
         'score': round(score, 2),
+        'base_high': comp_high,
+        'base_low': comp_low,
         'type': 'INDEX_INSTITUTIONAL_BREAKOUT'
     }
 
 
-def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_spot, nifty_ema9=None, nifty_drop=0.0, nifty_rise=0.0):
+def check_stock_signal(sym, df_today, bar_idx, stock_atr, regime):
     if bar_idx < 10:
         return None
 
@@ -192,41 +223,48 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
     if spot < MIN_STOCK_PRICE or atr_pct < 1.0:
         return None
 
-    # Anti-Exhaustion Cap: Blocks crashed (-6%) or vertically extended (+6%) stocks
     day_open = float(df_today['open'].iloc[0])
     day_pct_move = ((spot - day_open) / max(1.0, day_open)) * 100.0
     stk_day_high = float(df_today.iloc[:bar_idx + 1]['high'].max())
     stk_day_low = float(df_today.iloc[:bar_idx + 1]['low'].min())
     day_range = stk_day_high - stk_day_low
-    if abs(day_pct_move) > 4.50 or day_range > stock_atr * 1.30:
+    if abs(day_pct_move) > 3.00 or day_range > stock_atr * 1.30:
         return None
 
-    # Pillar 3: 8-Bar Base Compression & Live Spot Holding
+    # Pillar 3: 8-Bar Base Compression (Width <= 0.60 ATR)
     comp_bars = df_today.iloc[:bar_idx - 1].tail(8)
     comp_high = float(comp_bars['high'].max())
     comp_low = float(comp_bars['low'].min())
     comp_w = comp_high - comp_low
-    if comp_w > stock_atr * 0.65:
+    if comp_w > stock_atr * 0.60:
         return None
 
-    max_dist_buffer = stock_atr * 0.20
+    # Anti-Chase Buffer: Maximum 0.08 * ATR Runway above Base Boundary
+    max_dist_buffer = stock_atr * 0.08
     direction = None
-    if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and spot >= (comp_high - stock_atr * 0.05):
+    if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and spot >= (comp_high - stock_atr * 0.03):
         direction = 'CALL'
-    elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and spot <= (comp_low + stock_atr * 0.05):
+    elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and spot <= (comp_low + stock_atr * 0.03):
         direction = 'PUT'
+
     if direction is None:
+        return None
+
+    # Pillar 4 Macro Alignment: No CALL on Bear day, No PUT on Bull day
+    if direction == 'CALL' and not regime['allow_call']:
+        return None
+    if direction == 'PUT' and not regime['allow_put']:
         return None
 
     # Anti-exhaustion (Climax candle & 3-bar prior run)
     c_rng = b_high - b_low
-    if c_rng > stock_atr * 0.45:
+    if c_rng > stock_atr * 0.40:
         return None
 
     p3_low = df_today.iloc[max(0, bar_idx - 4):bar_idx - 1]['low'].min()
     p3_high = df_today.iloc[max(0, bar_idx - 4):bar_idx - 1]['high'].max()
     p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
-    if p3_move > stock_atr * 0.60:
+    if p3_move > stock_atr * 0.55:
         return None
 
     curr_3m_v = float(eval_b.get('volume', 0.0))
@@ -235,13 +273,10 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
     real_3m_rvol = round(curr_3m_v / max(1.0, base_10_v), 2)
     turnover_cr = round((curr_3m_v * spot) / 1e7, 2)
 
-    # Pillar 1: Strict Institutional RVOL Floor (No Turnover exceptions allowing low volume!)
-    if real_3m_rvol < 1.80:
-        return None
-    if turnover_cr < 3.0:
+    if real_3m_rvol < 1.80 or turnover_cr < 3.0:
         return None
 
-    # BUG 1 FIX: True Breakout Bar Delta Ratio from BVC formula
+    # True BVC Bar Delta Ratio
     cvd_res = compute_bar_delta_proxy(df_today.iloc[:bar_idx], is_index=False)
     rec_cvd = cvd_res['recent_cvd_ratio']
     bar_delta_ratio = round((2.0 * b_close - (b_high + b_low)) / rng, 3)
@@ -250,46 +285,25 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
     if not cvd_pass:
         return None
 
-    # BUG 5 FIX: Day High / Day Low Check with 0.12 * ATR Buffer
-    comp_df = df_today.iloc[:bar_idx]
-    day_high = float(comp_df['high'].max())
-    day_low = float(comp_df['low'].min())
-    near_day_high = (direction == 'CALL' and b_close >= day_high - stock_atr * 0.12)
-    near_day_low = (direction == 'PUT' and b_close <= day_low + stock_atr * 0.12)
-
+    # Afternoon must be near Day High / Low
     is_afternoon = (df_today.index[bar_idx].hour >= 13)
-    if is_afternoon and not (near_day_high or near_day_low):
-        return None
-
-    # BUG 4 FIX: Dynamic Nifty Macro Tide Check
-    n_move = nifty_spot - nifty_day_open
-    n_ema = nifty_ema9 if nifty_ema9 is not None else nifty_spot
-
-    # Mega heavyweights CANNOT trade against Nifty macro direction
-    if sym in NIFTY_HEAVYWEIGHTS:
-        if direction == 'CALL' and n_move < -15.0:
-            return None
-        if direction == 'PUT' and n_move > +15.0:
-            return None
-
-    is_counter = (direction == 'CALL' and (n_move < -30.0 or nifty_spot < n_ema - 25.0)) or \
-                 (direction == 'PUT' and (n_move > +30.0 or nifty_spot > n_ema + 25.0))
-    if is_counter:
-        if not ((near_day_high or near_day_low) and turnover_cr >= 4.0 and abs(bar_delta_ratio) >= 0.35):
+    if is_afternoon:
+        near_hl = (direction == 'CALL' and b_close >= stk_day_high - stock_atr * 0.10) or \
+                  (direction == 'PUT' and b_close <= stk_day_low + stock_atr * 0.10)
+        if not near_hl:
             return None
 
     body = abs(b_close - b_open)
     solid_body_ratio = round(body / rng, 2)
     clv = round((b_close - b_low) / rng, 2)
-    min_thrust = max(2.5, round(stock_atr * 0.06, 1))
-    if solid_body_ratio < 0.50 or body < min_thrust:
+    if solid_body_ratio < 0.50:
         return None
 
     clv_pass = (clv >= 0.60) if direction == 'CALL' else (clv <= 0.40)
     if not clv_pass:
         return None
 
-    score = min(99.0, 50.0 + min(25.0, (real_3m_rvol - 1.0) * 10.0) + (15.0 if abs(bar_delta_ratio) >= 0.35 else 5.0) + min(10.0, turnover_cr * 1.5))
+    score = min(99.0, 55.0 + min(25.0, (real_3m_rvol - 1.0) * 10.0) + (15.0 if abs(bar_delta_ratio) >= 0.35 else 5.0) + min(10.0, turnover_cr * 1.5))
     return {
         'symbol': sym,
         'direction': direction,
@@ -302,6 +316,8 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, nifty_day_open, nifty_
         'turnover_cr': turnover_cr,
         'pct_chg': round(((spot - day_open) / max(1.0, day_open)) * 100.0, 2),
         'score': round(score, 2),
+        'base_high': comp_high,
+        'base_low': comp_low,
         'type': 'STOCK_INSTITUTIONAL_BREAKOUT'
     }
 
@@ -314,13 +330,18 @@ def simulate_trade_forward(cand, df_today, entry_idx):
 
     if is_idx:
         sym = cand['symbol']
-        spot_t1 = 140.0 if sym == 'BANKNIFTY' else (70.0 if sym in ['NIFTY', 'FINNIFTY'] else 40.0)
-        spot_t2 = 240.0 if sym == 'BANKNIFTY' else (120.0 if sym in ['NIFTY', 'FINNIFTY'] else 70.0)
-        spot_sl = 70.0 if sym == 'BANKNIFTY' else (35.0 if sym in ['NIFTY', 'FINNIFTY'] else 20.0)
+        spot_t1 = 75.0 if sym == 'BANKNIFTY' else 35.0
+        spot_t2 = 150.0 if sym == 'BANKNIFTY' else 70.0
+        spot_sl = 60.0 if sym == 'BANKNIFTY' else 30.0
     else:
         spot_t1 = round(atr * 0.35, 1)
         spot_t2 = round(atr * 0.70, 1)
-        spot_sl = round(atr * 0.20, 1)
+        # Structural Base Failure Stop Loss
+        if direction == 'CALL':
+            spot_sl = max(round(atr * 0.15, 1), entry_p - (cand['base_low'] - atr * 0.03))
+        else:
+            spot_sl = max(round(atr * 0.15, 1), (cand['base_high'] + atr * 0.03) - entry_p)
+        spot_sl = min(spot_sl, round(atr * 0.25, 1))
 
     bars_fwd = df_today.iloc[entry_idx + 1:]
     exit_p = entry_p
@@ -379,45 +400,36 @@ def simulate_trade_forward(cand, df_today, entry_idx):
         'is_index': cand['is_index'],
         'stock_atr': cand.get('stock_atr', 0),
         'rvol': cand['rvol'],
+        'turnover_cr': cand['turnover_cr'],
         'pct_chg': cand['pct_chg'],
         'score': cand['score'],
         'type': cand['type'],
         'exit_price': exit_p,
-        'exit_time': bars_fwd.index[min(exit_idx_local, len(bars_fwd) - 1)] if len(bars_fwd) > 0 else cand['eval_time'],
         'points_captured': pts_captured,
         'spot_sl': spot_sl,
-        'spot_t1': spot_t1,
-        'spot_t2': spot_t2,
         'exit_reason': exit_reason,
         'realized_r': rr_realized
     }
 
 
-def run_full_5day_backtest():
-    print("[BACKTEST]: Loading 217 assets resampled 3m intraday data...")
+def main():
+    print("Loading 1m parquet data resampled to 3m candles...")
     asset_data = load_resampled_3m_data()
+    print(f"Loaded {len(asset_data)} active assets.")
     atrs = load_verified_atrs()
+
     all_dates = sorted(list(set(d for df in asset_data.values() for d in df.index.date)))
+    print(f"5 Backtest Dates: {[str(d) for d in all_dates]}")
+
     stock_syms = [s for s in asset_data.keys() if s not in INDEX_NAMES]
-
-    print(f"[BACKTEST]: Ready. {len(asset_data)} assets loaded across {len(all_dates)} dates: {all_dates}")
-
-    all_executed_trades = []
+    executed_trades = []
 
     for d in all_dates:
-        print(f"\n=======================================================")
-        print(f"  PROCESSING DATE: {d}")
-        print(f"=======================================================")
-
         nifty_day = asset_data['NIFTY'][asset_data['NIFTY'].index.date == d].copy()
         nifty_day['ema9'] = nifty_day['close'].ewm(span=9, adjust=False).mean()
-        n_day_open = nifty_day.iloc[0]['open']
 
-        morn_idx_dispatched = set()
-        morn_stk_dispatched = set()
-        aft_idx_dispatched = set()
-        aft_stk_dispatched = set()
-
+        m_idx, m_stk = set(), set()
+        a_idx, a_stk = set(), set()
         time_index = nifty_day.index
 
         for b_idx in range(10, len(time_index)):
@@ -428,100 +440,85 @@ def run_full_5day_backtest():
             if not (is_m or is_a):
                 continue
 
-            slab_name = 'MORNING_0930_1015' if is_m else 'AFTERNOON_1315_1415'
-            n_spot = nifty_day.iloc[b_idx]['close']
+            regime = get_nifty_regime(nifty_day, b_idx)
+            if not (regime['allow_call'] or regime['allow_put']):
+                continue
 
-            # PRIORITY 1: EVALUATE 4 INDICES FIRST!
-            cur_idx_count = len(morn_idx_dispatched) if is_m else len(aft_idx_dispatched)
-            if cur_idx_count < MAX_INDEX_PER_SLAB:
+            # PRIORITY 1: INDEX EVALUATION (Max 1 per slab)
+            c_idx = len(m_idx) if is_m else len(a_idx)
+            if c_idx < MAX_INDEX_PER_SLAB:
                 for isym in INDEX_NAMES:
                     if isym not in asset_data:
                         continue
-                    idf_day = asset_data[isym][asset_data[isym].index.date == d]
-                    if len(idf_day) <= b_idx:
+                    idf = asset_data[isym][asset_data[isym].index.date == d]
+                    if len(idf) <= b_idx:
                         continue
-                    already = isym in (morn_idx_dispatched if is_m else aft_idx_dispatched)
-                    if already:
+                    if isym in (m_idx if is_m else a_idx):
                         continue
 
-                    isig = check_index_signal(isym, idf_day, b_idx, nifty_day, n_spot)
-                    if isig:
-                        out = simulate_trade_forward(isig, idf_day, b_idx)
-                        out['date'] = d
-                        out['slab'] = slab_name
-                        all_executed_trades.append(out)
-                        if is_m:
-                            morn_idx_dispatched.add(isym)
-                        else:
-                            aft_idx_dispatched.add(isym)
-                        print(f"  [INDEX DISPATCH]: {curr_t.strftime('%H:%M')} | {slab_name} | {isym} {isig['direction']} @ {isig['entry_price']:.1f} -> Outcome: {out['exit_reason']} ({out['realized_r']:+.2f}R)")
+                    sig = check_index_signal(isym, idf, b_idx, regime)
+                    if sig:
+                        out = simulate_trade_forward(sig, idf, b_idx)
+                        out['date'] = str(d)
+                        executed_trades.append(out)
+                        if is_m: m_idx.add(isym)
+                        else: a_idx.add(isym)
                         break
 
-            # PRIORITY 2: EVALUATE F&O STOCKS SECOND!
-            cur_stk_count = len(morn_stk_dispatched) if is_m else len(aft_stk_dispatched)
-            if cur_stk_count < MAX_STOCKS_PER_SLAB:
+            # PRIORITY 2: STOCK EVALUATION (Max 2 per slab)
+            c_stk = len(m_stk) if is_m else len(a_stk)
+            if c_stk < MAX_STOCKS_PER_SLAB:
+                stk_candidates = []
                 for ssym in stock_syms:
-                    if cur_stk_count >= MAX_STOCKS_PER_SLAB:
-                        break
-                    sdf_day = asset_data[ssym][asset_data[ssym].index.date == d]
-                    if len(sdf_day) <= b_idx:
+                    if ssym in (m_stk if is_m else a_stk):
                         continue
-                    already = ssym in (morn_stk_dispatched if is_m else aft_stk_dispatched)
-                    if already:
+                    sdf = asset_data[ssym][asset_data[ssym].index.date == d]
+                    if len(sdf) <= b_idx:
                         continue
 
-                    satr_val = atrs.get(ssym, 30.0)
-                    satr = float(satr_val) if not isinstance(satr_val, dict) else float(satr_val.get('atr_wilder_14', 30.0))
-                    n_high_so_far = nifty_day.iloc[:b_idx + 1]['high'].max()
-                    n_low_so_far = nifty_day.iloc[:b_idx + 1]['low'].min()
-                    n_ema = nifty_day['ema9'].iloc[b_idx]
-                    n_drop = n_high_so_far - n_spot
-                    n_rise = n_spot - n_low_so_far
-                    ssig = check_stock_signal(ssym, sdf_day, b_idx, satr, n_day_open, n_spot, nifty_ema9=n_ema, nifty_drop=n_drop, nifty_rise=n_rise)
-                    if ssig:
-                        out = simulate_trade_forward(ssig, sdf_day, b_idx)
-                        out['date'] = d
-                        out['slab'] = slab_name
-                        all_executed_trades.append(out)
-                        if is_m:
-                            morn_stk_dispatched.add(ssym)
-                        else:
-                            aft_stk_dispatched.add(ssym)
-                        cur_stk_count += 1
-                        print(f"  [STOCK DISPATCH]: {curr_t.strftime('%H:%M')} | {slab_name} | {ssym} {ssig['direction']} @ {ssig['entry_price']:.1f} -> Outcome: {out['exit_reason']} ({out['realized_r']:+.2f}R)")
+                    satr = float(atrs.get(ssym, 30.0)) if not isinstance(atrs.get(ssym, 30.0), dict) else float(atrs.get(ssym, 30.0).get('atr_wilder_14', 30.0))
+                    sig = check_stock_signal(ssym, sdf, b_idx, satr, regime)
+                    if sig:
+                        stk_candidates.append(sig)
 
-    df_out = pd.DataFrame(all_executed_trades)
-    csv_path = os.path.join(REPORT_DIR, "Alpha_Authoritative_5Day_Backtest.csv")
-    df_out.to_csv(csv_path, index=False)
+                stk_candidates.sort(key=lambda x: (x['score'], x['turnover_cr']), reverse=True)
+                for cand in stk_candidates[:MAX_STOCKS_PER_SLAB - c_stk]:
+                    out = simulate_trade_forward(cand, asset_data[cand['symbol']][asset_data[cand['symbol']].index.date == d], b_idx)
+                    out['date'] = str(d)
+                    executed_trades.append(out)
+                    if is_m: m_stk.add(cand['symbol'])
+                    else: a_stk.add(cand['symbol'])
+                    c_stk += 1
 
-    print("\n=======================================================")
-    print("             5-DAY BACKTEST SUMMARY REPORT             ")
-    print("=======================================================")
-    print(f"Trades saved to: {csv_path}")
-    print(f"Total Trades Executed:   {len(df_out)}")
+    df_out = pd.DataFrame(executed_trades)
+    csv_report_path = os.path.join(REPORT_DIR, "Alpha_Authoritative_5Day_Backtest.csv")
+    df_out.to_csv(csv_report_path, index=False)
+    print(f"\n[REPORT SAVED]: {csv_report_path}")
+
+    print("\n" + "=" * 70)
+    print("      ALPHA 5-PILLAR AUTHORITATIVE 5-DAY BACKTEST SUMMARY     ")
+    print("=" * 70)
+    print(f"Total Dispatched Trades: {len(df_out)}")
     wins = df_out[df_out['realized_r'] > 0]
     be = df_out[df_out['realized_r'] == 0]
     losses = df_out[df_out['realized_r'] < 0]
-    t2_jackpots = df_out[df_out['exit_reason'] == 'TARGET_2_HIT (JACKPOT)']
-    cost_trails = df_out[df_out['exit_reason'] == 'COST_TRAILED_EXIT']
-    time_sls = df_out[df_out['exit_reason'] == '15M_TIME_SL_EXIT']
-    sl_hits = df_out[df_out['exit_reason'] == 'SL_HIT']
-
     gross_win = wins['realized_r'].sum()
     gross_loss = abs(losses['realized_r'].sum())
     net_r = df_out['realized_r'].sum()
-    pf = round(gross_win / max(0.1, gross_loss), 2)
+    pf = gross_win / max(0.1, gross_loss)
+    win_rate = (len(wins) / len(df_out)) * 100.0
+    non_losing_rate = ((len(wins) + len(be)) / len(df_out)) * 100.0
 
-    print(f"Winning Trades (>0R):    {len(wins)} ({len(wins)/len(df_out)*100:.1f}%) | Gross Win: +{gross_win:.2f}R")
-    print(f"Breakeven Exits (0.0R):  {len(be)} trades")
-    print(f"Losing Trades (<0R):     {len(losses)} | Gross Loss: -{gross_loss:.2f}R")
-    print(f"Net Realized R:          {net_r:+.2f}R")
-    print(f"Profit Factor:           {pf}")
-    print(f"Target 2 Jackpots:       {len(t2_jackpots)} trades (+{t2_jackpots['realized_r'].sum():.1f}R)")
-    print(f"Cost Trailed (T1 Lock):  {len(cost_trails)} trades (0.00R)")
-    print(f"15M Time SL Exits:       {len(time_sls)} trades ({time_sls['realized_r'].sum():.2f}R)")
-    print(f"Full Stop Losses:        {len(sl_hits)} trades ({sl_hits['realized_r'].sum():.1f}R)")
+    print(f"Wins: {len(wins)} ({win_rate:.1f}%) | Gross Win: +{gross_win:.2f}R")
+    print(f"Breakeven (Cost Trailed): {len(be)} ({len(be)/len(df_out)*100:.1f}%)")
+    print(f"Losses: {len(losses)} ({len(losses)/len(df_out)*100:.1f}%) | Gross Loss: -{gross_loss:.2f}R")
+    print(f"Non-Losing Win Rate (Wins + BE): {len(wins) + len(be)}/{len(df_out)} ({non_losing_rate:.1f}%)")
+    print(f"Net Realized R: {net_r:+.2f}R | Profit Factor: {pf:.2f}")
+    print("-" * 70)
+    for idx, r in df_out.iterrows():
+        t_str = pd.to_datetime(r['eval_time']).strftime('%H:%M')
+        print(f"{r['date']} {t_str} | {r['symbol']:<12} {r['direction']:<4} -> {r['exit_reason']:<22} ({r['realized_r']:+.2f}R | {r['points_captured']:+.1f}pts)")
 
 
 if __name__ == '__main__':
-    run_full_5day_backtest()
+    main()
