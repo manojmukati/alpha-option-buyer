@@ -400,17 +400,16 @@ class DailyAutonomousScreener:
             'cvd_info': cvd_res
         }
 
-    def evaluate_stock_engine(self, symbol, live_q=None, is_afternoon=False):
+    def evaluate_stock_engine(self, symbol, live_q=None, is_afternoon=False, nifty_context=None):
         """
         PURE STOCK ENGINE (Early Ignition & Anti-Exhaustion "Thak Raha Hai" Protection)
         Preserves all 5 Pillars:
         - Pillar 1: Institutional Cash Turnover Floor >= Rs 3.0 Cr. RVOL >= 1.80x (or >= 1.60x if turnover >= Rs 6.0 Cr).
         - Pillar 2: True BVC Cumulative Volume Delta with Current Bar Delta Priority (>= +35% for CALL, <= -35% for PUT).
         - Pillar 3: 8-bar Compression Base (width <= 0.65 * ATR). Early Runway <= 0.20 * ATR from boundary.
-                    ANTI-EXHAUSTION: Breakout Bar Range <= 0.45 * ATR, Prior 3-Bar Runup <= 0.60 * ATR.
-                    Afternoon: Must be near Day High (CALL) or Day Low (PUT) within 0.05 * ATR.
-        - Pillar 4: Macro Tide & Heavyweight Check (Mega heavyweights MUST follow Nifty;
-                    Decoupled Alpha Outperformer with Turnover >= 5.0 Cr & Delta >= 40% can decouple from Nifty).
+                    ANTI-EXHAUSTION: Breakout Bar Range <= 0.45 * ATR, Prior 3-Bar Runup <= 0.60 * ATR, Day Range <= 1.30 * ATR.
+                    Day High / Low Frontier: Within 0.12 * ATR buffer.
+        - Pillar 4: Dynamic Nifty Macro Trend (9-EMA + 60 pts drop/rise; Mega heavyweights MUST align; Decoupled Alpha Outperformer allowed).
         - Pillar 5: ATR-Normalized Risk (SL = 0.20 * ATR, T1 = 0.35 * ATR, T2 = 0.70 * ATR).
         """
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
@@ -431,6 +430,11 @@ class DailyAutonomousScreener:
                 'failed_gate': f'STOCK_PRICE_BELOW_{int(MIN_STOCK_PRICE)}_INR: Spot Rs {cur_p:.1f} < {MIN_STOCK_PRICE} (or ATR% {atr_pct:.2f}% < 1.0%)',
                 'is_index': False
             }
+
+        # BUG 6 FIX: Fast Pre-Filter for 213 Stocks (Zero Network calls for dead/flat stocks)
+        pct_change = abs(float(q.get('pct_change', 0.0)))
+        if pct_change < 0.35:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INSIGNIFICANT_DAY_MOVE ({pct_change:.2f}% < 0.35%)', 'is_index': False}
 
         stk_df = self.data_feed.get_live_intraday_bars(sym_clean)
         if stk_df is None or len(stk_df) < 10:
@@ -455,9 +459,10 @@ class DailyAutonomousScreener:
 
         max_dist_buffer = stock_atr * 0.20
         direction = None
-        if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open:
+        # BUG 2 FIX: Real-time Live Spot (cur_p) Holding Check added
+        if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and cur_p >= (comp_high - stock_atr * 0.05):
             direction = 'CALL'
-        elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open:
+        elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and cur_p <= (comp_low + stock_atr * 0.05):
             direction = 'PUT'
 
         if direction is None:
@@ -476,13 +481,14 @@ class DailyAutonomousScreener:
         if p3_move > stock_atr * 0.60:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.60:.1f}pts)', 'is_index': False}
 
-        # Day Move Anti-Exhaustion (Blocks entering when stock is already extended by > 2.0% from day open!)
+        # BUG 3 FIX: Full-Day Anti-Exhaustion Check (Move > 3.20% or Day Range > 1.30 * ATR)
         stk_open = float(stk_df['open'].iloc[0])
         day_pct_move = ((cur_p - stk_open) / max(1.0, stk_open)) * 100.0
-        if direction == 'CALL' and day_pct_move > 2.0:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'DAY_MOVE_OVEREXTENDED_CALL (+{day_pct_move:.2f}% > +2.0%)', 'is_index': False}
-        if direction == 'PUT' and day_pct_move < -2.0:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'DAY_MOVE_OVEREXTENDED_PUT ({day_pct_move:.2f}% < -2.0%)', 'is_index': False}
+        stk_day_high = float(stk_df['high'].max())
+        stk_day_low = float(stk_df['low'].min())
+        day_range = stk_day_high - stk_day_low
+        if abs(day_pct_move) > 3.20 or day_range > stock_atr * 1.30:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'DAY_RANGE_EXHAUSTED (Move {day_pct_move:+.2f}%, Range {day_range:.1f} > {stock_atr * 1.30:.1f}pts)', 'is_index': False}
 
         # 3. Volume, RVOL & Turnover Floor
         curr_v = float(eval_bar.get('volume', 0.0))
@@ -500,46 +506,60 @@ class DailyAutonomousScreener:
         if real_rvol < 1.80 and turnover_cr < 6.0:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_INSUFFICIENT ({real_rvol:.2f}x < 1.80x, Turn {turnover_cr:.1f}Cr)', 'is_index': False}
 
-        # 4. CVD & Current Bar Delta Priority
+        # BUG 1 FIX: True Breakout Bar Delta Ratio directly from BVC Microstructure formula
         completed_bars = stk_df.iloc[:-1]
         cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
         rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
-        vols = completed_bars['volume'].values.astype(float)
-        deltas = completed_bars['delta'].values.astype(float) if 'delta' in completed_bars.columns else vols
-        bar_delta_ratio = round(float(deltas[-1]) / max(1.0, float(vols[-1])), 3) if len(vols) > 0 else 0.0
+        bar_delta_ratio = round((2.0 * b_close - (b_high + b_low)) / rng, 3)
 
         cvd_pass = (rec_cvd >= 0.15 or bar_delta_ratio >= 0.35) if direction == 'CALL' else (rec_cvd <= -0.15 or bar_delta_ratio <= -0.35)
         if not cvd_pass:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'BVC_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f}, BarDelta={bar_delta_ratio:+.2f})', 'is_index': False}
 
-        # 5. Day High / Day Low Check
+        # BUG 5 FIX: Day High / Day Low Check with 0.12 * ATR Buffer
         comp_df = stk_df.iloc[:-1]
         day_high = float(comp_df['high'].max())
         day_low = float(comp_df['low'].min())
-        near_day_high = (direction == 'CALL' and b_close >= (day_high - stock_atr * 0.05))
-        near_day_low = (direction == 'PUT' and b_close <= (day_low + stock_atr * 0.05))
+        near_day_high = (direction == 'CALL' and b_close >= (day_high - stock_atr * 0.12))
+        near_day_low = (direction == 'PUT' and b_close <= (day_low + stock_atr * 0.12))
 
         if is_afternoon:
             if not (near_day_high or near_day_low):
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'AFTERNOON_NOT_DAY_HIGH_LOW_BREAKOUT', 'is_index': False}
 
-        # 6. Macro Tide & Heavyweight Check
-        df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
-        n_move = 0.0
-        if df_nifty is not None and len(df_nifty) > 1:
-            n_spot = float(df_nifty['close'].iloc[-1])
-            n_open = float(df_nifty['open'].iloc[0])
-            n_move = n_spot - n_open
+        # BUG 4 FIX: Dynamic Nifty Macro Check (Pre-computed Context Passed In)
+        if nifty_context is None:
+            df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
+            n_spot = float(df_nifty['close'].iloc[-1]) if df_nifty is not None and len(df_nifty) > 1 else cur_p
+            n_open = float(df_nifty['open'].iloc[0]) if df_nifty is not None and len(df_nifty) > 1 else cur_p
+            n_high = float(df_nifty['high'].max()) if df_nifty is not None and len(df_nifty) > 1 else cur_p
+            n_low = float(df_nifty['low'].min()) if df_nifty is not None and len(df_nifty) > 1 else cur_p
+            n_ema9 = float(df_nifty['close'].ewm(span=9, adjust=False).mean().iloc[-1]) if df_nifty is not None and len(df_nifty) > 1 else n_spot
+            nifty_context = {
+                'spot': n_spot,
+                'open': n_open,
+                'move': n_spot - n_open,
+                'ema9': n_ema9,
+                'drop_high': n_high - n_spot,
+                'rise_low': n_spot - n_low
+            }
 
-        # Mega heavyweights CANNOT trade against Nifty
+        n_move = nifty_context.get('move', 0.0)
+        n_spot = nifty_context.get('spot', 0.0)
+        n_ema9 = nifty_context.get('ema9', n_spot)
+        n_drop = nifty_context.get('drop_high', 0.0)
+        n_rise = nifty_context.get('rise_low', 0.0)
+
+        # Mega heavyweights CANNOT trade against Nifty macro tide
         if sym_clean in NIFTY_HEAVYWEIGHTS:
-            if direction == 'CALL' and n_move < -10.0:
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty down {n_move:.1f} pts', 'is_index': False}
-            if direction == 'PUT' and n_move > +10.0:
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty up {n_move:+.1f} pts', 'is_index': False}
+            if direction == 'CALL' and ((n_spot < n_ema9 and n_drop >= 60.0) or n_move < -50.0):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty drop {n_drop:.1f}pts below EMA9', 'is_index': False}
+            if direction == 'PUT' and ((n_spot > n_ema9 and n_rise >= 60.0) or n_move > +50.0):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty rise {n_rise:.1f}pts above EMA9', 'is_index': False}
 
         # Decoupled Alpha Outperformer (SUPREMEIND rule)
-        is_counter = (direction == 'CALL' and n_move < -10.0) or (direction == 'PUT' and n_move > +10.0)
+        is_counter = (direction == 'CALL' and (n_move < -50.0 or n_spot < n_ema9 - 25.0)) or \
+                     (direction == 'PUT' and (n_move > +50.0 or n_spot > n_ema9 + 25.0))
         if is_counter:
             if not ((near_day_high or near_day_low) and turnover_cr >= 4.0 and abs(bar_delta_ratio) >= 0.35):
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'COUNTER_TREND_NOT_ALIGNED: Nifty move {n_move:+.1f} pts', 'is_index': False}
@@ -574,7 +594,7 @@ class DailyAutonomousScreener:
             'cvd_info': cvd_res
         }
 
-    def evaluate_asset(self, symbol):
+    def evaluate_asset(self, symbol, nifty_context=None):
         """
         Master Router: Dispatches to dedicated Index Engine or Stock Engine.
         """
@@ -586,7 +606,7 @@ class DailyAutonomousScreener:
         if sym_clean in INDEX_NAMES:
             return self.evaluate_index_engine(sym_clean, is_afternoon=is_afternoon)
         else:
-            return self.evaluate_stock_engine(sym_clean, is_afternoon=is_afternoon)
+            return self.evaluate_stock_engine(sym_clean, is_afternoon=is_afternoon, nifty_context=nifty_context)
 
 
     def _log_rejection_audit(self, ist_now, all_evaluations, qualified_trades, stage2_rejections=None):
@@ -934,9 +954,26 @@ class DailyAutonomousScreener:
 
         # PHASE B: DEDICATED STOCK ENGINE (Priority 2: Run Stock F&O Universe Second!)
         # -------------------------------------------------------------
+        df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
+        nifty_context = {'spot': 0.0, 'open': 0.0, 'move': 0.0, 'ema9': 0.0, 'drop_high': 0.0, 'rise_low': 0.0}
+        if df_nifty is not None and len(df_nifty) > 1:
+            n_spot = float(df_nifty['close'].iloc[-1])
+            n_open = float(df_nifty['open'].iloc[0])
+            n_high = float(df_nifty['high'].max())
+            n_low = float(df_nifty['low'].min())
+            n_ema9 = float(df_nifty['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+            nifty_context = {
+                'spot': n_spot,
+                'open': n_open,
+                'move': n_spot - n_open,
+                'ema9': n_ema9,
+                'drop_high': n_high - n_spot,
+                'rise_low': n_spot - n_low
+            }
+
         stock_symbols = [x['symbol'] for x in self.universe if x['symbol'] not in INDEX_NAMES]
         with ThreadPoolExecutor(max_workers=8) as executor:
-            stock_eval_results = list(executor.map(lambda s: self.evaluate_stock_engine(s, is_afternoon=is_afternoon), stock_symbols))
+            stock_eval_results = list(executor.map(lambda s: self.evaluate_stock_engine(s, is_afternoon=is_afternoon, nifty_context=nifty_context), stock_symbols))
 
         stock_candidates = [
             r for r in stock_eval_results 
