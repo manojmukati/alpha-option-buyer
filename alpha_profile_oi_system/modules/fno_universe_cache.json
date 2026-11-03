@@ -1,0 +1,1794 @@
+[
+  {
+    "symbol": "NIFTY",
+    "lot": 65,
+    "step": 50.0,
+    "sector": "INDEX",
+    "base_p": 23534.6,
+    "type": "INDEX"
+  },
+  {
+    "symbol": "BANKNIFTY",
+    "lot": 30,
+    "step": 100.0,
+    "sector": "INDEX",
+    "base_p": 55119.8,
+    "type": "INDEX"
+  },
+  {
+    "symbol": "FINNIFTY",
+    "lot": 60,
+    "step": 50.0,
+    "sector": "INDEX",
+    "base_p": 25015.0,
+    "type": "INDEX"
+  },
+  {
+    "symbol": "MIDCPNIFTY",
+    "lot": 120,
+    "step": 25.0,
+    "sector": "INDEX",
+    "base_p": 13399.65,
+    "type": "INDEX"
+  },
+  {
+    "symbol": "NIFTYNXT50",
+    "lot": 25,
+    "step": 100.0,
+    "sector": "INDEX",
+    "base_p": 69250.6,
+    "type": "INDEX"
+  },
+  {
+    "symbol": "ABCAPITAL",
+    "lot": 1550,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 384.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ADANIENSOL",
+    "lot": 675,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1388.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GODFRYPHLP",
+    "lot": 275,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1695.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ICICILIFE",
+    "lot": 925,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 409.25,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "INDHOTEL",
+    "lot": 1000,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 832.25,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "INDIANB",
+    "lot": 1000,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 864.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "INOXWIND",
+    "lot": 6400,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 60.18,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "JINDALSTEL",
+    "lot": 625,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1119.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MPHASIS",
+    "lot": 275,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2559.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NESTLEIND",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1193.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NTPC",
+    "lot": 1500,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 320.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PRESTIGE",
+    "lot": 450,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1467.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "RBLBANK",
+    "lot": 3175,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 354.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SHREECEM",
+    "lot": 25,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 23480.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SYRMA",
+    "lot": 325,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1505.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TATAELXSI",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3801.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TATASTEEL",
+    "lot": 2750,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 177.48,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TCS",
+    "lot": 250,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2521.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ADANIPOWER",
+    "lot": 3550,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 196.14,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "AMBUJACEM",
+    "lot": 1200,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 363.45,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "APLAPOLLO",
+    "lot": 350,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2164.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ATHERENERG",
+    "lot": 375,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1754.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "AUROPHARMA",
+    "lot": 550,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1679.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BSE",
+    "lot": 200,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3536.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CDSL",
+    "lot": 475,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1256.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CONCOR",
+    "lot": 1250,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 417.35,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "EICHERMOT",
+    "lot": 100,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 7242.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "INDIGO",
+    "lot": 150,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4951.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "JIOFIN",
+    "lot": 2350,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 215.36,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "KAYNES",
+    "lot": 150,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3196.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "KEI",
+    "lot": 175,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3813.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MFSL",
+    "lot": 400,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1182.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NYKAA",
+    "lot": 3125,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 352.35,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PAGEIND",
+    "lot": 20,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 35580.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PERSISTENT",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 6045.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PNBHOUSING",
+    "lot": 650,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1095.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SBILIFE",
+    "lot": 375,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1672.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TIINDIA",
+    "lot": 200,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2185.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TITAN",
+    "lot": 175,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4532.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TRENT",
+    "lot": 225,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3050.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "UNIONBANK",
+    "lot": 4425,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 187.57,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "YESBANK",
+    "lot": 31100,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 15.58,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ABB",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 6665.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BDL",
+    "lot": 425,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1001.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BEL",
+    "lot": 1425,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 377.85,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BHEL",
+    "lot": 2625,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 398.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CGPOWER",
+    "lot": 850,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 829.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GMRAIRPORT",
+    "lot": 6975,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 90.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HAL",
+    "lot": 150,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4903.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HCLTECH",
+    "lot": 400,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1432.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "JUBLFOOD",
+    "lot": 1250,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 425.65,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "OBEROIRLTY",
+    "lot": 350,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1655.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ONGC",
+    "lot": 2250,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 236.01,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PNB",
+    "lot": 8000,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 124.18,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "POWERGRID",
+    "lot": 1900,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 266.05,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SAGILITY",
+    "lot": 12000,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 42.96,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SONACOMS",
+    "lot": 1225,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 902.55,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "AXISBANK",
+    "lot": 625,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1218.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "COCHINSHIP",
+    "lot": 400,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1166.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ETERNAL",
+    "lot": 2425,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 350.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GVT&D",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4190.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HINDPETRO",
+    "lot": 2025,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 351.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "IDFCFIRSTB",
+    "lot": 9275,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 74.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LODHA",
+    "lot": 625,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1006.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TVSMOTOR",
+    "lot": 175,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4265.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BAJAJ-AUTO",
+    "lot": 75,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 10408.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BOSCHLTD",
+    "lot": 25,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 48380.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CIPLA",
+    "lot": 425,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1390.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DATAPATTNS",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3898.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DLF",
+    "lot": 950,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 704.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DRREDDY",
+    "lot": 625,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1341.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GODREJPROP",
+    "lot": 325,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1646.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "KOTAKBANK",
+    "lot": 2000,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 465.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "M&M",
+    "lot": 200,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2872.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NATIONALUM",
+    "lot": 1875,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 328.45,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NHPC",
+    "lot": 6950,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 78.72,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PAYTM",
+    "lot": 325,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1682.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PGEL",
+    "lot": 950,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 538.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TECHM",
+    "lot": 600,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1788.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ULTRACEMCO",
+    "lot": 50,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 11354.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BANKINDIA",
+    "lot": 5200,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 134.61,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BIOCON",
+    "lot": 2500,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 355.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "COALINDIA",
+    "lot": 1350,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 412.65,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "COLPAL",
+    "lot": 275,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1581.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "FEDERALBNK",
+    "lot": 2500,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 339.65,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "FORCEMOT",
+    "lot": 25,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 17771.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GODREJCP",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 810.75,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "KPITTECH",
+    "lot": 975,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 538.95,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LT",
+    "lot": 175,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3982.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NMDC",
+    "lot": 6750,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 68.86,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "OIL",
+    "lot": 1400,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 461.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PHOENIXLTD",
+    "lot": 350,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2038.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PIIND",
+    "lot": 175,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2166.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TATACONSUM",
+    "lot": 550,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1023.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "WIPRO",
+    "lot": 3000,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 196.39,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BHARATFORG",
+    "lot": 500,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1796.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CROMPTON",
+    "lot": 2150,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 197.13,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "INDUSTOWER",
+    "lot": 1700,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 389.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NAM-INDIA",
+    "lot": 625,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 930.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NAVINFLUOR",
+    "lot": 75,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 8412.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PATANJALI",
+    "lot": 1450,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 369.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "POWERINDIA",
+    "lot": 25,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 28445.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SOLARINDS",
+    "lot": 25,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 19773.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TATAPOWER",
+    "lot": 1450,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 357.45,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "VOLTAS",
+    "lot": 375,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1036.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "APOLLOHOSP",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 8416.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DELHIVERY",
+    "lot": 2075,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 411.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DIXON",
+    "lot": 50,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 12385.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "FORTIS",
+    "lot": 775,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 771.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GLENMARK",
+    "lot": 375,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2389.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HINDUNILVR",
+    "lot": 300,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1879.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "IDEA",
+    "lot": 36125,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 12.48,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NBCC",
+    "lot": 6500,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 77.19,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "POLYCAB",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 7916.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ALKEM",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 5170.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ASHOKLEY",
+    "lot": 5000,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 148.92,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ASTRAL",
+    "lot": 425,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1371.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BANKBARODA",
+    "lot": 2925,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 250.32,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BHARTIARTL",
+    "lot": 475,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1988.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BPCL",
+    "lot": 1975,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 295.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CHOLAFIN",
+    "lot": 625,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1632.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CUMMINSIND",
+    "lot": 100,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4539.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DIVISLAB",
+    "lot": 100,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 10061.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "IEX",
+    "lot": 4350,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 108.08,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "INDUSINDBK",
+    "lot": 700,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 845.55,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "JSWENERGY",
+    "lot": 1075,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 507.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "KALYANKJIL",
+    "lot": 1350,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 508.05,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LAURUSLABS",
+    "lot": 425,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2386.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LTF",
+    "lot": 2250,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 250.98,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MANAPPURAM",
+    "lot": 3000,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 301.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MARICO",
+    "lot": 1200,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 806.05,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MOTHERSON",
+    "lot": 6150,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 160.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MOTILALOFS",
+    "lot": 775,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 968.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "RELIANCE",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1302.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SRF",
+    "lot": 200,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2410.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SWIGGY",
+    "lot": 1925,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 180.61,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "VMM",
+    "lot": 4850,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 88.23,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ZYDUSLIFE",
+    "lot": 450,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1255.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ADANIGREEN",
+    "lot": 600,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1345.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ADANIPORTS",
+    "lot": 475,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1852.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ANANDRATHI",
+    "lot": 250,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2304.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BAJAJFINSV",
+    "lot": 300,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1702.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BLUESTARCO",
+    "lot": 350,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1570.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DABUR",
+    "lot": 1250,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 373.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HDFCAMC",
+    "lot": 300,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2357.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "IOC",
+    "lot": 4875,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 136.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ITC",
+    "lot": 1975,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 270.05,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "KARURVYSYA",
+    "lot": 1550,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 343.25,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MAXHEALTH",
+    "lot": 525,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 895.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "OFSS",
+    "lot": 50,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 9823.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PIDILITIND",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1488.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SBIN",
+    "lot": 750,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1001.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "360ONE",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1015.15,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ADANIENT",
+    "lot": 309,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2618.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "JSWSTEEL",
+    "lot": 675,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1319.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LICI",
+    "lot": 1400,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 390.15,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MAHABANK",
+    "lot": 6500,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 79.18,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "POLICYBZR",
+    "lot": 350,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 943.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PREMIERENE",
+    "lot": 650,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 884.9,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SAIL",
+    "lot": 4700,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 163.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SUZLON",
+    "lot": 12700,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 35.41,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "UJJIVANSFB",
+    "lot": 8000,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 56.57,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "UPL",
+    "lot": 1355,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 528.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "VEDL",
+    "lot": 1150,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 247.02,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ASIANPAINT",
+    "lot": 250,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2366.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BRITANNIA",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4650.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GRASIM",
+    "lot": 250,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3067.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HDFCLIFE",
+    "lot": 1100,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 522.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ICICIBANK",
+    "lot": 700,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1389.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ICICIGI",
+    "lot": 350,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1565.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "INFY",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1174.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "KFINTECH",
+    "lot": 575,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 853.45,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MARUTI",
+    "lot": 50,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 11677.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MUTHOOTFIN",
+    "lot": 275,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2544.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PFC",
+    "lot": 1300,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 317.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SUNPHARMA",
+    "lot": 350,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1784.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SUPREMEIND",
+    "lot": 175,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3186.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "UNOMINDA",
+    "lot": 550,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1097.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "COFORGE",
+    "lot": 475,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2087.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CUB",
+    "lot": 2325,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 209.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "GAIL",
+    "lot": 3550,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 177.42,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HAVELLS",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1033.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HDFCBANK",
+    "lot": 650,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 706.25,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HEROMOTOCO",
+    "lot": 150,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 5177.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MANKIND",
+    "lot": 250,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2481.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MAZDOCK",
+    "lot": 225,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1743.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "MCX",
+    "lot": 225,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3272.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "PETRONET",
+    "lot": 1900,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 302.15,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SIEMENS",
+    "lot": 175,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3407.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "UNITDSPR",
+    "lot": 400,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1359.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "AMBER",
+    "lot": 100,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 6304.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BAJFINANCE",
+    "lot": 750,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 960.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CANBK",
+    "lot": 6750,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 120.79,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "COROMANDEL",
+    "lot": 300,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1745.4,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "DMART",
+    "lot": 150,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 3229.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HINDZINC",
+    "lot": 1225,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 523.15,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "IREDA",
+    "lot": 4525,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 102.45,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LICHSGFIN",
+    "lot": 1000,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 502.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LTM",
+    "lot": 150,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4220.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "LUPIN",
+    "lot": 425,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2018.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "RADICO",
+    "lot": 150,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4149.3,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "RVNL",
+    "lot": 1925,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 187.8,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SHRIRAMFIN",
+    "lot": 825,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 864.65,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TMPV",
+    "lot": 1600,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 272.7,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ANGELONE",
+    "lot": 2500,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 291.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "AUBANK",
+    "lot": 500,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 903.45,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "BANDHANBNK",
+    "lot": 3600,
+    "step": 5.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 158.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "CAMS",
+    "lot": 825,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 672.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "ENRIN",
+    "lot": 175,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2936.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HINDALCO",
+    "lot": 700,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 921.6,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "HYUNDAI",
+    "lot": 275,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1972.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "IRFC",
+    "lot": 5425,
+    "step": 2.5,
+    "sector": "EQUITY_FNO",
+    "base_p": 75.57,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NAUKRI",
+    "lot": 550,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1190.2,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "NIFTYFPI",
+    "lot": 1100,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 1504.95,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "RECLTD",
+    "lot": 1575,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 288.0,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "SBICARD",
+    "lot": 800,
+    "step": 20.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 539.1,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "TORNTPHARM",
+    "lot": 125,
+    "step": 100.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 4697.5,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "VBL",
+    "lot": 1275,
+    "step": 10.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 396.65,
+    "type": "STOCK"
+  },
+  {
+    "symbol": "WAAREEENER",
+    "lot": 175,
+    "step": 50.0,
+    "sector": "EQUITY_FNO",
+    "base_p": 2322.3,
+    "type": "STOCK"
+  }
+]

@@ -63,9 +63,15 @@ class TelegramNotifier:
     def is_configured(self):
         return bool(self.bot_token and self.owner_chat_id and self.bot_token != "YOUR_BOT_TOKEN_HERE")
 
+    def _safe_print(self, msg):
+        try:
+            print(msg)
+        except UnicodeEncodeError:
+            print(msg.encode(sys.stdout.encoding or 'ascii', errors='replace').decode(sys.stdout.encoding or 'ascii'))
+
     def send_document(self, file_path, caption="", send_to_group=False):
         if not self.is_configured():
-            print(f"[TELEGRAM SIMULATED DOCUMENT]: {file_path} | Caption: {caption}")
+            self._safe_print(f"[TELEGRAM SIMULATED DOCUMENT]: {file_path} | Caption: {caption}")
             return {"ok": True, "simulated": True}
         if not os.path.exists(file_path):
             print(f"[TELEGRAM ERROR]: File {file_path} does not exist.")
@@ -100,7 +106,7 @@ class TelegramNotifier:
     def send_document_to_owner_with_approval_prompt(self, file_path, caption=""):
         """Sends private journal/report strictly to the OWNER only. NEVER to group chat IDs."""
         if not self.is_configured():
-            print(f"[TELEGRAM SIMULATED OWNER DOCUMENT]: {file_path} | Caption: {caption}")
+            self._safe_print(f"[TELEGRAM SIMULATED OWNER DOCUMENT]: {file_path} | Caption: {caption}")
             return {"ok": True, "simulated": True}
         if not os.path.exists(file_path):
             print(f"[TELEGRAM ERROR]: File {file_path} does not exist.")

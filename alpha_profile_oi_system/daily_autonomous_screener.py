@@ -1170,10 +1170,41 @@ class DailyAutonomousScreener:
             print(f"[SLEEP]: Waiting {interval_seconds}s for next 3-minute candle close...")
             time.sleep(interval_seconds)
 
+    def send_eod_journal(self):
+        """
+        Dispatches the closing Excel Trading Journals strictly to the Owner Chatbot via Telegram.
+        """
+        print("[EOD JOURNAL]: Checking and updating final paper trade states...")
+        self.update_open_paper_trades()
+
+        now_str = get_ist_time().strftime('%d-%b-%Y %I:%M %p IST')
+        daily_excel = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
+        monthly_excel = os.path.join(CURRENT_DIR, 'Alpha_Monthly_Paper_Trading_Journal.xlsx')
+
+        sent_any = False
+        if os.path.exists(daily_excel):
+            caption = f"📊 <b>ALPHA OPTION BUYER — DAILY EXCEL JOURNAL</b>\n📅 Date: {now_str}\n🔒 Confidential: Strictly for System Owner"
+            print(f"[EOD JOURNAL]: Dispatching Daily Excel Journal: {daily_excel}")
+            self.notifier.send_document_to_owner_with_approval_prompt(daily_excel, caption=caption)
+            sent_any = True
+
+        if os.path.exists(monthly_excel):
+            caption = f"📈 <b>ALPHA MONTHLY CUMULATIVE JOURNAL</b>\n📅 Date: {now_str}\n🔒 Confidential: Strictly for System Owner"
+            print(f"[EOD JOURNAL]: Dispatching Monthly Excel Journal: {monthly_excel}")
+            self.notifier.send_document_to_owner_with_approval_prompt(monthly_excel, caption=caption)
+            sent_any = True
+
+        if not sent_any:
+            print("[EOD JOURNAL WARNING]: No Excel journals found to dispatch.")
+        else:
+            print("[EOD JOURNAL SUCCESS]: Journals dispatched strictly to Owner Chatbot.")
+
 
 if __name__ == '__main__':
     screener = DailyAutonomousScreener()
-    if '--slab-session' in sys.argv:
+    if '--send-journal' in sys.argv:
+        screener.send_eod_journal()
+    elif '--slab-session' in sys.argv:
         screener.run_live_slab_session(interval_seconds=180)
     else:
         ignore_win = ('--ignore-window' in sys.argv)
