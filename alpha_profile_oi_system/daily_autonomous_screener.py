@@ -334,7 +334,7 @@ class DailyAutonomousScreener:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_BASE_TOO_WIDE ({comp_width:.1f} > {max_allowed_base:.1f}pts)', 'is_index': True}
 
         solid_body = round(abs(b_close - b_open) / rng, 2)
-        idx_dist = 30.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 60.0
+        idx_dist = 35.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 75.0
 
         direction = None
         if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high and b_close > b_open:
@@ -345,37 +345,43 @@ class DailyAutonomousScreener:
         if direction is None:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INDEX_NO_COMPRESSION_BREAKOUT_OR_DIRECTION_MISALIGNED', 'is_index': True}
 
-        # Macro Tide Alignment (Strict: All indices must align with Nifty!)
-        df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
-        if df_nifty is not None and len(df_nifty) > 1:
-            n_spot = float(df_nifty['close'].iloc[-1])
-            n_open = float(df_nifty['open'].iloc[0])
-            n_move = n_spot - n_open
-            if direction == 'CALL' and n_move < -5.0:
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_TIDE_BLOCKED_CALL: Nifty down {n_move:.1f} pts', 'is_index': True}
-            if direction == 'PUT' and n_move > +5.0:
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_TIDE_BLOCKED_PUT: Nifty up {n_move:+.1f} pts', 'is_index': True}
+        if solid_body < 0.45:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_WEAK_CANDLE_BODY ({solid_body:.2f} < 0.45)', 'is_index': True}
 
-        # Anti-Exhaustion: Cannot enter after index has already moved > 0.8% from open
-        idx_open = float(idx_df['open'].iloc[0])
-        idx_move_pct = abs((cur_p - idx_open) / idx_open) * 100.0
-        if idx_move_pct > 0.80:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_EXHAUSTED_FROM_OPEN ({idx_move_pct:.2f}% > 0.80%)', 'is_index': True}
+        # Macro Tide Alignment (Dynamic Intraday Trend - Replaces static Day Open)
+        df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
+        if df_nifty is not None and len(df_nifty) > 2:
+            n_spot = float(df_nifty['close'].iloc[-1])
+            n_day_high = float(df_nifty['high'].max())
+            n_day_low = float(df_nifty['low'].min())
+            df_nifty_ema = df_nifty['close'].ewm(span=9, adjust=False).mean()
+            n_ema9 = float(df_nifty_ema.iloc[-1])
+            drop_from_high = n_day_high - n_spot
+            rise_from_low = n_spot - n_day_low
+
+            # Block CALL if Nifty is below 9EMA and has dropped >= 60 pts from high
+            if direction == 'CALL' and (n_spot < n_ema9 and drop_from_high >= 60.0):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_DOWNTREND: Nifty < 9EMA & drop={drop_from_high:.1f}pts', 'is_index': True}
+
+            # Block PUT if Nifty is above 9EMA and has risen >= 60 pts from low
+            if direction == 'PUT' and (n_spot > n_ema9 and rise_from_low >= 60.0):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_UPTREND: Nifty > 9EMA & rise={rise_from_low:.1f}pts', 'is_index': True}
 
         # BVC Cumulative Volume Delta for Index
         cvd_res = compute_bar_delta_proxy(idx_df.iloc[:-1], is_index=True)
         rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
-        cvd_pass = (rec_cvd >= 0.15) if direction == 'CALL' else (rec_cvd <= -0.15)
+        cvd_pass = (rec_cvd >= 0.12) if direction == 'CALL' else (rec_cvd <= -0.12)
         if not cvd_pass:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f})', 'is_index': True}
 
-        # Range Expansion RVOL (1.35x threshold captures genuine Index breakouts)
-        prior_rng = (comp_bars['high'] - comp_bars['low']).mean()
-        idx_rvol = round(rng / max(0.5, prior_rng), 2) if prior_rng > 0 else 2.50
-        if idx_rvol < 1.35:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_RANGE_EXPANSION_RVOL_LOW ({idx_rvol:.2f}x < 1.35x)', 'is_index': True}
+        # Range Expansion RVOL (Calculated against session median consolidation baseline)
+        session_rngs = (idx_df.iloc[:-1]['high'] - idx_df.iloc[:-1]['low'])
+        median_rng = float(session_rngs.median()) if len(session_rngs) > 0 else 15.0
+        idx_rvol = round(rng / max(0.5, median_rng), 2)
+        if idx_rvol < 1.15:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_RANGE_EXPANSION_RVOL_LOW ({idx_rvol:.2f}x < 1.15x)', 'is_index': True}
 
-        score = min(99.0, 55.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.30 else 5.0) + (10.0 if solid_body >= 0.60 else 0.0))
+        score = min(99.0, 55.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.25 else 5.0) + (10.0 if solid_body >= 0.55 else 0.0))
 
         return {
             'symbol': sym_clean,
