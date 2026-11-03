@@ -358,14 +358,16 @@ class DailyAutonomousScreener:
             n_ema9 = float(df_nifty_ema.iloc[-1])
             drop_from_high = n_day_high - n_spot
             rise_from_low = n_spot - n_day_low
+            n_open = float(df_nifty['open'].iloc[0])
+            move_from_open = n_spot - n_open
 
-            # Block CALL if Nifty is below 9EMA and has dropped >= 60 pts from high
-            if direction == 'CALL' and (n_spot < n_ema9 and drop_from_high >= 60.0):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_DOWNTREND: Nifty < 9EMA & drop={drop_from_high:.1f}pts', 'is_index': True}
+            # Block CALL if Nifty is below 9EMA and has dropped >= 50 pts or moving down strongly from open
+            if direction == 'CALL' and ((n_spot < n_ema9 and drop_from_high >= 50.0) or (move_from_open < -40.0 and n_spot < n_ema9)):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_DOWNTREND: Nifty < 9EMA & move={move_from_open:.1f}pts', 'is_index': True}
 
-            # Block PUT if Nifty is above 9EMA and has risen >= 60 pts from low
-            if direction == 'PUT' and (n_spot > n_ema9 and rise_from_low >= 60.0):
-                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_UPTREND: Nifty > 9EMA & rise={rise_from_low:.1f}pts', 'is_index': True}
+            # Block PUT if Nifty is above 9EMA and has risen >= 50 pts or moving up strongly from open
+            if direction == 'PUT' and ((n_spot > n_ema9 and rise_from_low >= 50.0) or (move_from_open > +40.0 and n_spot > n_ema9)):
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_MACRO_UPTREND: Nifty > 9EMA & move={move_from_open:+.1f}pts', 'is_index': True}
 
         # BVC Cumulative Volume Delta for Index
         cvd_res = compute_bar_delta_proxy(idx_df.iloc[:-1], is_index=True)
@@ -474,6 +476,14 @@ class DailyAutonomousScreener:
         if p3_move > stock_atr * 0.60:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.60:.1f}pts)', 'is_index': False}
 
+        # Day Move Anti-Exhaustion (Blocks entering when stock is already extended by > 2.0% from day open!)
+        stk_open = float(stk_df['open'].iloc[0])
+        day_pct_move = ((cur_p - stk_open) / max(1.0, stk_open)) * 100.0
+        if direction == 'CALL' and day_pct_move > 2.0:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'DAY_MOVE_OVEREXTENDED_CALL (+{day_pct_move:.2f}% > +2.0%)', 'is_index': False}
+        if direction == 'PUT' and day_pct_move < -2.0:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'DAY_MOVE_OVEREXTENDED_PUT ({day_pct_move:.2f}% < -2.0%)', 'is_index': False}
+
         # 3. Volume, RVOL & Turnover Floor
         curr_v = float(eval_bar.get('volume', 0.0))
         prior_10_bars = stk_df.iloc[:-2].tail(10)
@@ -483,6 +493,8 @@ class DailyAutonomousScreener:
         real_rvol = round(curr_v / base_v, 2)
         turnover_cr = round((curr_v * cur_p) / 1e7, 2)
 
+        if real_rvol < 1.50:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_BELOW_INSTITUTIONAL_FLOOR ({real_rvol:.2f}x < 1.50x)', 'is_index': False}
         if turnover_cr < 3.0:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TURNOVER_BELOW_FLOOR (Rs {turnover_cr:.1f}Cr < 3.0Cr)', 'is_index': False}
         if real_rvol < 1.80 and turnover_cr < 6.0:
