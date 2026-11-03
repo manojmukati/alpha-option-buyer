@@ -181,7 +181,6 @@ def fetch_bulk_nse_snapshot(force_refresh=False):
         'NIFTY FIN SERVICE': 'FINNIFTY',
         'NIFTY FINANCIAL SERVICES 25/50': 'FINNIFTY',
         'NIFTY MIDCAP SELECT': 'MIDCPNIFTY',
-        'NIFTY NEXT 50': 'NIFTYNXT50'
     }
 
     # 1. Fetch Live Indices (Spot, Open, High, Low, Previous Close, CVD)

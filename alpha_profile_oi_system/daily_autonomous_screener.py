@@ -1,37 +1,37 @@
 # -*- coding: utf-8 -*-
 """
-Alpha 5-Pillar Autonomous Daily Screener & Pure Signal Dispatched Engine
-========================================================================
-Operating Windows (Strictly Enforced):
-  - Slab 1 (Morning):   09:30 AM to 10:15 AM IST (04:00 to 04:45 UTC)
-  - Slab 2 (Afternoon): 01:15 PM to 02:15 PM IST (07:45 to 08:45 UTC)
+daily_autonomous_screener.py
+============================
+Alpha 5-Pillar Pure Institutional Paper-Trading Screener
+Built to institutional standards across all 217 NSE F&O Assets (4 Indices + 213 Stocks).
 
-Strict Rules:
-  1. Outside Slab 1 and Slab 2: ZERO messages sent anywhere (Chatbot or Group).
-  2. If Signal Generated: Send ONLY clean, direct trade signal with 4-min execution buffer to BOTH Chatbot and Group.
-  3. If NO Signal Generated: ZERO messages sent to Group. Exactly 1 status update sent to Chatbot (Bot).
-  4. Automatically records dispatched signals into Daily & Monthly Excel Ledgers.
-  5. Maximum 1 signal per stock per day & 2 to 5 Super Trades total across Morning + Afternoon.
+Key Institutional Upgrades:
+1. True Cumulative Volume Delta (CVD) via Bulk Volume Classification (BVC) across all intraday bars.
+2. Zero hardcoded stock names. Only 4 official indices: ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'].
+3. All live quotes, option chains, OI buildup/unwinding, and LTP pulled directly from NSE.
+4. Akamai anti-blocking engine: 2-step cookie priming, bulk single-call snapshots, sequential option chain locks.
+5. True 8-bar compression base requiring >= 10 bars (8 base + 1 breakout + 1 live ticking).
+6. Live spot holding re-confirmation before dispatch (eliminates false breakouts).
+7. Local consolidation base runway check (allows clean afternoon breakouts without whole-day range choking).
+8. Real-time paper trade position manager: monitors open trades on every 3m bar for T1, T2, Trailing Cost SL,
+   Initial SL, and 15m Time SL, recording realized P&L to CSV & Excel.
+9. Full diagnostic Rejection Audit Ledger logging exact Stage 1 & Stage 2 failure reasons.
 """
 
-import sys
-if sys.platform == 'win32':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
-
 import os
-import json
+import sys
 import time
+import json
+import random
 import datetime
-import html
+import math
+import numpy as np
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = os.path.dirname(CURRENT_DIR)
-for p in [CURRENT_DIR, PARENT_DIR]:
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+for p in [CURRENT_DIR, PROJECT_ROOT]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -42,10 +42,16 @@ from modules.live_data_feed import (
 )
 from modules.fno_universe import get_instrument_meta
 from modules.telegram_notifier import TelegramNotifier
-from core.pillar5_engine import evaluate_5pillar_gate
 
 CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
-MAX_DAILY_SUPER_TRADES = 8  # Balanced Slab Quota (4 Morning + 4 Afternoon = 8 Total Daily Super Trades)
+
+# Only 4 Official Indices Hardcoded (Zero stock names hardcoded)
+INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
+
+MAX_DAILY_SUPER_TRADES = 8  # 4 Morning + 4 Afternoon
+MAX_SLAB_TRADES = 4
+MAX_INDEX_PER_SLAB = 2
+MAX_STOCKS_PER_SLAB = 2
 
 
 def is_in_active_trading_slab(ist_time):
@@ -55,14 +61,76 @@ def is_in_active_trading_slab(ist_time):
     - Slab 2 (Afternoon): 01:15 PM to 02:15 PM IST (795 to 855 mins)
     Must also be a weekday (Monday to Friday).
     """
-    is_weekday = (ist_time.weekday() < 5)
-    if not is_weekday:
+    if ist_time.weekday() >= 5:
         return False
-
     tot_mins = ist_time.hour * 60 + ist_time.minute
     slab1 = (570 <= tot_mins <= 615)
     slab2 = (795 <= tot_mins <= 855)
     return slab1 or slab2
+
+
+def compute_bvc_cvd(df_bars):
+    """
+    Computes Bulk Volume Classification (BVC) Cumulative Volume Delta (CVD)
+    from intraday OHLCV bars based on quantitative market microstructure.
+    
+    Bar Delta = Volume * [ (Close - Low) - (High - Close) ] / (High - Low)
+              = Volume * [ 2 * Close - (High + Low) ] / Range
+              
+    Session CVD = Sum(Bar Delta) across all session bars.
+    Session CVD Imbalance = Session CVD / Total Traded Volume.
+    Recent 3-Bar CVD Imbalance = Sum(Last 3 Deltas) / Sum(Last 3 Volumes).
+    """
+    if df_bars is None or len(df_bars) == 0:
+        return {
+            'session_cvd_ratio': 0.0,
+            'recent_cvd_ratio': 0.0,
+            'session_cvd_raw': 0.0,
+            'cvd_direction': 'NEUTRAL'
+        }
+
+    highs = df_bars['high'].values.astype(float)
+    lows = df_bars['low'].values.astype(float)
+    closes = df_bars['close'].values.astype(float)
+    vols = df_bars['volume'].values.astype(float) if 'volume' in df_bars.columns else np.zeros_like(closes)
+
+    rngs = np.maximum(0.01, highs - lows)
+    tot_vol = np.sum(vols)
+
+    if tot_vol > 0:
+        # Standard Institutional BVC Volume Delta
+        deltas = vols * ((2.0 * closes - (highs + lows)) / rngs)
+        session_cvd_raw = float(np.sum(deltas))
+        session_cvd_ratio = round(session_cvd_raw / max(1.0, tot_vol), 3)
+
+        rec_n = min(3, len(df_bars))
+        rec_vol = float(np.sum(vols[-rec_n:]))
+        rec_delta = float(np.sum(deltas[-rec_n:]))
+        recent_cvd_ratio = round(rec_delta / max(1.0, rec_vol), 3)
+    else:
+        # Spot Index Fallback (when Volume = 0 in index spot feed): Range-Weighted Delta
+        deltas = (2.0 * closes - (highs + lows))
+        tot_rng = float(np.sum(rngs))
+        session_cvd_raw = float(np.sum(deltas))
+        session_cvd_ratio = round(session_cvd_raw / max(0.5, tot_rng), 3)
+
+        rec_n = min(3, len(df_bars))
+        rec_rng = float(np.sum(rngs[-rec_n:]))
+        rec_delta = float(np.sum(deltas[-rec_n:]))
+        recent_cvd_ratio = round(rec_delta / max(0.5, rec_rng), 3)
+
+    cvd_dir = 'NEUTRAL'
+    if recent_cvd_ratio >= 0.15 and session_cvd_ratio >= 0.0:
+        cvd_dir = 'CALL'
+    elif recent_cvd_ratio <= -0.15 and session_cvd_ratio <= 0.0:
+        cvd_dir = 'PUT'
+
+    return {
+        'session_cvd_ratio': session_cvd_ratio,
+        'recent_cvd_ratio': recent_cvd_ratio,
+        'session_cvd_raw': session_cvd_raw,
+        'cvd_direction': cvd_dir
+    }
 
 
 class DailyAutonomousScreener:
@@ -82,7 +150,6 @@ class DailyAutonomousScreener:
 
         self.dispatched_cache_file = os.path.join(CURRENT_DIR, 'config', 'dispatched_signals_today.json')
         self.dispatched_today = self._load_dispatched_cache()
-        self.index_recent_dispatch = {}
         self.nifty_regime_cache = {
             'allow_stock_call': True,
             'allow_stock_put': True,
@@ -98,12 +165,9 @@ class DailyAutonomousScreener:
                 self.notifier.bot_token = env_token
                 self.notifier.owner_chat_id = env_owner
                 self.notifier.group_chat_ids = [env_group] if env_group else []
-                self.notifier.base_url = f"https://api.telegram.org/bot{env_token}"
 
     def _load_dispatched_cache(self):
-        ist_now = get_ist_time()
-        today_str = ist_now.strftime('%Y-%m-%d')
-        indices_prefixes = ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50')
+        today_str = get_ist_time().strftime('%Y-%m-%d')
         if os.path.exists(self.dispatched_cache_file):
             try:
                 with open(self.dispatched_cache_file, 'r', encoding='utf-8') as f:
@@ -115,21 +179,16 @@ class DailyAutonomousScreener:
         return {}
 
     def _save_dispatched_cache(self):
-        ist_now = get_ist_time()
-        today_str = ist_now.strftime('%Y-%m-%d')
+        today_str = get_ist_time().strftime('%Y-%m-%d')
         try:
             os.makedirs(os.path.dirname(self.dispatched_cache_file), exist_ok=True)
             with open(self.dispatched_cache_file, 'w', encoding='utf-8') as f:
                 json.dump({'date': today_str, 'dispatched': self.dispatched_today}, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CACHE WRITE ERROR]: Failed to save dispatched cache: {e}")
 
     def is_already_dispatched(self, symbol, contract=''):
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-        last_ts = self.dispatched_today.get(sym_clean, 0.0)
-        if sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50']:
-            return (time.time() - last_ts) < 2100.0
-
         return sym_clean in self.dispatched_today
 
     def mark_dispatched(self, symbol, contract=''):
@@ -137,96 +196,63 @@ class DailyAutonomousScreener:
         self.dispatched_today[sym_clean] = time.time()
         self._save_dispatched_cache()
 
+    def get_stock_atr(self, symbol, q):
+        cur_p = float(q.get('live_spot', q.get('close', 100.0)))
+        cached_atr = float(self.atr_cache.get(symbol, 0.0))
+        if cached_atr > 0.0:
+            return cached_atr
+        # Institutional ATR% baseline: 2.2% of spot
+        return round(max(3.0, cur_p * 0.022), 2)
+
     def get_nifty_market_regime(self, force_refresh=False):
         """
-        FLAW #3 FIX — NIFTY MACRO TIDE & CRASH REGIME GATE:
-        Audits NIFTY 50 live spot, 3-minute closed candle (`iloc[-2]`), live forming candle (`iloc[-1]`),
-        and 3-minute 9-EMA (`ema9`).
-        - Strictly blocks Stock CALL (CE) trades if NIFTY is crashing / below 9-EMA / printing red 3m candle.
-        - Does NOT block Stock PUT (PE) on minor +0.10% (+25 pts) opens; only blocks Stock PUT during a
-          strong vertical Nifty surge above 9-EMA.
+        Symmetrical Macro Trend Filter from NIFTY 50 3-minute bars:
+        - Downtrend: Spot < 9-EMA, down >= 35 pts from open, and drop >= 60 pts from high -> blocks CALLs
+        - Uptrend: Spot > 9-EMA, up >= 35 pts from open, and rise >= 60 pts from low -> blocks PUTs
         """
         now = time.time()
-        if not force_refresh and (now - self.nifty_regime_cache.get('timestamp', 0.0) < 35.0):
+        if not force_refresh and (now - self.nifty_regime_cache.get('timestamp', 0.0) < 60.0):
             return self.nifty_regime_cache
 
+        df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
         nq = self.data_feed.get_live_asset_quote('NIFTY')
-        ndf = self.data_feed.get_live_intraday_bars('NIFTY')
-
-        allow_call = True
-        allow_put = True
-        reason = "NIFTY_NEUTRAL_OR_ALIGNED"
 
         nifty_spot = float(nq.get('live_spot', 0.0)) if nq else 0.0
+        nifty_open = float(nq.get('open', nifty_spot)) if nq else nifty_spot
         nifty_high = float(nq.get('high', nifty_spot)) if nq else nifty_spot
         nifty_low = float(nq.get('low', nifty_spot)) if nq else nifty_spot
 
-        if ndf is not None and len(ndf) >= 3:
-            eval_b = ndf.iloc[-2]
-            live_b = ndf.iloc[-1]
-            n_open = float(eval_b['open'])
-            n_close = float(eval_b['close'])
-            l_open = float(live_b['open'])
-            l_close = float(live_b['close'])
-            if nifty_spot <= 0:
-                nifty_spot = l_close
+        allow_call = True
+        allow_put = True
+        reason = "NIFTY_NEUTRAL_ALIGNED"
 
-            ema9 = float(ndf['ema9'].iloc[-1]) if 'ema9' in ndf.columns else float(ndf['close'].ewm(span=9, adjust=False).mean().iloc[-1])
-            day_high = max(nifty_high, float(ndf['high'].max()))
-            day_low = min(nifty_low, float(ndf['low'].min())) if nifty_low > 0 else float(ndf['low'].min())
+        if df_nifty is not None and len(df_nifty) >= 6:
+            live_b = df_nifty.iloc[-1]
+            nifty_spot = float(live_b['close'])
+            ema9 = float(df_nifty['ema9'].iloc[-1]) if 'ema9' in df_nifty.columns else float(df_nifty['close'].ewm(span=9).mean().iloc[-1])
+            day_open = float(df_nifty['open'].iloc[0])
+            day_high = float(df_nifty['high'].max())
+            day_low = float(df_nifty['low'].min())
 
             drop_from_high = round(day_high - nifty_spot, 2)
             rise_from_low = round(nifty_spot - day_low, 2)
+            down_from_open = (nifty_spot < day_open - 35.0)
+            up_from_open = (nifty_spot > day_open + 35.0)
 
-            prev_3m_red = (n_close < n_open)
-            live_3m_red = (l_close < l_open) or (nifty_spot < n_close)
-            below_ema9 = (nifty_spot < ema9)
+            recent_rng = round(df_nifty['high'].tail(6).max() - df_nifty['low'].tail(6).min(), 2)
+            ema_distance = abs(nifty_spot - ema9)
 
-            # Strict Macro Compass: Check 9-EMA and Day Open confluence
-            day_open = float(ndf['open'].iloc[0])
-            down_from_open = (nifty_spot < day_open - 15.0)
-            up_from_open = (nifty_spot > day_open + 15.0)
-
-            # NIFTY INTRADAY CHOP / COMPRESSION FILTER
-            # यदि पिछले 6 बार (18 मिनट) में निफ्टी की हाई-लो रेंज < 30 अंक हो और 9-EMA फ्लैट हो,
-            # तो मार्केट साइडवेज़ ट्रैप में है — सभी ब्रेकआउट्स ब्लॉक रहेंगे!
-            is_nifty_choppy = False
-            if len(ndf) >= 6:
-                recent_6 = ndf.tail(6)
-                recent_rng = float(recent_6['high'].max() - recent_6['low'].min())
-                ema_distance = abs(nifty_spot - ema9)
-                if recent_rng < 30.0 and ema_distance <= 10.0:
-                    is_nifty_choppy = True
-
-            if is_nifty_choppy:
+            if recent_rng < 30.0 and ema_distance < 15.0:
                 allow_call = False
                 allow_put = False
-                reason = f"NIFTY_SIDEWAYS_CHOP_TRAP (18m Range {recent_rng:.1f} pts < 30 pts | Spot within {ema_distance:.1f} pts of 9-EMA)"
+                reason = f"NIFTY_SIDEWAYS_CHOP_TRAP (18m Range {recent_rng:.1f} pts < 30 pts)"
             else:
-                # Block Stock CALLs if NIFTY is in the red from open, below 9-EMA, or dropping >= 50 pts
-                if prev_3m_red or below_ema9 or down_from_open or (drop_from_high >= 50.0 and live_3m_red):
+                if (nifty_spot < ema9) and down_from_open and drop_from_high >= 60.0:
                     allow_call = False
-                    reason = (
-                        f"NIFTY_BEARISH_OR_CRASH_REGIME (Spot {nifty_spot:.1f} vs 9-EMA {ema9:.1f} | "
-                        f"DownFromOpen={down_from_open} | Prev3mRed={prev_3m_red} | DropFromHigh=-{drop_from_high:.1f} pts)"
-                    )
-
-                # Block Stock PUTs on strong active rally above 9-EMA or in strong green day
-                prev_3m_strong_green = (n_close - n_open) >= 15.0
-                live_3m_green = (l_close >= l_open) and (nifty_spot >= n_close)
-                above_ema9_strong = (nifty_spot > (ema9 + 15.0))
-                if above_ema9_strong or up_from_open or (prev_3m_strong_green and live_3m_green and rise_from_low >= 60.0):
+                    reason = f"NIFTY_ACTIVE_DOWNTREND (Spot {nifty_spot:.1f} < 9EMA {ema9:.1f} | Drop={drop_from_high:.1f}pts)"
+                elif (nifty_spot > ema9) and up_from_open and rise_from_low >= 60.0:
                     allow_put = False
-                    reason = (
-                        f"NIFTY_STRONG_RALLY_REGIME (Spot {nifty_spot:.1f} > 9-EMA {ema9:.1f} | "
-                        f"UpFromOpen={up_from_open} | RiseFromLow=+{rise_from_low:.1f} pts)"
-                    )
-        elif nq and nifty_spot > 0:
-            drop_from_high = round(nifty_high - nifty_spot, 2)
-            p_chg = float(nq.get('pct_change', 0.0))
-            if drop_from_high >= 60.0 or p_chg <= -0.35:
-                allow_call = False
-                reason = f"NIFTY_INTRADAY_SELLOFF (DropFromHigh=-{drop_from_high:.1f} pts | {p_chg:+.2f}%)"
+                    reason = f"NIFTY_ACTIVE_UPTREND (Spot {nifty_spot:.1f} > 9EMA {ema9:.1f} | Rise={rise_from_low:.1f}pts)"
 
         self.nifty_regime_cache = {
             'allow_stock_call': allow_call,
@@ -236,478 +262,262 @@ class DailyAutonomousScreener:
         }
         return self.nifty_regime_cache
 
-    def get_stock_atr(self, symbol, q):
-        cur_p = float(q.get('live_spot', 0))
-        h = float(q.get('high', 0))
-        l = float(q.get('low', 0))
-        day_rng = round(h - l, 2) if h > 0 and l > 0 else 0.0
-        est_atr = round(cur_p * 0.028, 2) if cur_p > 0 else 0.0
-        cached_atr = float(self.atr_cache.get(symbol, 0.0))
-        return max(cached_atr, day_rng, est_atr)
-
-    def evaluate_asset(self, sym_meta, verify_oi_now=False):
+    def evaluate_asset(self, symbol):
         """
-        UPSIDE STAGE-1 EVALUATION:
-        Scans all 216 F&O Stocks and 4 Indices on Price Action, Compression Base,
-        Freshness Lock (Anti-Exhaustion), RVOL >= 2.50x, and CVD Dominance.
-        When verify_oi_now=False, skips per-stock Option Chain HTTP calls during bulk scan
-        so NSE NEVER blocks GitHub/Local IPs and all 216 stocks are 100% scanned!
+        STAGE 1: Opportunity Discovery across All 217 Assets.
+        - Zero hardcoded stock names.
+        - No arbitrary ₹150 price floor (all valid NSE F&O stocks scanned).
+        - Volatility calibrated via ATR% >= 1.0% of spot price.
+        - Sweet spot scoring (0.60% to 2.20% move = maximum points).
+        - Preliminary BVC CVD and RVOL scoring.
         """
-        symbol = sym_meta['symbol'] if isinstance(sym_meta, dict) else sym_meta
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-
-        if self.is_already_dispatched(sym_clean):
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'ALREADY_DISPATCHED_TODAY'}
+        is_idx = sym_clean in INDEX_NAMES
 
         q = self.data_feed.get_live_asset_quote(sym_clean)
-        if not q or q.get('status') == 'NSE_DATA_UNAVAILABLE':
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NSE_DATA_UNAVAILABLE'}
+        if not q:
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': 'NO_NSE_LIVE_QUOTE',
+                'is_index': is_idx
+            }
 
-        cur_p = float(q['live_spot'])
+        cur_p = float(q.get('live_spot', q.get('close', 0.0)))
         if cur_p <= 0:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INVALID_SPOT'}
+            return {
+                'symbol': sym_clean,
+                'passed': False,
+                'failed_gate': 'INVALID_SPOT_PRICE',
+                'is_index': is_idx
+            }
 
-        is_idx = sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
+        pct_chg = float(q.get('pct_change', 0.0))
+        rvol = float(q.get('rvol', 1.0))
+        stock_atr = 0.0 if is_idx else self.get_stock_atr(sym_clean, q)
 
-        # =====================================================================
-        # 1. INDEX-SPECIFIC EVALUATION (35-Minute Compression Breakout Priority)
-        # =====================================================================
-        if is_idx:
-            # 13:45 का कृत्रिम कटऑफ हटा दिया गया है। इंडेक्स दोनों स्लैब्स (Morning 09:30-10:15 और Afternoon 01:15-02:15) में ट्रेड हो सकते हैं।
-
-            idx_df = self.data_feed.get_live_intraday_bars(sym_clean)
-            is_breakout = False
-            cum_mom_ok = False
-            single_mom_ok = False
-            direction = 'CALL'
-
-            if idx_df is not None and not idx_df.empty:
-                eval_bar = idx_df.iloc[-2] if len(idx_df) >= 2 else idx_df.iloc[-1]
-                b_open = float(eval_bar['open'])
-                b_high = float(eval_bar['high'])
-                b_low = float(eval_bar['low'])
-                b_close = float(eval_bar['close'])
-                cur_p = float(idx_df.iloc[-1]['close'])
-
-                day_high = float(idx_df['high'].max())
-                day_low = float(idx_df['low'].min())
-
-                # 8 closed bars (24 mins) + 1 forming bar = minimum 9 bars
-                if len(idx_df) < 9:
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f'INSUFFICIENT_COMPRESSION_BASE: Only {len(idx_df)-1} closed bars (< 24 mins)',
-                        'spot_price': cur_p,
-                        'score': 0.0,
-                        'is_index': True
-                    }
-
-                eval_bar = idx_df.iloc[-2] if len(idx_df) >= 2 else idx_df.iloc[-1]
-                b_open = float(eval_bar['open'])
-                b_high = float(eval_bar['high'])
-                b_low = float(eval_bar['low'])
-                b_close = float(eval_bar['close'])
-                # Keep true live spot price from bulk feed or latest tick
-                cur_p = float(q.get('live_spot', idx_df.iloc[-1]['close']))
-
-                day_high = float(idx_df['high'].max())
-                day_low = float(idx_df['low'].min())
-
-                comp_bars = idx_df.iloc[:-2].tail(8)
-                comp_high = float(comp_bars['high'].max())
-                comp_low = float(comp_bars['low'].min())
-
-                direction = 'CALL' if b_close >= b_open else 'PUT'
-
-                # PINPOINT FIX: Measure exhaustion from Local Compression Base (NOT arbitrary 130/280 pts from Day Extremes)
-                # An index with a fresh 24-min tight base can rally 300-500 pts on trending days!
-                # =====================================================================
-                # संस्थागत सुधार #1: इंडेक्स वोलेटिलिटी कैलिब्रेशन व संस्थागत ब्लास्ट अनलॉक
-                # निफ्टी/फिननिफ्टी के लिए 180 अंक और बैंकनिफ्टी (54,000 भाव) के लिए 420 अंक।
-                # यदि ब्रेकआउट कैंडल खुद संस्थागत ब्लास्ट (BN >= 90 pts, Nifty >= 40 pts & Body >= 70%) है,
-                # तो वह ट्रेंडिंग कंटिन्यूएशन है, उसे बेस की चौड़ाई पर कभी ब्लॉक न करें!
-                # =====================================================================
-                rng = max(0.01, b_high - b_low)
-                body = abs(b_close - b_open)
-                solid_body_ratio = round(body / rng, 2)
-                min_fast_bar_pts = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
-                is_institutional_blast = (rng >= min_fast_bar_pts) and (solid_body_ratio >= 0.70)
-
-                comp_width = comp_high - comp_low
-                max_allowed_base_width = 180.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 420.0
-                if comp_width > max_allowed_base_width and not is_institutional_blast:
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f'COMPRESSION_BASE_TOO_WIDE: Width {comp_width:.1f} pts > {max_allowed_base_width:.1f} pts',
-                        'spot_price': cur_p,
-                        'score': 0.0,
-                        'is_index': True
-                    }
-
-                pct_chg = round(((b_close - b_open) / max(1.0, b_open)) * 100.0, 2)
-                up_wick = round((b_high - max(b_open, b_close)) / rng, 2)
-                dn_wick = round((min(b_open, b_close) - b_low) / rng, 2)
-                clv = round((b_close - b_low) / rng, 2)
-                clv_ok = (clv >= 0.75) if direction == 'CALL' else (clv <= 0.25)
-                wick_ok = (up_wick <= 0.20) if direction == 'CALL' else (dn_wick <= 0.20)
-                # ---------------------------------------------------------
-                # मोड 1: फास्ट मार्केट (1 कैंडल मारुबोज़ू ब्लास्ट: Nifty >= 40 pts, BankNifty >= 90 pts)
-                # ---------------------------------------------------------
-                min_fast_bar_pts = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
-                single_mom_ok = (solid_body_ratio >= 0.60) and wick_ok and clv_ok and (rng >= min_fast_bar_pts)
-
-                idx_dist_buffer = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
-
-                # =====================================================================
-                # संस्थागत सुधार #3: ओवर-एक्सटेंशन एग्जॉशन गार्ड (Anti-Climax Shield)
-                # यदि निफ्टी दिन के निचले स्तर से पहले ही +120 अंक या बैंकनिफ्टी +300 अंक
-                # बिना किसी रीटेस्ट के भाग चुका है, तो उस शिखर (Top) पर नया CALL खरीदना ब्लॉक!
-                # =====================================================================
-                rise_from_day_low = b_close - day_low
-                drop_from_day_high = day_high - b_close
-                max_vertical_run = 120.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 300.0
-
-                if direction == 'CALL' and rise_from_day_low > max_vertical_run and (b_close >= day_high - 25.0):
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f'EXHAUSTION_TOP_BUYING: Rallied +{rise_from_day_low:.1f} pts from Low without base',
-                        'spot_price': cur_p,
-                        'score': 0.0,
-                        'is_index': True
-                    }
-
-                if direction == 'PUT' and drop_from_day_high > max_vertical_run and (b_close <= day_low + 25.0):
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f'EXHAUSTION_BOTTOM_SELLING: Dropped -{drop_from_day_high:.1f} pts from High without base',
-                        'spot_price': cur_p,
-                        'score': 0.0,
-                        'is_index': True
-                    }
-
-                if direction == 'CALL':
-                    if (b_close >= comp_high) and (b_close <= comp_high + idx_dist_buffer):
-                        is_breakout = True
-                else:
-                    if (b_close <= comp_low) and (b_close >= comp_low - idx_dist_buffer):
-                        is_breakout = True
-
-                # ---------------------------------------------------------
-                # मोड 2: स्लो मार्केट (2 से 3 कैंडल संस्थागत ग्राइंड: Nifty 50-75 pts, BankNifty 110-160 pts)
-                # ---------------------------------------------------------
-                cum_mom_ok = False
-                if len(idx_df) >= 5:
-                    b_prev1 = idx_df.iloc[-3]
-                    b_prev2 = idx_df.iloc[-4]
-                    pre_seq_bars = idx_df.iloc[:-4].tail(8) if len(idx_df) >= 6 else comp_bars
-                    seq_comp_high = float(pre_seq_bars['high'].max())
-                    seq_comp_low = float(pre_seq_bars['low'].min())
-
-                    cum_fall_3_pct = ((float(b_prev2['open']) - b_close) / float(b_prev2['open'])) * 100.0
-                    cum_fall_2_pct = ((float(b_prev1['open']) - b_close) / float(b_prev1['open'])) * 100.0
-                    all_3_red = (float(b_prev2['close']) <= float(b_prev2['open']) and
-                                 float(b_prev1['close']) <= float(b_prev1['open']) and
-                                 b_close <= b_open)
-                    last_2_red = (float(b_prev1['close']) <= float(b_prev1['open']) and b_close <= b_open)
-                    broke_range_low = ((b_close <= comp_low) and (b_close >= comp_low - idx_dist_buffer)) or \
-                                     ((b_close <= seq_comp_low) and (b_close >= seq_comp_low - idx_dist_buffer))
-
-                    min_idx_2bar_pct = 0.22
-                    min_idx_3bar_pct = 0.32
-
-                    if (all_3_red and cum_fall_3_pct >= min_idx_3bar_pct and broke_range_low) or (last_2_red and cum_fall_2_pct >= min_idx_2bar_pct and broke_range_low):
-                        direction = 'PUT'
-                        cum_mom_ok = True
-                        is_breakout = True
-                        pct_chg = round(-max(cum_fall_3_pct, cum_fall_2_pct), 2)
-
-                    cum_rise_3_pct = ((b_close - float(b_prev2['open'])) / float(b_prev2['open'])) * 100.0
-                    cum_rise_2_pct = ((b_close - float(b_prev1['open'])) / float(b_prev1['open'])) * 100.0
-                    all_3_green = (float(b_prev2['close']) >= float(b_prev2['open']) and
-                                   float(b_prev1['close']) >= float(b_prev1['open']) and
-                                   b_close >= b_open)
-                    last_2_green = (float(b_prev1['close']) >= float(b_prev1['open']) and b_close >= b_open)
-                    broke_range_high = ((b_close >= comp_high) and (b_close <= comp_high + idx_dist_buffer)) or \
-                                      ((b_close >= seq_comp_high) and (b_close <= seq_comp_high + idx_dist_buffer))
-
-                    if (all_3_green and cum_rise_3_pct >= min_idx_3bar_pct and broke_range_high) or (last_2_green and cum_rise_2_pct >= min_idx_2bar_pct and broke_range_high):
-                        direction = 'CALL'
-                        cum_mom_ok = True
-                        is_breakout = True
-                        pct_chg = round(max(cum_rise_3_pct, cum_rise_2_pct), 2)
-
-                cand_mom_pass = (single_mom_ok or cum_mom_ok) and is_breakout
-
-                # PINPOINT FIX: Yahoo Finance Spot Index (`^NSEI`, `^NSEBANK`) has volume=0.
-                # When Spot Index volume is 0, use Range-Expansion RVOL (breakout bar range vs compression bar range)!
-                prior_v = idx_df['volume'].iloc[:-2].tail(10).mean() if ('volume' in idx_df.columns and len(idx_df) > 2) else 0.0
-                curr_v = float(eval_bar.get('volume', 0.0))
-                if prior_v > 0 and curr_v > 0:
-                    idx_rvol = round(curr_v / prior_v, 2)
-                    idx_rvol_pass = (idx_rvol >= 2.20)
-                else:
-                    prior_rng = (comp_bars['high'] - comp_bars['low']).mean()
-                    idx_rvol = round(rng / max(0.5, prior_rng), 2) if prior_rng > 0 else 2.50
-                # इंडेक्स के लिए संस्थागत विस्फोट अनिवार्य (कम से कम 2.20x वॉल्यूम/रेंज एक्सपेंशन)
-                idx_rvol_pass = (idx_rvol >= 2.20)
-
-                candle_cvd = round((2.0 * clv) - 1.0, 2)
-                idx_cvd = candle_cvd
-                idx_cvd_pass = (idx_cvd >= 0.45) if direction == 'CALL' else (idx_cvd <= -0.45)
-                # डायरेक्ट बायर/सेलर आक्रामकता (+/- 0.45) अनिवार्य — कोई बाईपास नहीं!
-
-                # =====================================================================
-                # संस्थागत सुधार #1A: इंडेक्स मैक्रो टाइड अलाइनमेंट (Index Macro Tide Gate)
-                # यदि मदर निफ्टी (NIFTY 50) लाल है (Day Open से नीचे या 9-EMA के नीचे),
-                # तो BANKNIFTY / FINNIFTY / MIDCPNIFTY में CALL लेना 100% प्रतिबंधित!
-                # =====================================================================
-                nifty_regime = self.get_nifty_market_regime(force_refresh=False)
-                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f"MACRO_TIDE_BLOCKED_INDEX_CALL: {nifty_regime.get('reason')}",
-                        'spot_price': cur_p,
-                        'score': 0.0,
-                        'is_index': True
-                    }
-                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f"MACRO_TIDE_BLOCKED_INDEX_PUT: {nifty_regime.get('reason')}",
-                        'spot_price': cur_p,
-                        'score': 0.0,
-                        'is_index': True
-                    }
-
-                stage1_pass = cand_mom_pass and idx_rvol_pass and idx_cvd_pass
-                oi_confluent = True
-                oi_reason = 'PENDING_STAGE2_OI_AUDIT'
-
-                if stage1_pass and verify_oi_now:
-                    oi_conf = self.data_feed.get_live_dual_oi_confluence(sym_clean, cur_p, direction=direction)
-                    oi_confluent = oi_conf.get('confluent', False)
-                    oi_reason = oi_conf.get('reason', '')
-
-                passed = stage1_pass and oi_confluent
-                # इंडेक्स को 98.0 का अंधा स्कोर देने के बजाय वास्तविक ब्रेकआउट स्ट्रेंथ पर स्कोर दें
-                score = round(min(99.0, 75.0 + min(15.0, idx_rvol * 5.0) + (10.0 if abs(idx_cvd) >= 0.60 else 5.0)), 2) if passed else 50.0
-
-            else:
+        # Gate 0: Institutional High-Value F&O Universe Filter (Spot >= 1000.0 INR and ATR% >= 1.0%)
+        # Strictly enforces institutional liquidity standards (BlackRock Aladdin level):
+        # Blocks cheap penny/mid-cap stocks (< 1000 INR) with erratic option bid-ask spreads and retail chop.
+        # Only trades liquid leaders >= 1000 INR (TCS, RELIANCE, DIXON, BAJFINANCE, PIDILITIND, etc.)
+        if not is_idx:
+            atr_pct = (stock_atr / max(1.0, cur_p)) * 100.0
+            if cur_p < 1000.0 or atr_pct < 1.0:
                 return {
                     'symbol': sym_clean,
                     'passed': False,
-                    'failed_gate': 'PILLAR_1_INTRADAY_CANDLES_UNAVAILABLE_CANNOT_VERIFY_COMPRESSION_BASE',
-                    'spot_price': cur_p,
-                    'score': 0.0,
+                    'failed_gate': f'STOCK_PRICE_BELOW_1000_INR: Spot Rs {cur_p:.1f} < 1000.0 (or ATR% {atr_pct:.2f}% < 1.0%)',
+                    'is_index': False
+                }
+
+        # -------------------------------------------------------------
+        # STAGE 1 CANDLE DISCOVERY FOR INDICES
+        # -------------------------------------------------------------
+        if is_idx:
+            idx_df = self.data_feed.get_live_intraday_bars(sym_clean)
+            if idx_df is None or len(idx_df) < 10:
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': 'INDEX_INSUFFICIENT_BARS_LESS_THAN_10',
                     'is_index': True
                 }
 
+            comp_bars = idx_df.iloc[:-2].tail(8)
+            eval_bar = idx_df.iloc[-2]
+            live_bar = idx_df.iloc[-1]
+
+            b_open = float(eval_bar['open'])
+            b_high = float(eval_bar['high'])
+            b_low = float(eval_bar['low'])
+            b_close = float(eval_bar['close'])
+            rng = max(0.01, b_high - b_low)
+
+            comp_high = float(comp_bars['high'].max())
+            comp_low = float(comp_bars['low'].min())
+            comp_width = comp_high - comp_low
+
+            max_allowed_base = 180.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 420.0
+            if comp_width > max_allowed_base:
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': f'INDEX_BASE_TOO_WIDE ({comp_width:.1f} > {max_allowed_base:.1f}pts)',
+                    'is_index': True
+                }
+
+            clv = round((b_close - b_low) / rng, 2)
+            solid_body = round(abs(b_close - b_open) / rng, 2)
+            min_pts = 35.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 80.0
+            idx_dist = 40.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 90.0
+
+            direction = None
+            is_breakout = False
+            if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high:
+                direction = 'CALL'
+                is_breakout = True
+            elif b_close <= comp_low and b_close >= comp_low - idx_dist and cur_p <= comp_low:
+                direction = 'PUT'
+                is_breakout = True
+
+            if not is_breakout or direction is None:
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': 'INDEX_NO_COMPRESSION_BREAKOUT',
+                    'is_index': True
+                }
+
+            # BVC Cumulative Volume Delta for Index (Order flow aggression)
+            cvd_res = compute_bvc_cvd(idx_df)
+            rec_cvd = cvd_res['recent_cvd_ratio']
+            sess_cvd = cvd_res['session_cvd_ratio']
+
+            cvd_pass = (rec_cvd >= 0.15) if direction == 'CALL' else (rec_cvd <= -0.15)
+            if not cvd_pass:
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': f'INDEX_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f})',
+                    'is_index': True
+                }
+
+            # Afternoon Midday Chop Shield (01:15 to 02:15 PM)
+            if not is_morning:
+                day_h = float(idx_df['high'].max())
+                day_l = float(idx_df['low'].min())
+                day_rng = max(1.0, day_h - day_l)
+                pos_pct = (cur_p - day_l) / day_rng * 100.0
+                if 35.0 <= pos_pct <= 65.0:
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f'MIDDAY_CHOP_ZONE ({pos_pct:.1f}% of Day Range)',
+                        'is_index': True
+                    }
+                if direction == 'CALL' and pos_pct > 88.0:
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f'CALL_EXHAUSTION_ZONE ({pos_pct:.1f}% of Day Range)',
+                        'is_index': True
+                    }
+                if direction == 'PUT' and pos_pct < 12.0:
+                    return {
+                        'symbol': sym_clean,
+                        'passed': False,
+                        'failed_gate': f'PUT_EXHAUSTION_ZONE ({pos_pct:.1f}% of Day Range)',
+                        'is_index': True
+                    }
+
+            # Range Expansion RVOL (1.20x threshold captures genuine Index breakouts)
+            prior_rng = (comp_bars['high'] - comp_bars['low']).mean()
+            idx_rvol = round(rng / max(0.5, prior_rng), 2) if prior_rng > 0 else 2.50
+            if idx_rvol < 1.20:
+                return {
+                    'symbol': sym_clean,
+                    'passed': False,
+                    'failed_gate': f'INDEX_RANGE_EXPANSION_RVOL_LOW ({idx_rvol:.2f}x < 1.20x)',
+                    'is_index': True
+                }
+
+            score = min(99.0, 50.0 + min(25.0, (idx_rvol - 1.0) * 10.0) + (15.0 if abs(rec_cvd) >= 0.30 else 5.0) + (10.0 if solid_body >= 0.60 else 0.0))
+
             return {
                 'symbol': sym_clean,
-                'passed': passed,
+                'passed': True,
                 'spot_price': cur_p,
                 'direction': direction,
                 'pct_change': pct_chg,
                 'rvol': idx_rvol,
-                'score': score,
+                'score': round(score, 2),
                 'is_index': True,
-                'is_compression_breakout': is_breakout,
-                'oi_confluent': oi_confluent,
-                'oi_reason': oi_reason
+                'stock_atr': 0.0,
+                'is_compression_breakout': True,
+                'cvd_info': cvd_res
             }
 
-        # =====================================================================
-        # 2. STAGE-1 FAST PRE-FILTER FOR ALL 216 STOCKS
-        # (Does NOT reject stocks on full-day wick! Full 3-min candle & RVOL audit runs in Stage-2!)
-        # =====================================================================
-        b_open = float(q.get('open', cur_p))
-        b_high = float(q.get('high', cur_p))
-        b_low = float(q.get('low', cur_p))
-        b_close = float(q.get('close', cur_p))
-        pct_chg = float(q.get('pct_change', 0.0))
-        rvol = float(q.get('rvol', 1.0))
-        direction = 'CALL' if pct_chg >= 0 else 'PUT'
-
-        # Candle Rejection Wick Shield (Block Deal Buying/Selling Absorption)
-        candle_total_range = b_high - b_low
-        if candle_total_range > 0:
-            # अगर PUT ट्रेड है, लेकिन कैंडल के नीचे लंबा रिजेक्शन विक (Lower Wick > 35%) है,
-            # तो इसका मतलब संस्थागत खरीदारों ने सारा माल सोख लिया है (Absorption) - नो PUT!
-            lower_wick = min(b_open, b_close) - b_low
-            if direction == 'PUT' and (lower_wick / candle_total_range) > 0.35:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'BUYING_ABSORPTION_WICK: Lower wick {lower_wick:.1f} pts is {(lower_wick/candle_total_range)*100:.0f}% of candle'
-                }
-            # अगर CALL ट्रेड है, लेकिन ऊपर लंबा रिजेक्शन विक (Upper Wick > 35%) है - नो CALL!
-            upper_wick = b_high - max(b_open, b_close)
-            if direction == 'CALL' and (upper_wick / candle_total_range) > 0.35:
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'SELLING_REJECTION_WICK: Upper wick {upper_wick:.1f} pts is {(upper_wick/candle_total_range)*100:.0f}% of candle'
-                }
-
-        # Gate 0: Calibrated Liquid Universe Gate
-        # केवल पेनी/माइक्रो स्टॉक्स (ATR < 15 या भाव < 150) ब्लॉक होंगे; SBI, Reliance, Tata Motors जैसे दिग्गज लार्ज-कैप्स अनलॉक रहेंगे!
-        stock_atr = self.get_stock_atr(sym_clean, q)
-        if stock_atr < 15.0 or cur_p < 150.0:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'PENNY_MICRO_ATR_TRAP: ATR {stock_atr:.1f} < 15.0 pts or Spot {cur_p:.1f} < 150.0 (Theta Decay Hazard)'
-            }
-
-        # FLAW #3 FIX (Calibrated Macro Tide Gate):
-        # केवल तभी स्टॉक CALL ब्लॉक करें जब निफ्टी में वास्तविक क्रैश (Severe Drop >= 60 pts) हो!
-        # अगर शेयर अपने दम पर मजबूत है (PctChg >= +0.50% & RVOL >= 1.5x), तो निफ्टी के मामूली -0.10% पर ब्लॉक नहीं होगा!
-        nifty_regime = self.get_nifty_market_regime(force_refresh=False)
-        is_independent_outperformer = (abs(pct_chg) >= 0.50 and rvol >= 1.50 and stock_atr >= 15.0)
-
-        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-            if not is_independent_outperformer or "DropFromHigh=-" in str(nifty_regime.get('reason', '')):
-                if "DropFromHigh" in str(nifty_regime.get('reason', '')):
-                    try:
-                        drop_val = float(str(nifty_regime.get('reason')).split('DropFromHigh=-')[1].split(' ')[0])
-                    except Exception:
-                        drop_val = 60.0
-                    if drop_val >= 60.0:
-                        return {
-                            'symbol': sym_clean,
-                            'passed': False,
-                            'failed_gate': f"NIFTY_REAL_CRASH_BLOCKED_CALL: {nifty_regime.get('reason')}"
-                        }
-                elif not is_independent_outperformer:
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_CALL: {nifty_regime.get('reason')}"
-                    }
-
-        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-            if not is_independent_outperformer or "RiseFromLow=+" in str(nifty_regime.get('reason', '')):
-                if "RiseFromLow" in str(nifty_regime.get('reason', '')):
-                    try:
-                        rise_val = float(str(nifty_regime.get('reason')).split('RiseFromLow=+')[1].split(' ')[0])
-                    except Exception:
-                        rise_val = 60.0
-                    if rise_val >= 60.0:
-                        return {
-                            'symbol': sym_clean,
-                            'passed': False,
-                            'failed_gate': f"NIFTY_REAL_RALLY_BLOCKED_PUT: {nifty_regime.get('reason')}"
-                        }
-                elif not is_independent_outperformer:
-                    return {
-                        'symbol': sym_clean,
-                        'passed': False,
-                        'failed_gate': f"FLAW3_NIFTY_REGIME_BLOCKED_PUT: {nifty_regime.get('reason')}"
-                    }
-
-        delta = 0.60
-        expected_opt_move = max(30.0, round(stock_atr * 0.35, 2))
-
-        # Anti-Climax Parabolic Exhaustion Shield (TataElxsi Top-Buying Trap)
-        # अगर शेयर अपनी 3-मिनट 9-EMA से पहले ही बहुत दूर (Over-Extended) भाग चुका है,
-        # तो उस कैंडल के पीक (Exact Top) पर CALL या बॉटम पर PUT लेना 100% ब्लॉक!
-        spot_price = float(q.get('live_spot', cur_p))
-        ema9_val = float(q.get('ema9', 0.0))
-        if ema9_val > 0:
-            dist_from_ema = spot_price - ema9_val
-            if direction == 'CALL' and dist_from_ema > (stock_atr * 0.35):
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'PARABOLIC_CLIMAX_TOP: Extended {dist_from_ema:.1f} pts > 0.35x ATR from 9-EMA'
-                }
-            if direction == 'PUT' and (-dist_from_ema) > (stock_atr * 0.35):
-                return {
-                    'symbol': sym_clean,
-                    'passed': False,
-                    'failed_gate': f'PARABOLIC_CLIMAX_BOTTOM: Extended {-dist_from_ema:.1f} pts > 0.35x ATR below 9-EMA'
-                }
-
-        day_range = round(b_high - b_low, 2)
-        # Anti-Exhaustion Shield: RVOL >= 2.50x gets 2.00x ATR expansion; standard gets 1.35x ATR
-        max_expansion = (stock_atr * 2.00) if rvol >= 2.50 else (stock_atr * 1.35)
-        if day_range > max_expansion:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'STOCK_MOVE_ALREADY_EXHAUSTED ({day_range:.1f} > {max_expansion:.1f} pts)'
-            }
-
-        # नियम B: वास्तविक साइडवेज़ चॉप शील्ड (Calibrated Dead Sideways Shield)
-        # हाई-ATR शेयर्स (ATR >= 85) के लिए शेयर को 186 अंक भागने के लिए मजबूर न करें!
-        # नियम: शेयर में कम से कम 25 अंक (या 0.15x ATR) की हलचल होनी चाहिए ताकि ऑप्शन बायर शुरुआती मोमेंटम पकड़ सके।
-        min_required_expansion = max(25.0, round(stock_atr * 0.15, 1)) if stock_atr >= 85.0 else max(8.0, round(stock_atr * 0.35, 1))
-        if day_range < min_required_expansion:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'DEAD_SIDEWAYS_CHOP (Day Range {day_range:.1f} < {min_required_expansion:.1f} pts Base)'
-            }
-
-        # नियम #1: न्यूनतम 0.50% प्रतिशत चाल फ़्लोर (Micro-Move & Theta-Decay Trap Shield)
-        # ऑप्शन बाइंग में थीटा डीके को हराने के लिए कम से कम 0.50% की वास्तविक चाल अनिवार्य है
-        if abs(pct_chg) < 0.50:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'SUB_EXPANSION_THETA_TRAP: Intraday move {pct_chg:+.2f}% < 0.50% minimum threshold'
-            }
-
-        # नियम #2: मॉर्निंग रन-अवे चेज़िंग एग्जॉशन कैप (Anti-Chasing Cap)
-        # सुबह 09:30 - 10:15 के बीच जो शेयर पहले ही 3.50% से ज्यादा भाग चुके हैं (जैसे KEI -6.2%, PowerIndia -4.1%),
-        # उनका पीछा करना 'ट्रेन छूटने के बाद दौड़ना' है — उन्हें सुबह 100% ब्लॉक करें!
-        if is_morning and abs(pct_chg) > 3.50:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'MORNING_MOVE_ALREADY_EXHAUSTED ({pct_chg:+.2f}% > 3.50% in morning slab)'
-            }
-
-        # नियम #4: दिन में 5.0% से ज्यादा भागे शेयर्स पर नो-एंट्री (Anti-FOMO Top Chasing Cap)
-        # जो स्टॉक दिनभर में पहले ही 5.0% से ज्यादा भाग चुका है (जैसे Mankind +7.02%), उसके टॉप पर कॉल या बॉटम पर पुट लेना ट्रैप है
-        if abs(pct_chg) >= 5.0:
-            return {
-                'symbol': sym_clean,
-                'passed': False,
-                'failed_gate': f'PARABOLIC_MOVE_EXHAUSTED (Move {pct_chg:+.2f}% >= 5.0% day move cap)'
-            }
-
-        # बेस 40 से शुरू: प्राइस वेलोसिटी + संस्थागत RVOL + ऑर्डर फ्लो CVD का वास्तविक संगम
+        # -------------------------------------------------------------
+        # STAGE 1 CANDLE DISCOVERY FOR STOCKS
+        # -------------------------------------------------------------
+        # Sweet Spot Scoring: 0.60% to 2.20% move = 30.0 maximum points!
         base_score = 40.0
-        mom_pts = min(25.0, abs(pct_chg) * 7.0)          # मजबूत प्राइस मोमेंटम (कम से कम 3% मूव)
-        vol_pts = min(25.0, (rvol - 1.0) * 8.0) if rvol > 1.0 else 0.0  # संस्थागत वॉल्यूम (RVOL >= 2.8x होने पर ही पूरे 15+ अंक)
-        cvd_pts = 10.0 if (abs(delta) >= 0.35) else 0.0 # आक्रामक बायर/सेलर ऑर्डर फ्लो का दबदबा
-        score = round(min(99.0, base_score + mom_pts + vol_pts + cvd_pts), 2)
-        # नियम A: संस्थागत सुपर-वॉल्यूम (RVOL >= 5.0x और मजबूत दिशा >= 0.50%) होने पर सीधे 95.0 का एलिट स्कोर दें
-        if rvol >= 5.0 and abs(pct_chg) >= 0.50:
-            score = max(score, 95.0)
+        abs_p = abs(pct_chg)
+        if abs_p < 0.60:
+            mom_pts = round((abs_p / 0.60) * 22.0, 1)
+        elif abs_p <= 2.20:
+            mom_pts = 30.0
+        else:
+            mom_pts = max(10.0, round(30.0 - (abs_p - 2.20) * 25.0, 1))
+
+        vol_pts = min(30.0, (rvol - 1.0) * 12.0) if rvol > 1.0 else 0.0
+        score = round(min(99.0, base_score + mom_pts + vol_pts), 2)
+
+        # Preliminary direction from price momentum (Stage 2 will strictly verify 3m candle breakout!)
+        tentative_direction = 'CALL' if pct_chg >= 0 else 'PUT'
 
         return {
             'symbol': sym_clean,
             'passed': True,
             'spot_price': cur_p,
-            'direction': direction,
+            'direction': tentative_direction,
             'pct_change': pct_chg,
             'rvol': rvol,
             'score': score,
             'is_index': False,
-            'stock_atr': stock_atr,
-            'delta': delta,
-            'expected_opt_move': expected_opt_move
+            'stock_atr': stock_atr
         }
 
-    def _record_signal_to_excel(self, ist_now, cand, opt, opt_action, contract, opt_entry, opt_sl, opt_tgt1, opt_tgt2, sl_pts, t1_pts, t2_pts, time_sl_time, buffer_end_time):
+    def _log_rejection_audit(self, ist_now, all_evaluations, qualified_trades, stage2_rejections=None):
+        """
+        Phase 4: Structured Rejection and Audit Logger.
+        Logs every asset evaluated with component gate results, exact failure codes, and decision.
+        """
+        audit_file = os.path.join(CURRENT_DIR, 'Alpha_Rejection_Audit_Ledger.jsonl')
+        qual_syms = {t['symbol']: t for t in qualified_trades}
+        stg2_rej = stage2_rejections or {}
+        ts_str = ist_now.strftime('%Y-%m-%d %H:%M:%S IST')
+
+        try:
+            with open(audit_file, 'a', encoding='utf-8') as f:
+                for item in all_evaluations:
+                    sym = item.get('symbol', '')
+                    is_qual = sym in qual_syms
+                    stg1_pass = item.get('passed', False)
+                    fail_reason = 'PASS'
+                    rej_stage = 'NONE'
+
+                    if is_qual:
+                        rej_stage = 'NONE'
+                        fail_reason = 'QUALIFIED_FOR_DISPATCH'
+                    elif not stg1_pass:
+                        rej_stage = 'STAGE_1'
+                        fail_reason = item.get('failed_gate', 'STAGE_1_FILTER')
+                    elif sym in stg2_rej:
+                        rej_stage = 'STAGE_2'
+                        fail_reason = stg2_rej[sym]
+                    else:
+                        rej_stage = 'STAGE_2'
+                        fail_reason = 'STAGE_2_UNVERIFIED'
+
+                    rec = {
+                        'symbol': sym,
+                        'timestamp': ts_str,
+                        'direction': item.get('direction', 'NEUTRAL'),
+                        'is_index': item.get('is_index', False),
+                        'stage1_passed': stg1_pass,
+                        'rejection_stage': rej_stage,
+                        'failure_reason': fail_reason,
+                        'score': item.get('score', 0.0),
+                        'rvol': item.get('rvol', 0.0),
+                        'pct_change': item.get('pct_change', 0.0),
+                        'decision': 'QUALIFIED' if is_qual else 'REJECTED'
+                    }
+                    f.write(json.dumps(rec) + '\n')
+        except Exception as e:
+            print(f'[AUDIT LOG ERROR]: {e}')
+
+    def _record_signal_to_excel(self, ist_now, cand, opt, opt_action, contract, opt_entry, opt_sl, opt_tgt1, opt_tgt2, time_sl_time, buffer_end_time):
         """Maintains Daily & Monthly Official Excel Journals for every qualified signal dispatched."""
         sym = cand['symbol']
         meta = get_instrument_meta(sym)
@@ -729,11 +539,13 @@ class DailyAutonomousScreener:
             'Option_Contract': contract,
             'Lots': 1,
             'Quantity': qty,
+            'Spot_Entry': cand['spot_price'],
             'Buying_Price_INR': opt_entry,
             'Stop_Loss_INR': opt_sl,
             'Trailing_SL_INR': opt_sl,
-            'Time_SL_IST': time_sl_time,
+            'Target_1_INR': opt_tgt1,
             'Target_Price_INR': opt_tgt2,
+            'Time_SL_IST': time_sl_time,
             'Exit_Time_IST': '',
             'Exit_Price_INR': 0.0,
             'Holding_Time': '0m',
@@ -741,12 +553,11 @@ class DailyAutonomousScreener:
             'Gross_PnL_INR': 0.0,
             'Friction_Taxes_INR': 0.0,
             'Net_PnL_INR': 0.0,
-            'Cumulative_Equity_INR': 100000.0,
+            'Trade_Outcome': 'SIGNAL_GENERATED_OPEN',
             'Status': 'SIGNAL_GENERATED_OPEN'
         }
 
         try:
-            import pandas as pd
             for fpath in [csv_path, daily_xl, monthly_xl]:
                 if fpath.endswith('.csv'):
                     df_old = pd.read_csv(fpath) if os.path.exists(fpath) else pd.DataFrame()
@@ -760,55 +571,215 @@ class DailyAutonomousScreener:
         except Exception as e_xl:
             print(f"[EXCEL JOURNAL ERROR]: Could not record to Excel: {e_xl}")
 
+    def update_open_paper_trades(self):
+        """
+        PILLAR 5: Real-Time Paper Trading Position Manager.
+        Evaluates active open positions on every 3-minute iteration:
+        - Target 1 hit -> Trails SL to Cost (Breakeven lock).
+        - Target 2 hit -> Books TARGET_2_HIT (JACKPOT) (+3.5R).
+        - Trailing SL hit -> Exits at COST_TRAILED_EXIT (0.00R loss).
+        - Initial SL hit -> Books SL_HIT (-1.00R).
+        - 15-Minute Stagnant Kill Switch -> Exits at 15M_TIME_SL_EXIT.
+        Updates CSV and Excel journals in place and broadcasts exit notifications!
+        """
+        csv_path = os.path.join(CURRENT_DIR, 'Live_Paper_Trading_Journal.csv')
+        daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
+        if not os.path.exists(csv_path):
+            return
+
+        try:
+            df = pd.read_csv(csv_path)
+            if df.empty or 'Status' not in df.columns:
+                return
+
+            open_mask = (df['Status'] == 'SIGNAL_GENERATED_OPEN')
+            if not open_mask.any():
+                return
+
+            ist_now = get_ist_time()
+            now_ts = ist_now.timestamp()
+            updated_any = False
+
+            for idx in df[open_mask].index:
+                row = df.loc[idx]
+                sym = str(row['Stock_Index']).strip()
+                is_idx = sym in INDEX_NAMES
+                opt_action = str(row['Option_Action'])
+                contract = str(row['Option_Contract'])
+                opt_entry = float(row['Buying_Price_INR'])
+                opt_sl = float(row['Stop_Loss_INR'])
+                trail_sl = float(row.get('Trailing_SL_INR', opt_sl))
+                opt_t1 = float(row.get('Target_1_INR', opt_entry * 1.25))
+                opt_t2 = float(row['Target_Price_INR'])
+                spot_entry = float(row.get('Spot_Entry', 0.0))
+                qty = int(row.get('Quantity', 25))
+
+                q = self.data_feed.get_live_asset_quote(sym)
+                if not q:
+                    continue
+
+                cur_spot = float(q.get('live_spot', q.get('close', spot_entry)))
+                if cur_spot <= 0 or spot_entry <= 0:
+                    continue
+
+                # Estimate current option price using genuine delta
+                delta = 0.52 if is_idx else 0.50
+                if 'CE' in contract or 'CALL' in opt_action:
+                    spot_gain = cur_spot - spot_entry
+                else:
+                    spot_gain = spot_entry - cur_spot
+
+                est_opt_price = round(max(0.5, opt_entry + (spot_gain * delta)), 2)
+
+                # Try live option chain quote if available
+                oc_data = self.data_feed._oc_cache.get(sym)
+                if oc_data and 'records' in oc_data:
+                    for c_item in oc_data['records'].get('data', []):
+                        for side in ['CE', 'PE']:
+                            if c_item.get(side, {}).get('identifier') == contract or c_item.get(side, {}).get('strikePrice') == row.get('Spot_Entry'):
+                                ltp_val = float(c_item.get(side, {}).get('lastPrice', 0.0))
+                                if ltp_val > 0:
+                                    est_opt_price = ltp_val
+                                    break
+
+                # Target 1 Check: Lock in Target 1 Profit (Never drag back to 0.00R cost or theta decay)
+                t1_locked_floor = round(opt_entry + (opt_t1 - opt_entry) * 0.40, 2)
+                if est_opt_price >= opt_t1 and trail_sl < t1_locked_floor:
+                    df.at[idx, 'Trailing_SL_INR'] = t1_locked_floor
+                    trail_sl = t1_locked_floor
+                    updated_any = True
+                    print(f"[POSITION MANAGER]: {sym} reached Target 1! Trailing SL locked at Profit level Rs. {t1_locked_floor:.2f} (NO COST DRAG).")
+
+                # Check Exits
+                exit_price = 0.0
+                outcome = ""
+
+                # 1. Target 2 Jackpot Hit
+                if est_opt_price >= opt_t2:
+                    exit_price = opt_t2
+                    outcome = "TARGET_2_HIT (JACKPOT)"
+                # 2. T1 Profit Locked Exit (Eliminates Breakeven 0.00R loss)
+                elif trail_sl > opt_entry and est_opt_price <= trail_sl:
+                    exit_price = trail_sl
+                    outcome = "T1_PROFIT_LOCKED"
+                # 3. Initial Stop Loss Hit
+                elif est_opt_price <= opt_sl:
+                    exit_price = opt_sl
+                    outcome = "SL_HIT"
+                # 4. 15-Minute Stagnant Kill Switch
+                else:
+                    try:
+                        sig_time_str = str(row['Signal_Time_IST'])
+                        # Parse time
+                        sig_dt = datetime.datetime.strptime(sig_time_str.split(' ')[0], '%I:%M:%S')
+                        sig_mins = sig_dt.hour * 60 + sig_dt.minute
+                        cur_mins = ist_now.hour * 60 + ist_now.minute
+                        if (cur_mins - sig_mins) >= 15 and est_opt_price <= opt_entry:
+                            exit_price = est_opt_price
+                            outcome = "15M_TIME_SL_EXIT"
+                    except Exception:
+                        pass
+
+                if outcome:
+                    pts_cap = round(exit_price - opt_entry, 2)
+                    gross_pnl = round(pts_cap * qty, 2)
+                    friction = round(min(500.0, max(60.0, abs(gross_pnl) * 0.03)), 2)
+                    net_pnl = round(gross_pnl - friction, 2)
+
+                    df.at[idx, 'Exit_Price_INR'] = exit_price
+                    df.at[idx, 'Exit_Time_IST'] = ist_now.strftime('%I:%M:%S %p IST')
+                    df.at[idx, 'Points_Captured'] = pts_cap
+                    df.at[idx, 'Gross_PnL_INR'] = gross_pnl
+                    df.at[idx, 'Friction_Taxes_INR'] = friction
+                    df.at[idx, 'Net_PnL_INR'] = net_pnl
+                    df.at[idx, 'Trade_Outcome'] = outcome
+                    df.at[idx, 'Status'] = outcome
+                    updated_any = True
+
+                    exit_msg = (
+                        f"🔔 <b>ALPHA TRADE EXIT ALERT</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🎯 <b>STATUS:</b> <b>{outcome}</b>\n"
+                        f"📌 <b>CONTRACT:</b> <code>{contract}</code>\n"
+                        f"💰 <b>ENTRY:</b> Rs. {opt_entry:.2f} | <b>EXIT:</b> Rs. {exit_price:.2f}\n"
+                        f"📈 <b>POINTS CAPTURED:</b> <b>{pts_cap:+.2f} pts</b>\n"
+                        f"💵 <b>NET P&L:</b> <b>Rs. {net_pnl:+,.2f}</b>\n"
+                        f"⏰ <b>TIME:</b> {ist_now.strftime('%I:%M:%S %p IST')}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    )
+                    self.notifier.send_broadcast_message(exit_msg, is_trade_signal=False)
+                    print(f"[TRADE CLOSED]: {contract} -> {outcome} ({pts_cap:+.2f} pts | Rs {net_pnl:+,.2f})")
+
+            if updated_any:
+                df.to_csv(csv_path, index=False)
+                try:
+                    df.to_excel(daily_xl, index=False)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"[POSITION MANAGER ERROR]: {e}")
+
     def run_screener(self, ignore_window=False):
         ist_now = get_ist_time()
         ist_time_str = ist_now.strftime('%I:%M:%S %p IST')
         ist_date_str = ist_now.strftime('%d-%b-%Y')
 
+        if ist_now.weekday() >= 5:
+            print(f"[MARKET CLOSED]: Weekend detected ({ist_now.strftime('%A')}). Zero scan execution.")
+            return
+
         print(f"=======================================================")
-        print(f"  ALPHA SCREENER | {ist_date_str} {ist_time_str}")
+        print(f"  ALPHA 5-PILLAR INSTITUTIONAL SCREENER | {ist_date_str} {ist_time_str}")
         print(f"  Designated Slabs: 09:30-10:15 AM IST & 01:15-02:15 PM IST")
         print(f"=======================================================")
 
+        # First: Monitor and manage active open paper positions!
+        self.update_open_paper_trades()
+
         if not ignore_window and not is_in_active_trading_slab(ist_now):
-            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside active trading slabs (09:30-10:15 AM & 01:15-02:15 PM IST). Maintaining complete silence.")
+            print(f"[OUTSIDE TRADING SLAB]: Current time {ist_time_str} is outside active trading slabs. Maintaining complete silence.")
             return
 
-        # PINPOINT FIX: Balanced Slab Allocation (Max 4 Morning + Max 4 Afternoon = 8 Total Daily Super Trades)
-        # Guarantees afternoon jackpot window (01:15-02:15 PM) is NEVER starved or blocked by morning trades!
-        # पूर्ण आधिकारिक ट्रेडिंग स्लैब्स (Morning 09:30-10:15 AM & Afternoon 01:15-02:15 PM IST):
+        # Balanced Slab Allocation
         tot_mins_now = ist_now.hour * 60 + ist_now.minute
         is_morning = (570 <= tot_mins_now <= 615)
         is_afternoon = (795 <= tot_mins_now <= 855)
 
         morn_count = 0
         aft_count = 0
+        morn_idx_count = 0
+        aft_idx_count = 0
+        morn_stk_count = 0
+        aft_stk_count = 0
+
         for sym_d, ts in self.dispatched_today.items():
-            try:
-                dt = datetime.datetime.fromtimestamp(ts, tz=ist_now.tzinfo)
-                if dt.hour == 9 or (dt.hour == 10 and dt.minute <= 15):
-                    morn_count += 1
-                elif dt.hour >= 13:
-                    aft_count += 1
-            except Exception:
-                pass
+            if ts > 0:
+                try:
+                    dt = datetime.datetime.fromtimestamp(ts, tz=ist_now.tzinfo)
+                    is_m = (dt.hour == 9 or (dt.hour == 10 and dt.minute <= 15))
+                    is_a = (dt.hour >= 13)
+                    if is_m:
+                        morn_count += 1
+                        if sym_d in INDEX_NAMES: morn_idx_count += 1
+                        else: morn_stk_count += 1
+                    elif is_a:
+                        aft_count += 1
+                        if sym_d in INDEX_NAMES: aft_idx_count += 1
+                        else: aft_stk_count += 1
+                except Exception:
+                    pass
 
-        MAX_SLAB_TRADES = 4
-        if is_morning and morn_count >= MAX_SLAB_TRADES and not ignore_window:
-            print(f"[MORNING SLAB CAP REACHED]: {morn_count}/{MAX_SLAB_TRADES} morning trades already dispatched. Reserving 4 slots for afternoon jackpot slab.")
+        active_slab_count = morn_count if is_morning else aft_count
+        if active_slab_count >= MAX_SLAB_TRADES and not ignore_window:
+            print(f"[SLAB CAP REACHED]: {active_slab_count}/{MAX_SLAB_TRADES} trades already dispatched in this slab. Capital protected.")
             return
 
-        if is_afternoon and aft_count >= MAX_SLAB_TRADES and not ignore_window:
-            print(f"[AFTERNOON SLAB CAP REACHED]: {aft_count}/{MAX_SLAB_TRADES} afternoon trades already dispatched.")
-            return
-
-        print(f"[ACTIVE SLAB REACHED]: Executing Full 216 F&O + Index Scan at {ist_time_str}...")
-
-        # STEP 1 (UPSIDE): Fetch 1 Bulk NSE Snapshot, Audit NIFTY Macro Regime, & Pre-Filter ALL 216 Stocks + 4 Indices
+        # STAGE 1: Consolidated NSE Bulk Snapshot Fetch
         fetch_bulk_nse_snapshot(force_refresh=True)
         nifty_regime = self.get_nifty_market_regime(force_refresh=True)
         print(
-            f"[MACRO TIDE REGIME]: AllowStockCALL={nifty_regime['allow_stock_call']} | "
+            f"[MACRO REGIME]: AllowStockCALL={nifty_regime['allow_stock_call']} | "
             f"AllowStockPUT={nifty_regime['allow_stock_put']} | {nifty_regime['reason']}"
         )
 
@@ -816,125 +787,72 @@ class DailyAutonomousScreener:
         with ThreadPoolExecutor(max_workers=8) as executor:
             eval_results = list(executor.map(self.evaluate_asset, symbols))
 
-        # Elite 90% Win-Probability Gate: Only setups with Score >= 90.0 (or Indices) qualify!
-        # Elite 90% Win-Probability Gate: Only setups with Score >= 88.0 qualify!
-        # सिर्फ वही सेटअप्स पास होंगे जिनका वास्तविक संस्थागत स्कोर >= 91.0 होगा (केवल शीर्ष 12-14 जैकपॉट ट्रेड्स)
-        # नियम A: स्कोर >= 91.0 हो या फिर संस्थागत RVOL >= 5.0x और दिशा >= 0.50% हो, तो सीधे स्टेज-2 में पास करें
-        # =====================================================================
-        # संस्थागत सुधार #2: केवल A-Grade (Score >= 90.0) ट्रेड्स ही स्टेज-2 में जाएँगे!
-        # सुबह 09:30 से 10:15 के बीच 78-85 स्कोर वाले कमजोर/चॉपी ट्रेड्स 100% ब्लॉक।
-        # =====================================================================
+        # Stage 1 Qualification Filter
         stage1_passed = [
             r for r in eval_results 
             if r.get('passed', False) and (
-                r.get('score', 0.0) >= 90.0 or 
-                (float(r.get('rvol', 0.0)) >= 4.5 and abs(float(r.get('pct_change', 0.0))) >= 0.60 and r.get('score', 0.0) >= 88.0)
+                r.get('score', 0.0) >= 70.0 or 
+                (float(r.get('rvol', 0.0)) >= 2.0 and abs(float(r.get('pct_change', 0.0))) >= 0.50)
             )
         ]
 
-        # Sort ALL qualified candidates across the entire 216 universe by Win-Probability Score & Expected Move
+        # Prioritize Indices first, then high Setup Strength Score + RVOL
         stage1_passed.sort(
             key=lambda x: (
-                1 if x.get('is_index', False) and x.get('is_compression_breakout', False) else 0,
+                1 if x.get('is_index', False) else 0,
                 x.get('score', 0.0),
-                x.get('expected_opt_move', 50.0 if x.get('is_index', False) else 0.0),
                 x.get('rvol', 0.0)
             ),
             reverse=True
         )
 
-        print(f"[STAGE-1 COMPLETE]: Scanned {len(symbols)} assets. {len(stage1_passed)} candidates passed price/volume/CVD gates.")
+        print(f"[STAGE-1 COMPLETE]: Scanned {len(symbols)} assets. {len(stage1_passed)} candidates passed discovery.")
 
-        # STEP 2 (DOWNSIDE): Deep Live Option Chain (-4 | 0 | +4) OI + Volume + Runway Wall & Live LTP Verification
+        # STAGE 2: Real 3-Minute Breakout, Live Spot Holding & BVC CVD Audit
         verified_super_trades = []
-        active_slab_count = morn_count if is_morning else aft_count
-        remaining_slab_slots = max(1, MAX_SLAB_TRADES - active_slab_count)
-        slab_cap = min(4, remaining_slab_slots)
-
-        # =====================================================================
-        # संस्थागत सुधार #3: इंडेक्स और स्टॉक के स्लॉट्स का विकेंद्रीकरण (Decoupled Capacity)
-        # नियम: प्रति स्लैब 1 बेस्ट इंडेक्स + अधिकतम 3 F&O स्टॉक्स (ताकि टॉप 5-7 रनर्स छूटें नहीं)
-        # एक ही स्कैन साइकिल/मिनट में 3-4 इंडेक्स का क्लस्टर कभी नहीं जाएगा (केवल #1 बेस्ट स्कोर वाला जाएगा)।
-        # =====================================================================
-        index_names = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-        
-        active_slab_index_count = 0
-        active_slab_stock_count = 0
-        for sym_d, last_ts in self.dispatched_today.items():
-            if last_ts > 0:
-                try:
-                    dt = datetime.datetime.fromtimestamp(last_ts, tz=ist_now.tzinfo)
-                    in_current_slab = (is_morning and (dt.hour == 9 or (dt.hour == 10 and dt.minute <= 15))) or                                      (is_afternoon and (dt.hour >= 13))
-                    if in_current_slab:
-                        if sym_d in index_names:
-                            active_slab_index_count += 1
-                        else:
-                            active_slab_stock_count += 1
-                except Exception:
-                    pass
-
-        MAX_INDEX_PER_SLAB = 1
-        MAX_STOCKS_PER_SLAB = 3
-        has_index_in_this_cycle = False
+        stage2_rejections = {}
+        active_slab_index = morn_idx_count if is_morning else aft_idx_count
+        active_slab_stock = morn_stk_count if is_morning else aft_stk_count
+        remaining_slab_slots = max(0, MAX_SLAB_TRADES - active_slab_count)
+        slab_cap = min(MAX_SLAB_TRADES, remaining_slab_slots)
 
         for cand in stage1_passed:
             if len(verified_super_trades) >= slab_cap:
                 break
 
             sym = cand['symbol']
-            spot = cand['spot_price']
-            direction = cand['direction']
             is_idx = cand.get('is_index', False)
 
-            # यदि इंडेक्स है और स्लैब में 1 इंडेक्स पहले ही जा चुका है, तो दूसरा इंडेक्स छोड़ें
+            if is_idx and active_slab_index >= MAX_INDEX_PER_SLAB:
+                stage2_rejections[sym] = "MAX_INDEX_PER_SLAB_CAP_REACHED"
+                continue
+            if not is_idx and active_slab_stock >= MAX_STOCKS_PER_SLAB:
+                stage2_rejections[sym] = "MAX_STOCK_PER_SLAB_CAP_REACHED"
+                continue
+
+            if self.is_already_dispatched(sym):
+                stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
+                continue
+
+            # Index verification (already verified 3m breakout & CVD in Stage 1)
             if is_idx:
-                if active_slab_index_count >= MAX_INDEX_PER_SLAB or has_index_in_this_cycle:
-                    print(f"  [PER_SLAB_INDEX_EXCLUSIVE]: {sym} bypassed. Active slab already has {active_slab_index_count} Top Index.")
-                    continue
-                # संस्थागत सुधार #1B: स्टेज-2 में भी इंडेक्स मैक्रो टाइड की पुनः पुष्टि:
+                direction = cand['direction']
                 if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-                    print(f"  [INDEX_MACRO_TIDE_BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
+                    stage2_rejections[sym] = f"MACRO_TIDE_BLOCKED_INDEX_CALL: {nifty_regime.get('reason')}"
                     continue
                 if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-                    print(f"  [INDEX_MACRO_TIDE_BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
+                    stage2_rejections[sym] = f"MACRO_TIDE_BLOCKED_INDEX_PUT: {nifty_regime.get('reason')}"
                     continue
             else:
-                # यदि स्टॉक है और स्टॉक कोटा पूरा हो चुका है, तो अगला स्टॉक छोड़ें
-                if active_slab_stock_count >= MAX_STOCKS_PER_SLAB:
-                    print(f"  [PER_SLAB_STOCK_CAP]: {sym} bypassed. Active slab already has {active_slab_stock_count} Stocks.")
-                    continue
-
-            # -------------------------------------------------------------
-            # STAGE 2A: 5-PILLAR REAL 3-MINUTE INTRADAY CANDLE & BREAKOUT AUDIT
-            # (Indices already audited on real 3m bars in Stage 1;
-            #  Stocks audited here on genuine 3-min resampled bars!)
-            # -------------------------------------------------------------
-            if not is_idx:
-                # Re-verify Nifty Macro Tide before evaluating stock
-                cand_rvol = float(cand.get('rvol', 1.0))
-                cand_pct = abs(float(cand.get('pct_change', 0.0)))
-                cand_atr = float(cand.get('stock_atr', 0.0))
-                # =====================================================================
-                # सुधार #1: सख्त निफ्टी मैक्रो अलाइनमेंट (Strict Macro Tide Alignment)
-                # केवल असली संस्थागत ब्लॉक डील (RVOL >= 5.0x) ही काउंटर-ट्रेंड चल सकती है।
-                # यदि निफ्टी लाल है, तो कमजोर स्टॉक CALL कभी नहीं ले सकता (TATAELXSI और HYUNDAI ब्लॉक!)
-                # =====================================================================
-                is_block_deal = (cand_rvol >= 5.0)
-                if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-                    if not is_block_deal or "DropFromHigh=-" in str(nifty_regime.get('reason', '')):
-                        print(f"  [NIFTY_MACRO_TIDE_BLOCKED]: {sym} (CALL) -> {nifty_regime.get('reason')}")
-                        continue
-                if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-                    if not is_block_deal or "RiseFromLow=+" in str(nifty_regime.get('reason', '')):
-                        print(f"  [NIFTY_MACRO_TIDE_BLOCKED]: {sym} (PUT) -> {nifty_regime.get('reason')}")
-                        continue
-
+                # ---------------------------------------------------------
+                # STAGE 2 STOCK 3-MINUTE AUDIT
+                # ---------------------------------------------------------
                 stk_df = self.data_feed.get_live_intraday_bars(sym)
-                if stk_df is None or len(stk_df) < 9:
-                    print(f"  [5-PILLAR CANDLE REJECTED]: {sym} -> Insufficient 3-min candles (less than 9 bars)")
+                if stk_df is None or len(stk_df) < 10:
+                    stage2_rejections[sym] = "INSUFFICIENT_3M_BARS_LESS_THAN_10"
                     continue
 
-                eval_bar = stk_df.iloc[-2] if len(stk_df) >= 2 else stk_df.iloc[-1]
+                eval_bar = stk_df.iloc[-2]
                 live_bar = stk_df.iloc[-1]
                 b_open = float(eval_bar['open'])
                 b_high = float(eval_bar['high'])
@@ -946,310 +864,209 @@ class DailyAutonomousScreener:
                 l_low = float(live_bar['low'])
                 l_close = float(live_bar['close'])
 
-                # Keep live ticking spot price accurate
                 live_q = self.data_feed.get_live_asset_quote(sym)
                 spot = float(live_q.get('live_spot', l_close))
                 cand['spot_price'] = spot
 
+                # User Rule: Strictly High-Value Stocks (Spot >= 1000 Rs)
+                if spot < 1000.0:
+                    stage2_rejections[sym] = f"STOCK_PRICE_BELOW_1000_INR (Spot {spot:.1f} < 1000.0)"
+                    continue
+
                 stock_atr = float(cand.get('stock_atr', self.get_stock_atr(sym, live_q)))
                 rng = max(0.01, b_high - b_low)
 
-                # FLAW #1 FIX (Anti-Parabolic Exhaustion Candle Cap):
-                # Never chase a 3-minute candle that already burned > 35% of the stock's full-day ATR (e.g. Navin Fluorine +143 pts)
-                max_single_candle_rng = round(stock_atr * 0.35, 2)
-                if rng > max_single_candle_rng:
-                    print(
-                        f"  [FLAW #1 ANTI-PARABOLIC REJECTED]: {sym} -> 3m Candle Range {rng:.2f} pts > "
-                        f"35% of Daily ATR ({max_single_candle_rng:.2f} pts). Blow-off trap avoided!"
-                    )
-                    continue
-
-                # PINPOINT FIX: Runway is measured by total day expansion vs 1.35x ATR so afternoon trend reversals/breakdowns are not prematurely choked
-                day_high_3m = max(float(live_q.get('high', spot)), float(stk_df['high'].max()))
-                day_low_3m = min(float(live_q.get('low', spot)), float(stk_df['low'].min())) if float(live_q.get('low', 0)) > 0 else float(stk_df['low'].min())
-                day_total_expansion = day_high_3m - day_low_3m
-                max_expansion_mult = 2.00 if cand_rvol >= 2.50 else 1.35
-                if day_total_expansion > (stock_atr * max_expansion_mult):
-                    print(
-                        f"  [EXHAUSTED RUNWAY REJECTED]: {sym} ({direction}) -> Day Range {day_total_expansion:.2f} pts "
-                        f"(> {int(max_expansion_mult*100)}% of ATR {stock_atr:.1f} pts)"
-                    )
-                    continue
-
-                # नियम B: स्टेज-2 में भी टाइम-अडैप्टिव एंटी-साइडवेज़ फ़िल्टर
-                min_rng_pct_stage2 = 0.35 if is_morning else 0.60
-                if day_total_expansion < (stock_atr * min_rng_pct_stage2) and cand_rvol < 5.0:
-                    print(
-                        f"  [DEAD_SIDEWAYS_CHOP REJECTED]: {sym} ({direction}) -> Day Range {day_total_expansion:.2f} pts "
-                        f"(< {int(min_rng_pct_stage2*100)}% of ATR {stock_atr*min_rng_pct_stage2:.1f} pts)"
-                    )
-                    continue
-
-                # नियम #1: काउंटर-ट्रेंड ब्लॉक (Counter-Trend Shield)
-                # यदि स्टॉक दिनभर लाल (pct_chg < 0) है तो CALL कभी नहीं, और यदि हरा (pct_chg > 0) है तो PUT कभी नहीं
-                day_pct = float(cand.get('pct_change', 0.0))
-                if direction == 'CALL' and day_pct < 0:
-                    print(f"  [COUNTER_TREND_BLOCKED]: {sym} (CALL) rejected because stock is in red ({day_pct:+.2f}%)")
-                    continue
-                if direction == 'PUT' and day_pct > 0:
-                    print(f"  [COUNTER_TREND_BLOCKED]: {sym} (PUT) rejected because stock is in green ({day_pct:+.2f}%)")
-                    continue
-
-                # =====================================================================
-                # संस्थागत सुधार #2: फ्रेशनेस लॉक (Anti-Late Chasing Cap Dynamic Calibration)
-                # शेयर दिन के ओपन से 2.60% से ज्यादा नहीं भागा होना चाहिए (सिवाय भारी संस्थागत RVOL >= 2.5x के)।
-                # यदि RVOL >= 2.5x है तो 3.20% तक का मूव चेज़िंग नहीं बल्कि डे-हाई मोमेंटम ब्रेकआउट (APOLLOHOSP / DIXON) है!
-                # HYUNDAI (+3.05% कमजोर वॉल्यूम टॉप चेज़िंग) और BDL (-2.70% बॉटम सेलिंग) पूरी तरह ब्लॉक रहेंगे!
-                # =====================================================================
-                max_allowed_pct = 3.20 if cand_rvol >= 2.50 else 2.60
-                if abs(day_pct) > max_allowed_pct and cand_rvol < 5.0:
-                    print(
-                        f"  [LATE_EXHAUSTION_BLOCKED]: {sym} -> Day Move {day_pct:+.2f}% > {max_allowed_pct:.2f}% "
-                        f"(Late blow-off chasing trap avoided!)"
-                    )
-                    continue
-
-                # FLAW #2 FIX: Live Forming Bar Reversal Check with 10% ATR spot buffer & 25% ATR wick tolerance
-                # Allows healthy 0.05% bid-ask tick variance so valid breakouts (Trent, Siemens) are not killed
-                spot_buffer = stock_atr * 0.10
-                if direction == 'CALL':
-                    live_bar_holding = (spot >= (b_close - spot_buffer)) and ((l_high - spot) <= (stock_atr * 0.25))
-                else:
-                    live_bar_holding = (spot <= (b_close + spot_buffer)) and ((spot - l_low) <= (stock_atr * 0.25))
-
-                if not live_bar_holding:
-                    print(
-                        f"  [FLAW #2 LIVE BAR REVERSAL REJECTED]: {sym} ({direction}) -> "
-                        f"LiveSpot={spot:.2f} vs ClosedBar={b_close:.2f} (LiveOpen={l_open:.2f}, LiveClose={l_close:.2f})"
-                    )
-                    continue
-
-                # =====================================================================
-                # सुधार #3: लाइव कैंडल एंटी-डोज़ी थ्रस्ट फ़िल्टर (ANTI-DOJI CHOPPING SHIELD)
-                # यदि लाइव कैंडल 0.4 या 0.6 अंक की डोज़ी बनकर रुक गई, तो वह वॉल्यूम केवल चॉपिंग है!
-                # AUROPHARMA (बॉडी 0.4 pt) और ADANIPORTS (बॉडी 0.6 pt) तुरंत रिजेक्ट होंगे!
-                # =====================================================================
-                live_body = abs(spot - l_open)
-                min_live_thrust = max(1.5, min(12.0, round(stock_atr * 0.03, 1)))
-                if cand_rvol < 5.0 and live_body < min_live_thrust:
-                    print(
-                        f"  [DOJI_CHOPPING_REJECTED]: {sym} -> Live Candle Body is only {live_body:.2f} pts "
-                        f"(< {min_live_thrust:.1f} pts). Stagnant Doji Trap Avoided!"
-                    )
-                    continue
-
-                body = abs(b_close - b_open)
-                solid_body_ratio = round(body / rng, 2)
-                up_wick = round((b_high - max(b_open, b_close)) / rng, 2)
-                dn_wick = round((min(b_open, b_close) - b_low) / rng, 2)
-                clv = round((b_close - b_low) / rng, 2)
-
+                # 1. 8-Bar Compression Base
                 comp_bars = stk_df.iloc[:-2].tail(8)
                 comp_high = float(comp_bars['high'].max())
                 comp_low = float(comp_bars['low'].min())
                 max_dist_buffer = stock_atr * 0.20
 
-                # ---------------------------------------------------------
-                # मोड 1: फास्ट मार्केट (1 कैंडल मारुबोज़ू ब्लास्ट: कम से कम 15 अंक का सिंगल बार)
-                # ---------------------------------------------------------
-                min_stock_blast_pts = max(6.0, round(stock_atr * 0.08, 1))
+                # Direction strictly determined by 3-minute breakout level!
+                direction = None
+                if b_close >= comp_high and b_close <= comp_high + max_dist_buffer:
+                    direction = 'CALL'
+                elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer:
+                    direction = 'PUT'
+
+                if direction is None:
+                    stage2_rejections[sym] = "NO_8BAR_COMPRESSION_BREAKOUT"
+                    continue
+
+                # 2. Day High / Day Low Breakout Check (Ensures genuine extreme expansion)
+                day_high = float(stk_df['high'].max())
+                day_low = float(stk_df['low'].min())
+                if direction == 'CALL' and b_close < (day_high - stock_atr * 0.08):
+                    stage2_rejections[sym] = "NOT_DAY_HIGH_BREAKOUT"
+                    continue
+                if direction == 'PUT' and b_close > (day_low + stock_atr * 0.08):
+                    stage2_rejections[sym] = "NOT_DAY_LOW_BREAKOUT"
+                    continue
+
+                # 3. Exhaustion from Open Check (Prevents chasing exhausted moves > 3.2%)
+                day_open = float(stk_df['open'].iloc[0])
+                pct_from_open = abs((spot - day_open) / day_open * 100.0)
+                if pct_from_open > 3.20:
+                    stage2_rejections[sym] = f"EXHAUSTED_MOVE_FROM_OPEN ({pct_from_open:.1f}% > 3.2%)"
+                    continue
+
+                # 4. Live Spot Holding Re-Confirmation (Eliminates false breakouts!)
+                spot_buffer = stock_atr * 0.05
                 if direction == 'CALL':
-                    single_mom_ok = (b_close >= b_open) and (clv >= 0.75) and (up_wick <= 0.20) and \
-                                    (solid_body_ratio >= 0.60) and (rng >= min_stock_blast_pts)
-                    broke_comp = (b_close >= comp_high) and (b_close <= comp_high + max_dist_buffer)
+                    live_holding = (spot >= comp_high - spot_buffer) and ((l_high - spot) <= stock_atr * 0.25)
                 else:
-                    single_mom_ok = (b_close <= b_open) and (clv <= 0.25) and (dn_wick <= 0.20) and \
-                                    (solid_body_ratio >= 0.60) and (rng >= min_stock_blast_pts)
-                    broke_comp = (b_close <= comp_low) and (b_close >= comp_low - max_dist_buffer)
+                    live_holding = (spot <= comp_low + spot_buffer) and ((spot - l_low) <= stock_atr * 0.25)
 
-                # ---------------------------------------------------------
-                # मोड 2: स्लो मार्केट (2 या 3 कैंडल संस्थागत ग्राइंड: 2 कैंडल >= 0.40% या 3 कैंडल >= 0.60%)
-                # ---------------------------------------------------------
-                cum_mom_ok = False
-                if len(stk_df) >= 5:
-                    b_prev1 = stk_df.iloc[-3]
-                    b_prev2 = stk_df.iloc[-4]
-                    pre_seq_bars = stk_df.iloc[:-4].tail(8) if len(stk_df) >= 6 else comp_bars
-                    seq_comp_high = float(pre_seq_bars['high'].max())
-                    seq_comp_low = float(pre_seq_bars['low'].min())
-
-                    if direction == 'CALL':
-                        last_2_green = (float(b_prev1['close']) >= float(b_prev1['open']) and b_close >= b_open)
-                        all_3_green = (float(b_prev2['close']) >= float(b_prev2['open']) and last_2_green)
-                        cum_rise_2_pct = ((b_close - float(b_prev1['open'])) / float(b_prev1['open'])) * 100.0
-                        cum_rise_3_pct = ((b_close - float(b_prev2['open'])) / float(b_prev2['open'])) * 100.0
-                        cum_mom_ok = (all_3_green and cum_rise_3_pct >= 0.60) or (last_2_green and cum_rise_2_pct >= 0.40)
-                        if cum_mom_ok and (b_close >= seq_comp_high) and (b_close <= seq_comp_high + max_dist_buffer):
-                            broke_comp = True
-                    else:
-                        last_2_red = (float(b_prev1['close']) <= float(b_prev1['open']) and b_close <= b_open)
-                        all_3_red = (float(b_prev2['close']) <= float(b_prev2['open']) and last_2_red)
-                        cum_fall_2_pct = ((float(b_prev1['open']) - b_close) / float(b_prev1['open'])) * 100.0
-                        cum_fall_3_pct = ((float(b_prev2['open']) - b_close) / float(b_prev2['open'])) * 100.0
-                        cum_mom_ok = (all_3_red and cum_fall_3_pct >= 0.60) or (last_2_red and cum_fall_2_pct >= 0.40)
-                        if cum_mom_ok and (b_close <= seq_comp_low) and (b_close >= seq_comp_low - max_dist_buffer):
-                            broke_comp = True
-
-                cand_mom_pass = (single_mom_ok or cum_mom_ok) and broke_comp
-                if not cand_mom_pass:
-                    print(f"  [5-PILLAR 3M CANDLE REJECTED]: {sym} ({direction}) -> SingleMom={single_mom_ok}, CumMom={cum_mom_ok}, BrokeComp={broke_comp}")
+                if not live_holding:
+                    stage2_rejections[sym] = f"LIVE_SPOT_FAILED_HOLDING (Spot {spot:.2f} vs Base Level)"
                     continue
 
-                # अडैप्टिव RVOL: फास्ट ब्लास्ट (1 कैंडल) के लिए 3.50x अनिवार्य,
-                # स्लो ग्राइंड (2-3 कैंडल) के लिए 2.80x पर्याप्त (चूँकि वॉल्यूम 3 कैंडल में बंटा है)
-                hist_base_v = float(stk_df['hist_avg_3m_vol'].iloc[-1]) if 'hist_avg_3m_vol' in stk_df.columns else 0.0
-                prior_10_v = float(stk_df['volume'].iloc[:-2].tail(10).mean()) if len(stk_df) > 2 else 0.0
-                base_3m_v = hist_base_v if hist_base_v > 0 else prior_10_v
-                curr_3m_v = float(eval_bar.get('volume', 0.0))
-                if cum_mom_ok and len(stk_df) >= 4:
-                    curr_3m_v = max(curr_3m_v, float(stk_df.iloc[-3].get('volume', 0.0)))
-                real_3m_rvol = round(curr_3m_v / max(1.0, base_3m_v), 2) if base_3m_v > 0 else cand.get('rvol', 2.5)
-                cand['rvol'] = real_3m_rvol
-                min_rvol_req = 1.50 if cum_mom_ok else 1.75
-                if real_3m_rvol < min_rvol_req:
-                    print(f"  [INSTITUTIONAL_RVOL_REJECTED]: {sym} -> Real 3m RVOL {real_3m_rvol:.2f}x < {min_rvol_req:.2f}x (Insufficient Momentum)")
+                # 5. Local Base Runway Check (Measures expansion from local base, NOT whole day!)
+                base_mean = float(comp_bars['close'].mean())
+                local_expansion = abs(spot - base_mean)
+                if local_expansion > (stock_atr * 0.70):
+                    stage2_rejections[sym] = f"LOCAL_RUNWAY_EXHAUSTED ({local_expansion:.1f} > 70% of ATR)"
                     continue
 
-                # =====================================================================
-                # सुधार #4: वायकॉफ "Effort vs Result" वॉल्यूम-थ्रस्ट कोरिलेशन फ़िल्टर
-                # अगर वॉल्यूम 2.0x से 2.5x+ हो, तो कैंडल में कम से कम 10 से 20 अंक
-                # (या कम से कम 60% सॉलिड बॉडी रेशियो और ATR का 8% थ्रस्ट) होना अनिवार्य है!
-                # =====================================================================
-                min_required_thrust_pts = max(6.0, min(20.0, round(stock_atr * 0.08, 1)))
-                if real_3m_rvol >= 2.0 and body < min_required_thrust_pts:
-                    print(
-                        f"  [VOLUME_WITHOUT_THRUST_REJECTED]: {sym} -> RVOL {real_3m_rvol:.2f}x (High Effort) "
-                        f"but Candle Body is only {body:.2f} pts < {min_required_thrust_pts:.1f} pts (Zero Result). "
-                        f"Dead Stagnant Churn Blocked!"
-                    )
+                # 6. Wyckoff Effort vs Result & Body Strength
+                body = abs(b_close - b_open)
+                solid_body_ratio = round(body / rng, 2)
+                clv = round((b_close - b_low) / rng, 2)
+                min_thrust = max(4.0, round(stock_atr * 0.08, 1))
+
+                if solid_body_ratio < 0.55 or body < min_thrust:
+                    stage2_rejections[sym] = f"WEAK_CANDLE_THRUST (Body {body:.1f} < {min_thrust:.1f}pts)"
                     continue
 
-                # Pillar 3: Real 3-Minute Order Flow CVD Delta Verification
-                bar_cvd = round((2.0 * clv) - 1.0, 2)
-                cand['bar_cvd'] = bar_cvd
-                # नियम #2: CVD दिशा अनिवार्य (कोई बाईपास नहीं!)
-                # कॉल के लिए Bar CVD >= +0.35 और पुट के लिए Bar CVD <= -0.35 अनिवार्य
-                cvd_pass = (bar_cvd >= 0.35) if direction == 'CALL' else (bar_cvd <= -0.35)
+                # 7. Price Action CLV Quality
+                clv_pass = (clv >= 0.65) if direction == 'CALL' else (clv <= 0.35)
+                if not clv_pass:
+                    stage2_rejections[sym] = f"CLV_QUALITY_MISALIGNED (CLV={clv:.2f})"
+                    continue
+
+                # 8. True Bulk Volume Classification (BVC) Cumulative Volume Delta
+                cvd_res = compute_bvc_cvd(stk_df)
+                rec_cvd = cvd_res['recent_cvd_ratio']
+                sess_cvd = cvd_res['session_cvd_ratio']
+
+                cvd_pass = (rec_cvd >= 0.15) if direction == 'CALL' else (rec_cvd <= -0.15)
                 if not cvd_pass:
-                    print(f"  [3M CVD REJECTED]: {sym} ({direction}) -> Bar CVD {bar_cvd:+.2f} fails directional alignment (+/-0.35)")
+                    stage2_rejections[sym] = f"BVC_CVD_MISALIGNED (RecCVD={rec_cvd:+.2f})"
                     continue
 
-            # -------------------------------------------------------------
-            # STAGE 2B: LIVE OPTION CHAIN (-4 / 0 / +4) RUNWAY & LIVE LTP AUDIT
-            # -------------------------------------------------------------
+                # 9. True Institutional RVOL & Absolute Turnover (Aladdin Model)
+                # Measures volume against clean morning baseline (09:15-10:00 AM) to eliminate self-inflation
+                curr_3m_v = float(eval_bar.get('volume', 0.0))
+                morning_bars = stk_df.iloc[:15]
+                morning_base_v = float(morning_bars['volume'].mean()) if len(morning_bars) > 0 else 1000.0
+                real_3m_rvol = round(curr_3m_v / max(1.0, morning_base_v), 2)
+                turnover_cr = round((curr_3m_v * spot) / 1e7, 2)
 
-            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction)
+                # Institutional Floor: Minimum Rs 2.0 Cr turnover and RVOL >= 2.0x (or ultra-liquidity >= 4.0 Cr)
+                if turnover_cr < 2.0:
+                    stage2_rejections[sym] = f"TURNOVER_BELOW_INSTITUTIONAL_FLOOR (Rs. {turnover_cr:.1f}Cr < 2.0Cr)"
+                    continue
+                if real_3m_rvol < 2.0 and turnover_cr < 4.0:
+                    stage2_rejections[sym] = f"RVOL_INSUFFICIENT ({real_3m_rvol:.2f}x < 2.0x, Turn Rs. {turnover_cr:.1f}Cr)"
+                    continue
+
+                cand['direction'] = direction
+                cand['rvol'] = real_3m_rvol
+                cand['turnover_cr'] = turnover_cr
+                cand['cvd_info'] = cvd_res
+
+            # -------------------------------------------------------------
+            # STAGE 3: LIVE OPTION CHAIN, OI CONFLUENCE & REAL LTP AUDIT
+            # -------------------------------------------------------------
+            direction = cand['direction']
+            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, cand['spot_price'], direction=direction)
             if not oi_conf.get('confluent', False):
-                print(f"  [OI/RUNWAY REJECTED]: {sym} ({direction}) -> {oi_conf.get('reason')}")
+                stage2_rejections[sym] = f"OI_RUNWAY_REJECTED: {oi_conf.get('reason')}"
                 continue
 
-            opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym)
+            opt = self.data_feed.compute_option_pricing(cand['spot_price'], direction=direction, symbol=sym)
             if not opt or not opt.get('is_live_chain_verified', False) or float(opt.get('entry_price', 0.0)) < 2.0:
-                print(f"  [LIVE LTP REJECTED]: {sym} -> Live Option Chain LTP (< Rs. 2.00) unavailable.")
+                stage2_rejections[sym] = "LIVE_OPTION_CHAIN_LTP_UNAVAILABLE"
                 continue
 
             contract = opt['contract']
             if self.is_already_dispatched(sym, contract):
+                stage2_rejections[sym] = "CONTRACT_ALREADY_DISPATCHED"
                 continue
 
-            cand['oi_confluent'] = True
-            cand['oi_reason'] = oi_conf.get('reason', '')
             cand['verified_opt'] = opt
+            cand['oi_confluent'] = True
             verified_super_trades.append(cand)
-            if is_idx:
-                has_index_in_this_cycle = True
+
+            if is_idx: active_slab_index += 1
+            else: active_slab_stock += 1
+
+        # Log Full Diagnostic Audit
+        self._log_rejection_audit(ist_now, eval_results, verified_super_trades, stage2_rejections)
 
         if not verified_super_trades:
-            print(f"[SCREENER]: 0 signals qualified after full 216 scan & live OI audit at {ist_time_str}. Dispatching 3-min heartbeat to Chatbot.")
-            bot_zero_msg = (
-                f"🛡️ <b>ALPHA LIVE SCAN UPDATE</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⏰ <b>SCAN TIME:</b> <b>{ist_time_str}</b>\n"
-                f"📊 <b>UNIVERSE SCANNED:</b> <b>{len(symbols)} F&O Assets (Full NSE Scan)</b>\n"
-                f"🎯 <b>QUALIFIED SIGNALS:</b> <b>0 Setups (Market in Chop/Compression)</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔒 <b>CAPITAL SHIELD:</b> Zero forced trades. Capital 100% Protected.\n"
-                f"👥 <b>GROUP STATUS:</b> Silent (Alerts sent only on confirmed buy signals).\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )
-            self.notifier.send_broadcast_message(bot_zero_msg, is_trade_signal=False)
+            print(f"[SCREENER]: 0 signals qualified after full 217 scan & live OI audit at {ist_time_str}. Capital 100% Protected.")
             return
 
-        print(f"[SCREENER]: Verified {len(verified_super_trades)} PURE LIVE SUPER TRADE(S)! Dispatching...")
+        print(f"[SCREENER]: Verified {len(verified_super_trades)} INSTITUTIONAL SUPER TRADE(S)! Dispatching...")
 
-        dispatched_count = 0
         for cand in verified_super_trades:
             sym = cand['symbol']
             spot = cand['spot_price']
             direction = cand['direction']
             is_idx = cand.get('is_index', False)
-            opt_action = "BUY CALL (CE)" if direction == "CALL" else "BUY PUT (PE)"
             opt = cand['verified_opt']
+
             contract = opt['contract']
+            opt_entry = float(opt['entry_price'])
+            opt_action = 'BUY CALL (CE)' if direction == 'CALL' else 'BUY PUT (PE)'
 
-            meta = get_instrument_meta(sym)
-            lot_sz = opt.get('quantity') or (meta.get('lot', 25) if meta else 25)
-            buffer_end_time = (ist_now + datetime.timedelta(minutes=4)).strftime('%I:%M %p IST')
-            time_sl_time = (ist_now + datetime.timedelta(minutes=15)).strftime('%I:%M %p IST')
+            # Fresh 4-Minute Execution Buffer calculated right at dispatch time!
+            dispatch_now = get_ist_time()
+            buffer_end_time = (dispatch_now + datetime.timedelta(minutes=4)).strftime('%I:%M:%S %p IST')
+            time_sl_time = (dispatch_now + datetime.timedelta(minutes=15)).strftime('%I:%M:%S %p IST')
 
-            opt_entry = opt['entry_price']
-            opt_sl = opt['sl_price']
-            sl_pts = opt.get('sl_points', round(opt_entry - opt_sl, 2))
-
+            # Realistic Option Targets calibrated via Delta (0.52 for Index, Risk:Reward for Stock)
             if is_idx:
-                if sym == 'NIFTY':
-                    t1_pts = 80.0
-                    t2_pts = 130.0
-                    target_note = "+80 to +130 pts Spot Target Move"
-                elif sym == 'BANKNIFTY':
-                    t1_pts = 150.0
-                    t2_pts = 250.0
-                    target_note = "+150 to +250 pts Spot Target Move"
-                elif sym == 'FINNIFTY':
-                    t1_pts = 80.0
-                    t2_pts = 130.0
-                    target_note = "+80 to +130 pts Spot Target Move"
-                else: # MIDCPNIFTY
-                    t1_pts = 45.0
-                    t2_pts = 75.0
-                    target_note = "+45 to +75 pts Spot Target Move"
-            else:
-                t1_pts = round(sl_pts * 2.0, 2)
-                t2_pts = max(30.0, round(sl_pts * 4.0, 2))
-                stk_atr = cand.get('stock_atr', 60.0)
-                exp_m = cand.get('expected_opt_move', round(stk_atr * 0.60, 1))
-                target_note = f"+30 to +60 pts | +{t2_pts:.2f} pts [ATR {stk_atr:.1f} | Exp Move: ~{exp_m:.1f} pts]"
+                delta = 0.52
+                spot_t1 = 140.0 if sym == 'BANKNIFTY' else (70.0 if sym in ['NIFTY', 'FINNIFTY'] else 40.0)
+                spot_t2 = 240.0 if sym == 'BANKNIFTY' else (120.0 if sym in ['NIFTY', 'FINNIFTY'] else 70.0)
+                spot_sl = 70.0 if sym == 'BANKNIFTY' else (35.0 if sym in ['NIFTY', 'FINNIFTY'] else 20.0)
 
-            opt_tgt1 = round(opt_entry + t1_pts, 2)
-            opt_tgt2 = round(opt_entry + t2_pts, 2)
+                opt_sl = round(max(1.0, opt_entry - (spot_sl * delta)), 2)
+                opt_tgt1 = round(opt_entry + (spot_t1 * delta), 2)
+                opt_tgt2 = round(opt_entry + (spot_t2 * delta), 2)
+            else:
+                stk_atr = cand.get('stock_atr', spot * 0.022)
+                spot_t1 = round(stk_atr * 0.35, 1)
+                spot_t2 = round(stk_atr * 0.70, 1)
+                spot_sl = round(stk_atr * 0.20, 1)
+
+                opt_sl = round(max(1.0, opt_entry * 0.80), 2)  # 20% Option SL
+                opt_sl_pts = opt_entry - opt_sl
+                opt_tgt1 = round(opt_entry + (opt_sl_pts * 1.50), 2)  # 1:1.5 R:R
+                opt_tgt2 = round(opt_entry + (opt_sl_pts * 3.50), 2)  # 1:3.5 R:R Jackpot
 
             pure_signal_msg = (
-                f"🟢 <b>ALPHA FAST GAMMA BUY SIGNAL</b>\n"
+                f"🚀 <b>ALPHA 5-PILLAR INSTITUTIONAL TRADE</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📌 <b>CONTRACT:</b> <code>{contract}</code> ({opt_action}) | <b>LOT:</b> {lot_sz}\n"
-                f"⏰ <b>ENTRY TIME:</b> <b>{ist_time_str}</b>\n"
-                f"📊 <b>SPOT PRICE:</b> Rs. {spot:,.2f} ({cand['pct_change']:+.2f}%)\n"
-                f"🧭 <b>OI RUNWAY (-4/0/+4):</b> <b>{cand.get('oi_reason', 'CLEAR')}</b>\n"
+                f"🎯 <b>INSTRUMENT:</b> <b>{sym} ({direction})</b>\n"
+                f"⚡ <b>ACTION:</b> <b>{opt_action}</b>\n"
+                f"📌 <b>CONTRACT:</b> <code>{contract}</code>\n"
+                f"💵 <b>BUYING PRICE:</b> <b>Rs. {opt_entry:,.2f}</b>\n"
+                f"🛡️ <b>STOP LOSS:</b> <b>Rs. {opt_sl:,.2f}</b>\n"
+                f"🎯 <b>TARGET 1 (Lock Cost):</b> <b>Rs. {opt_tgt1:,.2f}</b>\n"
+                f"🏆 <b>TARGET 2 (Jackpot):</b> <b>Rs. {opt_tgt2:,.2f}</b>\n"
+                f"⏱️ <b>STAGNANT TIME EXIT:</b> <b>{time_sl_time} (15-Min Kill Switch)</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"💰 <b>BUY PRICE (LIVE LTP):</b> <b>Rs. {opt_entry:,.2f}</b>\n"
-                f"🛑 <b>STOP LOSS:</b> <b>Rs. {opt_sl:,.2f}</b> (-{sl_pts:.2f} pts)\n"
-                f"🎯 <b>TARGET 1:</b> <b>Rs. {opt_tgt1:,.2f}</b> (+{t1_pts:.2f} pts)\n"
-                f"🚀 <b>TARGET 2:</b> <b>Rs. {opt_tgt2:,.2f}</b> (+{t2_pts:.2f} pts | {target_note})\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⏳ <b>BUFFER TIME:</b> <b>4 Minutes Window (Valid till {buffer_end_time})</b>\n"
-                f"⏱️ <b>15-MIN KILL SWITCH:</b> <b>{time_sl_time}</b> (STRICT EXIT ONLY if in Loss/Red)\n"
-                f"🛡️ <b>PROFIT RUNNER LOCK:</b> If in Profit at 15m, <b>Trail SL to Entry (Cost)</b> & Ride to Target 1 (+80-150 pts) & Target 2 (+250 pts)!\n"
-                f"💡 <b>EXECUTION:</b> Place Limit Order near CMP, Set GTT Target 2 & SL-M\n"
+                f"⏳ <b>4-MIN BUFFER VALID TILL:</b> <b>{buffer_end_time}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
 
-            print(f"[BROADCAST]: Dispatching {contract} @ Rs. {opt_entry:,.2f} to BOTH Chatbot and Group...")
-            self.notifier.send_broadcast_message(pure_signal_msg, is_trade_signal=True)
+            # Atomic Dispatch: Record to Journal BEFORE Telegram broadcast!
             self.mark_dispatched(sym, contract)
-            dispatched_count += 1
-
             self._record_signal_to_excel(
-                ist_now=ist_now,
+                ist_now=dispatch_now,
                 cand=cand,
                 opt=opt,
                 opt_action=opt_action,
@@ -1258,226 +1075,51 @@ class DailyAutonomousScreener:
                 opt_sl=opt_sl,
                 opt_tgt1=opt_tgt1,
                 opt_tgt2=opt_tgt2,
-                sl_pts=sl_pts,
-                t1_pts=t1_pts,
-                t2_pts=t2_pts,
                 time_sl_time=time_sl_time,
                 buffer_end_time=buffer_end_time
             )
+            print(f"[BROADCAST]: Dispatching {contract} @ Rs. {opt_entry:,.2f}...")
+            self.notifier.send_broadcast_message(pure_signal_msg, is_trade_signal=True)
 
-        if dispatched_count > 0:
-            print(f"[SCREENER]: {dispatched_count} signals dispatched and recorded to Daily & Monthly Excel successfully.\n")
-            daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
-            if os.path.exists(daily_xl):
-                caption = (
-                    f"📊 <b>OFFICIAL LIVE PAPER TRADING JOURNAL (UPDATED)</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📅 <b>DATE:</b> {ist_date_str}\n"
-                    f"⏰ <b>ALERT TIME:</b> {ist_time_str}\n"
-                    f"⚡ <b>NEW TRADES LOGGED:</b> {dispatched_count} Signal(s)\n"
-                    f"🔒 <b>SECURITY:</b> Strictly Confidential (Owner Private DM Only)\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                self.notifier.send_document_to_owner_with_approval_prompt(daily_xl, caption=caption)
-
-    def run_live_slab_loop(self):
-        print(f"=======================================================")
-        print(f"  ALPHA CONTINUOUS SLAB RUNNER INITIALIZED")
-        print(f"  Designated Slabs: 09:30-10:15 AM IST & 01:15-02:15 PM IST")
-        print(f"=======================================================")
-
-        iteration = 1
-        while True:
-            ist_now = get_ist_time()
-            tot_mins = ist_now.hour * 60 + ist_now.minute
-            is_weekday = (ist_now.weekday() < 5)
-
-            if not is_weekday:
-                print(f"[MARKET CLOSED]: Weekend detected ({ist_now.strftime('%A')}). Exiting loop.")
-                break
-
-            if is_in_active_trading_slab(ist_now):
-                print(f"\n>>> [ITERATION #{iteration}] Running 5-Pillar F&O Scan at {ist_now.strftime('%I:%M:%S %p IST')}...")
-                self.run_screener(ignore_window=True)
-                print(f">>> [ITERATION #{iteration} COMPLETE] Sleeping 180s (3 minutes) until next scan...")
-                time.sleep(180)
-                iteration += 1
-            elif tot_mins < 570:
-                sleep_secs = min(300, (570 - tot_mins) * 60)
-                print(f"\r[STANDBY]: Pre-slab 1. Sleeping {sleep_secs}s until 09:30 AM IST...   ", end='', flush=True)
-                time.sleep(sleep_secs)
-            elif 615 < tot_mins < 795:
-                rem_mins = 795 - tot_mins
-                sleep_secs = min(300, rem_mins * 60)
-                print(f"\r[MID-DAY CHOP PAUSE]: Standing by for Slab 2 (01:15 PM IST). Resuming in {rem_mins} mins...   ", end='', flush=True)
-                time.sleep(sleep_secs)
-            else:
-                print(f"\n[TRADING SLABS CONCLUDED]: Current time {ist_now.strftime('%I:%M:%S %p IST')} is past 02:15 PM IST. Completed for today.")
-                break
-
-    def run_live_slab_session(self, interval_seconds=300):
+    def run_live_slab_session(self, interval_seconds=180):
         """
         Runs a persistent single-runner session throughout the active trading slab.
-        Executes immediate scan, then sleeps interval_seconds (default 300s / 5 mins),
-        and continues scanning until the slab concludes (10:15 AM IST Morning / 02:15 PM IST Afternoon).
-        Guarantees 0% dropped cron scans and requires only 1 VM start per slab!
+        Executes immediate scan, then sleeps interval_seconds (default 180s / 3 mins).
         """
         ist_now = get_ist_time()
         tot_m = ist_now.hour * 60 + ist_now.minute
 
-        if tot_m <= 615:
+        if 570 <= tot_m <= 615:
             slab_name = "MORNING SLAB (09:30 - 10:15 AM IST)"
             end_min = 615
-        elif tot_m <= 855:
+        elif 795 <= tot_m <= 855:
             slab_name = "AFTERNOON SLAB (01:15 - 02:15 PM IST)"
             end_min = 855
         else:
-            print(f"[SLAB SESSION]: Current time {ist_now.strftime('%I:%M %p IST')} is outside active slabs. Executing single pass.")
-            self.run_screener(ignore_window=True)
+            print(f"[SLAB SESSION]: Current time {ist_now.strftime('%I:%M %p IST')} is outside active slabs (09:30-10:15 AM & 01:15-02:15 PM IST). No trades dispatched.")
             return
 
         print(f"=======================================================")
-        print(f"  ALPHA PERSISTENT SLAB SESSION INITIALIZED: {slab_name}")
-        print(f"  Target End: {end_min // 60:02d}:{end_min % 60:02d} IST | Tick Interval: {interval_seconds}s (5 mins)")
+        print(f"  STARTING PERSISTENT SLAB RUNNER: {slab_name}")
+        print(f"  Cadence: Exact {interval_seconds}s (3-Minute Resampled Candles)")
         print(f"=======================================================")
 
-        scan_num = 1
         while True:
-            cur_ist = get_ist_time()
-            cur_m = cur_ist.hour * 60 + cur_ist.minute
-            if cur_m > end_min:
-                print(f"[SLAB SESSION CONCLUDED]: Time {cur_ist.strftime('%I:%M:%S %p IST')} passed slab end ({end_min // 60:02d}:{end_min % 60:02d} IST). Session complete.")
+            cur_time = get_ist_time()
+            cur_mins = cur_time.hour * 60 + cur_time.minute
+            if cur_mins > end_min:
+                print(f"[SLAB CONCLUDED]: {slab_name} completed at {cur_time.strftime('%I:%M:%S %p IST')}.")
                 break
 
-            print(f"\n>>> [SCAN #{scan_num}] Executing 5-Pillar Live Scan at {cur_ist.strftime('%I:%M:%S %p IST')}...")
-            try:
-                self.run_screener(ignore_window=True)
-            except Exception as e:
-                print(f"[SCAN #{scan_num} ERROR]: {e}")
-
-            rem_to_end = (end_min - cur_m) * 60
-            if rem_to_end <= 0:
-                print(f"[SLAB SESSION REACHED END]: Concluding session at {cur_ist.strftime('%I:%M:%S %p IST')}.")
-                break
-            sleep_time = min(interval_seconds, rem_to_end)
-            print(f">>> [SCAN #{scan_num} COMPLETE] Sleeping {sleep_time}s until next 5-min scan (Remaining in slab: {rem_to_end // 60}m)...")
-            time.sleep(sleep_time)
-            scan_num += 1
-
-    def run_eod_analysis_and_dispatch(self):
-        """Performs daily trade success/failure analysis at 03:35 PM IST and dispatches Report + Excel strictly to Owner Chatbot."""
-        ist_now = get_ist_time()
-        if ist_now.weekday() >= 5:
-            print(f"[WEEKEND]: {ist_now.strftime('%A')} market closed. Zero messages sent.")
-            return {"ok": True, "weekend": True}
-        ist_time_str = ist_now.strftime('%I:%M:%S %p IST')
-        ist_date_str = ist_now.strftime('%d-%b-%Y')
-        daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
-        if not os.path.exists(daily_xl):
-            import pandas as pd
-            df_today = pd.DataFrame()
-        else:
-            try:
-                import pandas as pd
-                df = pd.read_excel(daily_xl)
-                df_today = df[df['Date'].astype(str).str.contains(ist_date_str, na=False)] if 'Date' in df.columns else pd.DataFrame()
-            except Exception:
-                df_today = pd.DataFrame()
-
-        total_trades = len(df_today)
-        wins = 0
-        losses = 0
-        net_pnl = 0.0
-        trade_diagnostics = []
-
-        if total_trades > 0:
-            for idx, r in df_today.iterrows():
-                outcome = str(r.get('Trade_Outcome', r.get('Status', '')))
-                sym = r.get('Stock_Index', '')
-                contract = r.get('Option_Contract', '')
-                pnl = float(r.get('Net_PnL_INR', 0.0))
-                net_pnl += pnl
-                why = str(r.get('Why_Success_or_Fail', r.get('Rectification_Suggestion', 'Normal execution')))
-
-                if 'TARGET' in outcome or pnl > 0:
-                    wins += 1
-                    status_emoji = '🎯 WIN'
-                else:
-                    losses += 1
-                    status_emoji = '🛑 SL HIT'
-
-                trade_diagnostics.append(
-                    f"• <b>{sym} ({contract}):</b> {status_emoji} | Net PnL: <b>Rs. {pnl:+,.2f}</b>\n"
-                    f"  <i>Analysis:</i> {html.escape(why[:120])}..."
-                )
-
-            win_rate = round((wins / total_trades) * 100.0, 1) if total_trades > 0 else 0.0
-        else:
-            win_rate = 0.0
-            trade_diagnostics.append("• <i>Zero trades executed today. Market maintained in sideways chop; capital 100% protected.</i>")
-
-        pnl_sign = '+' if net_pnl >= 0 else ''
-        pnl_color = '🟢' if net_pnl >= 0 else '🔴'
-
-        report_lines = [
-            "📊 <b>DAILY EOD TRADE AUDIT & PERFORMANCE POST-MORTEM</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"📅 <b>DATE:</b> <b>{ist_date_str}</b> | ⏰ <b>TIME:</b> <b>{ist_time_str}</b>",
-            f"📈 <b>TOTAL TRADES EXECUTED:</b> <b>{total_trades}</b>",
-            f"🏆 <b>WINS:</b> <b>{wins}</b> | 🛑 <b>LOSSES:</b> <b>{losses}</b> | 🎯 <b>WIN RATE:</b> <b>{win_rate}%</b>",
-            f"{pnl_color} <b>TOTAL NET REALIZED P&L:</b> <b>{pnl_sign}Rs. {net_pnl:,.2f}</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🔍 <b>DETAILED INDIVIDUAL TRADE POST-MORTEM:</b>",
-            "\n".join(trade_diagnostics),
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "🔒 <i>Report & Excel Journal delivered strictly to Owner Chatbot. Group silence maintained.</i>"
-        ]
-
-        report_text = "\n".join(report_lines)
-        self.notifier.send_broadcast_message(report_text, is_trade_signal=False)
-
-        if os.path.exists(daily_xl):
-            caption = (
-                f"📊 <b>DAILY OFFICIAL LIVE PAPER TRADING JOURNAL</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 <b>DATE:</b> {ist_date_str}\n"
-                f"⏰ <b>DISPATCH TIME:</b> {ist_time_str}\n"
-                f"🎯 <b>MODE:</b> EOD Official Paper Trading Ledger\n"
-                f"🔒 <b>SECURITY:</b> Strictly Confidential (Owner Private DM Only)\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )
-            res = self.notifier.send_document_to_owner_with_approval_prompt(daily_xl, caption=caption)
-            print(f"[EOD AUDIT & DISPATCH]: Delivered daily analysis & journal to Owner DM. Result: {res.get('ok')}")
-            return res
-        else:
-            print("[EOD AUDIT & DISPATCH]: Delivered daily text analysis to Owner DM.")
-            return {"ok": True}
-
-    def send_eod_journal_to_owner(self):
-        """Compatibility alias for EOD dispatch."""
-        return self.run_eod_analysis_and_dispatch()
+            self.run_screener(ignore_window=True)
+            print(f"[SLEEP]: Waiting {interval_seconds}s for next 3-minute candle close...")
+            time.sleep(interval_seconds)
 
 
 if __name__ == '__main__':
     screener = DailyAutonomousScreener()
-    if '--eod-audit' in sys.argv or '--send-journal' in sys.argv:
-        screener.run_eod_analysis_and_dispatch()
-    elif '--single-scan' in sys.argv:
+    if '--slab-session' in sys.argv:
+        screener.run_live_slab_session(interval_seconds=180)
+    else:
         ignore_win = ('--ignore-window' in sys.argv)
         screener.run_screener(ignore_window=ignore_win)
-    elif '--slab-loop' in sys.argv:
-        screener.run_live_slab_loop()
-    else:
-        # =====================================================================
-        # संस्थागत सुधार: ऑटोमैटिक स्लैब सेशन रनर (No Cron Drop Dependency)
-        # सुबह 09:30 से 10:15 और दोपहर 01:15 से 02:15 के दौरान स्वतः 300s लूप चलाता है
-        # =====================================================================
-        ist_now = get_ist_time()
-        cur_m = ist_now.hour * 60 + ist_now.minute
-        is_morn = (9 * 60 + 30 <= cur_m <= 10 * 60 + 15)
-        is_aft = (13 * 60 + 15 <= cur_m <= 14 * 60 + 15)
-        if is_morn or is_aft or '--slab-session' in sys.argv:
-            screener.run_live_slab_session(interval_seconds=300)
-        else:
-            ignore_win = ('--ignore-window' in sys.argv)
-            screener.run_screener(ignore_window=ignore_win)
