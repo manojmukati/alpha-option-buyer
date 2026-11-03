@@ -1194,20 +1194,29 @@ class DailyAutonomousScreener:
             # Realistic Option Targets calibrated via Delta (0.52 for Index, Risk:Reward for Stock)
             if is_idx:
                 delta = 0.52
-                spot_t1 = 75.0 if sym == 'BANKNIFTY' else 35.0
-                spot_t2 = 150.0 if sym == 'BANKNIFTY' else 70.0
-                spot_sl = 60.0 if sym == 'BANKNIFTY' else 30.0
+                # Exact Institutional Target Mandate: +100 to +150 pts Index Target (+180 to +300 pts BankNifty)
+                spot_t1 = 180.0 if sym == 'BANKNIFTY' else 100.0
+                spot_t2 = 300.0 if sym == 'BANKNIFTY' else 150.0
+                spot_sl = 75.0 if sym == 'BANKNIFTY' else 40.0
 
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * delta)), 2)
                 opt_tgt1 = round(opt_entry + (spot_t1 * delta), 2)
                 opt_tgt2 = round(opt_entry + (spot_t2 * delta), 2)
             else:
                 stk_atr = cand.get('stock_atr', spot * 0.022)
-                # Safely read opt_sl with fallbacks
-                opt_sl = float(opt.get('stop_loss', opt.get('sl_price', round(opt_entry * 0.80, 2))))
-                opt_sl_pts = max(1.0, opt_entry - opt_sl)
-                opt_tgt1 = float(opt.get('target_1', round(opt_entry + (opt_sl_pts * 1.50), 2)))
-                opt_tgt2 = float(opt.get('target_2', round(opt_entry + (opt_sl_pts * 3.50), 2)))
+                # Exact Institutional Target Mandate: Minimum +30 to +60 pts Stock Target with Momentum
+                if spot >= 700.0:
+                    spot_t1 = max(30.0, round(stk_atr * 0.75, 1))
+                    spot_t2 = max(60.0, round(stk_atr * 1.50, 1))
+                else:
+                    spot_t1 = max(round(spot * 0.025, 1), round(stk_atr * 0.75, 1))
+                    spot_t2 = max(round(spot * 0.050, 1), round(stk_atr * 1.50, 1))
+                spot_sl = round(min(spot_t1 * 0.45, max(10.0, stk_atr * 0.30)), 1)
+
+                opt_delta = 0.50
+                opt_sl = round(max(1.0, opt_entry - (spot_sl * opt_delta)), 2)
+                opt_tgt1 = round(opt_entry + (spot_t1 * opt_delta), 2)
+                opt_tgt2 = round(opt_entry + (spot_t2 * opt_delta), 2)
 
             pure_signal_msg = (
                 f"🚀 <b>ALPHA 5-PILLAR INSTITUTIONAL TRADE</b>\n"

@@ -332,17 +332,24 @@ def simulate_trade_forward(cand, df_today, entry_idx):
 
     if is_idx:
         sym = cand['symbol']
-        spot_t1 = 75.0 if sym == 'BANKNIFTY' else 35.0
-        spot_t2 = 150.0 if sym == 'BANKNIFTY' else 70.0
-        spot_sl = 60.0 if sym == 'BANKNIFTY' else 30.0
+        # User Institutional Mandate: Minimum 100 to 150 pts Index Target
+        spot_t1 = 180.0 if sym == 'BANKNIFTY' else 100.0
+        spot_t2 = 300.0 if sym == 'BANKNIFTY' else 150.0
+        spot_sl = 75.0 if sym == 'BANKNIFTY' else 40.0
     else:
-        spot_t1 = round(atr * 0.35, 1)
-        spot_t2 = round(atr * 0.70, 1)
+        # User Institutional Mandate: Minimum 30 to 60 pts Stock Target with Momentum
+        if entry_p >= 700.0:
+            spot_t1 = max(30.0, round(atr * 0.75, 1))
+            spot_t2 = max(60.0, round(atr * 1.50, 1))
+        else:
+            spot_t1 = max(round(entry_p * 0.025, 1), round(atr * 0.75, 1))
+            spot_t2 = max(round(entry_p * 0.050, 1), round(atr * 1.50, 1))
+
         if direction == 'CALL':
             spot_sl = max(round(atr * 0.15, 1), entry_p - (cand['base_low'] - atr * 0.03))
         else:
             spot_sl = max(round(atr * 0.15, 1), (cand['base_high'] + atr * 0.03) - entry_p)
-        spot_sl = min(spot_sl, round(atr * 0.25, 1))
+        spot_sl = min(spot_sl, round(spot_t1 * 0.45, 1))
 
     bars_fwd = df_today.iloc[entry_idx + 1:]
     exit_p = entry_p
