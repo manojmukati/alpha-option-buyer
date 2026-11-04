@@ -1033,7 +1033,7 @@ class DailyAutonomousScreener:
                 f"🔒 <b>Capital Protection:</b> 100% Active (Quiet in Group)\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
-            self.notifier.send_broadcast_message(outside_msg, is_trade_signal=False)
+            # self.notifier.send_broadcast_message(outside_msg, is_trade_signal=False)  # Commented: Silent outside market hours
             return
 
         # Balanced Slab Allocation
