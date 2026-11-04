@@ -5,7 +5,7 @@ scratch/execute_latest_5d_backtest.py
 Authoritative 5-Day Backtest Ending Today (2026-10-28 to 2026-11-03).
 Uses ONLY 3-minute resampled candles.
 Applies exact production 5-pillar rules without changing any code:
-  1. Priority 1: Isolated 4-Index Evaluation (MAX_INDEX_PER_SLAB = 1)
+  1. Priority 1: Isolated 4-Index Evaluation (MAX_INDEX_PER_SLAB = 2)
   2. Priority 2: Isolated Stock F&O Universe Evaluation (MAX_STOCKS_PER_SLAB = 2)
   3. Symmetrical Macro Trend Gate (Nifty Day Open + 9-EMA alignment; Climax candle block)
   4. Anti-Chase Buffer (Max 0.08 * ATR for Stocks; Max 20 pts for Indices)
@@ -29,7 +29,7 @@ ATR_CACHE_FILE = r"c:\Users\Mohit\.gemini\antigravity\playground\aphelion-zenith
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 MIN_STOCK_PRICE = 650.0
 MIN_STOCK_ATR = 25.0
-MAX_INDEX_PER_SLAB = 1
+MAX_INDEX_PER_SLAB = 2
 MAX_STOCKS_PER_SLAB = 2
 NIFTY_HEAVYWEIGHTS = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'}
 
@@ -155,7 +155,7 @@ def check_index_signal(sym, df_today, bar_idx, regime):
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    max_allowed_base = 120.0 if sym != 'BANKNIFTY' else 280.0
+    max_allowed_base = 120.0 if sym != 'BANKNIFTY' else 350.0
     if comp_width > max_allowed_base:
         return None
 

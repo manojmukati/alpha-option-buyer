@@ -782,13 +782,17 @@ class LiveMarketDataFeed:
             res_wall_strike = None
             for up_s in upper_4[:2]:
                 st_d = strike_data[up_s]
-                if st_d['ce_oi'] > (2.2 * max(1.0, st_d['pe_oi'])) and st_d['ce_chg_oi'] > 0 and st_d['ce_vol'] > st_d['pe_vol']:
+                # True Wall: Only if Call OI is massive (> 3.5x PE), writers adding aggressive volume, and Call Vol exceeds Put Vol by 2.0x
+                if st_d['ce_oi'] > (3.5 * max(1.0, st_d['pe_oi'])) and st_d['ce_chg_oi'] > (st_d['pe_chg_oi'] * 2.0) and st_d['ce_vol'] > (st_d['pe_vol'] * 2.0):
                     res_wall_strike = up_s
                     break
 
+            # If near strike has high OI but Call Volume is exploding (Gamma Squeeze), allow the breakout!
             max_ce_oi_strike = max(window_9, key=lambda s: strike_data[s]['ce_oi'])
             if max_ce_oi_strike in ([atm_strike] + upper_4[:1]) and strike_data[max_ce_oi_strike]['ce_chg_oi'] > 0:
-                res_wall_strike = max_ce_oi_strike
+                # If Call volume > Put volume and CE OI is not heavily building, it's a short squeeze
+                if strike_data[max_ce_oi_strike]['ce_vol'] < (strike_data[max_ce_oi_strike]['pe_vol'] * 1.5):
+                    res_wall_strike = max_ce_oi_strike
 
             confluent = bool(unwinding_or_dominance and (res_wall_strike is None))
             reason = (

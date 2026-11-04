@@ -55,7 +55,7 @@ MIN_STOCK_ATR = 25.0
 
 MAX_DAILY_SUPER_TRADES = 8  # 4 Morning + 4 Afternoon
 MAX_SLAB_TRADES = 3
-MAX_INDEX_PER_SLAB = 1
+MAX_INDEX_PER_SLAB = 2
 MAX_STOCKS_PER_SLAB = 2
 NIFTY_HEAVYWEIGHTS = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'}
 
@@ -334,7 +334,7 @@ class DailyAutonomousScreener:
         comp_low = float(comp_bars['low'].min())
         comp_width = comp_high - comp_low
 
-        max_allowed_base = 120.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 280.0
+        max_allowed_base = 120.0 if sym_clean in ['NIFTY', 'FINNIFTY', 'MIDCPNIFTY'] else 350.0
         if comp_width > max_allowed_base:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_BASE_TOO_WIDE ({comp_width:.1f} > {max_allowed_base:.1f}pts)', 'is_index': True}
 
@@ -574,11 +574,11 @@ class DailyAutonomousScreener:
         if direction == 'PUT' and not allow_put:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'MACRO_REGIME_BLOCKS_PUT: {regime_reason}', 'is_index': False}
 
-        # Mega heavyweights CANNOT trade against Nifty macro direction
+        # Mega heavyweights: Only block if Nifty Macro Regime actively prohibits or dumping severely
         if sym_clean in NIFTY_HEAVYWEIGHTS:
-            if direction == 'CALL' and n_move < -10.0:
+            if direction == 'CALL' and (not allow_call or n_move < -35.0):
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty move {n_move:.1f}pts', 'is_index': False}
-            if direction == 'PUT' and n_move > +10.0:
+            if direction == 'PUT' and (not allow_put or n_move > +35.0):
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty move {n_move:+.1f}pts', 'is_index': False}
 
         # 7. Price Action CLV & Body Thrust
@@ -1390,9 +1390,12 @@ class DailyAutonomousScreener:
 
         sent_any = False
         if os.path.exists(daily_excel):
-            caption = f"📊 <b>ALPHA OPTION BUYER — DAILY EXCEL JOURNAL</b>\n📅 Date: {now_str}\n🔒 Confidential: Strictly for System Owner"
+            caption = f"📊 <b>ALPHA OPTION BUYER — DAILY EXCEL JOURNAL</b>\n📅 Date: {now_str}\n🔒 Official Paper-Trading Ledger"
             print(f"[EOD JOURNAL]: Dispatching Daily Excel Journal: {daily_excel}")
             self.notifier.send_document_to_owner_with_approval_prompt(daily_excel, caption=caption)
+            # Also dispatch document to group if group configured
+            if hasattr(self.notifier, 'send_document_to_group'):
+                self.notifier.send_document_to_group(daily_excel, caption=caption)
             sent_any = True
 
         if os.path.exists(monthly_excel):

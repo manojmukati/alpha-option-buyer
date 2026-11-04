@@ -103,6 +103,26 @@ class TelegramNotifier:
                 print(f"[TELEGRAM ERROR send_document for {cid}]: {e}")
         return res
 
+
+    def send_document_to_group(self, file_path, caption=""):
+        """Sends journal document to official Telegram group/channel."""
+        if not self.is_configured() or not self.group_chat_id:
+            return {"ok": False, "reason": "not_configured"}
+        if not os.path.exists(file_path):
+            return {"ok": False, "reason": "file_not_found"}
+        try:
+            url = f"{self.base_url}/sendDocument"
+            with open(file_path, "rb") as doc_f:
+                resp = requests.post(
+                    url,
+                    data={"chat_id": self.group_chat_id, "caption": caption, "parse_mode": "HTML"},
+                    files={"document": doc_f},
+                    timeout=30
+                )
+            return resp.json()
+        except Exception as e:
+            print(f"[TELEGRAM GROUP DOCUMENT ERROR]: {e}")
+            return {"ok": False, "error": str(e)}
     def send_document_to_owner_with_approval_prompt(self, file_path, caption=""):
         """Sends private journal/report strictly to the OWNER only. NEVER to group chat IDs."""
         if not self.is_configured():
