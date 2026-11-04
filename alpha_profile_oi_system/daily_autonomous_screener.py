@@ -470,32 +470,49 @@ class DailyAutonomousScreener:
         comp_low = float(comp_bars['low'].min())
         comp_w = comp_high - comp_low
 
-        if comp_w > stock_atr * 0.60:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'STOCK_BASE_TOO_WIDE ({comp_w:.1f} > {stock_atr * 0.60:.1f}pts)', 'is_index': False}
+        if comp_w > stock_atr * 0.65:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'STOCK_BASE_TOO_WIDE ({comp_w:.1f} > {stock_atr * 0.65:.1f}pts)', 'is_index': False}
 
-        # Anti-Chase Buffer: Maximum 0.08 * ATR runway above base (Zero chasing candle tops!)
         max_dist_buffer = stock_atr * 0.20
         direction = None
-        if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and cur_p >= (comp_high - stock_atr * 0.03):
+        if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and cur_p >= (comp_high - stock_atr * 0.04):
             direction = 'CALL'
-        elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and cur_p <= (comp_low + stock_atr * 0.03):
+        elif b_close <= comp_low and b_close >= comp_low - max_dist_buffer and b_close < b_open and cur_p <= (comp_low + stock_atr * 0.04):
             direction = 'PUT'
 
         if direction is None:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NO_8BAR_COMPRESSION_BREAKOUT_OR_CHASED', 'is_index': False}
 
-        # 2. ANTI-EXHAUSTION: "THAK RAHA HAI" / PROFIT BOOKING DETECTION
-        # Climax Candle: If single bar range is > 0.40 ATR, smart money is climaxing!
-        c_rng = b_high - b_low
-        if c_rng > stock_atr * 0.65:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLIMAX_EXHAUSTION_CANDLE ({c_rng:.1f} > {stock_atr * 0.65:.1f}pts)', 'is_index': False}
+        # Intraday VWAP Alignment (Pillar 3 Hard Floor)
+        cum_v = stk_df.iloc[:-1]['volume'].cumsum()
+        tp = (stk_df.iloc[:-1]['high'] + stk_df.iloc[:-1]['low'] + stk_df.iloc[:-1]['close']) / 3.0
+        cum_pv = (tp * stk_df.iloc[:-1]['volume']).cumsum()
+        vwap = float(cum_pv.iloc[-1] / max(1.0, float(cum_v.iloc[-1]))) if float(cum_v.iloc[-1]) > 0 else cur_p
 
-        # Prior 3-Bar Run: If stock already moved > 0.55 ATR in preceding 9 mins, energy is spent!
+        if direction == 'CALL' and cur_p < (vwap - stock_atr * 0.02):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CALL_BELOW_INTRADAY_VWAP (Spot {cur_p:.1f} < VWAP {vwap:.1f})', 'is_index': False}
+        if direction == 'PUT' and cur_p > (vwap + stock_atr * 0.02):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PUT_ABOVE_INTRADAY_VWAP (Spot {cur_p:.1f} > VWAP {vwap:.1f})', 'is_index': False}
+
+        # Pillar 5 Hard Floor: Remaining ATR Fuel (बचा हुआ पेट्रोल)
+        stk_open = float(stk_df['open'].iloc[0])
+        fuel_spent = abs(cur_p - stk_open)
+        fuel_ratio = fuel_spent / max(1.0, stock_atr)
+        if fuel_ratio > 1.25:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'FUEL_EXHAUSTED ({fuel_spent:.1f}pts > 1.25*ATR)', 'is_index': False}
+
+        # 2. ANTI-EXHAUSTION: "THAK RAHA HAI" / PROFIT BOOKING DETECTION
+        # Climax Candle: If single bar range is > 0.70 ATR, smart money is climaxing!
+        c_rng = b_high - b_low
+        if c_rng > stock_atr * 0.70:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLIMAX_EXHAUSTION_CANDLE ({c_rng:.1f} > {stock_atr * 0.70:.1f}pts)', 'is_index': False}
+
+        # Prior 3-Bar Run: If stock already moved > 0.85 ATR in preceding 9 mins, energy is spent!
         p3_low = stk_df.iloc[:-2].tail(3)['low'].min()
         p3_high = stk_df.iloc[:-2].tail(3)['high'].max()
         p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
-        if p3_move > stock_atr * 0.80:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.80:.1f}pts)', 'is_index': False}
+        if p3_move > stock_atr * 0.85:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.85:.1f}pts)', 'is_index': False}
 
         # BUG 3 FIX: Full-Day Anti-Exhaustion Check (Move > 3.20% or Day Range > 1.30 * ATR)
         stk_open = float(stk_df['open'].iloc[0])
@@ -586,20 +603,38 @@ class DailyAutonomousScreener:
             if direction == 'PUT' and (not allow_put or n_move > +35.0):
                 return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'HEAVYWEIGHT_COUNTER_TREND_BLOCKED: Nifty move {n_move:+.1f}pts', 'is_index': False}
 
-        # 7. Price Action CLV & Body Thrust
+        # --- LAYER 3: ANTI-ABSORPTION TRIGGER GATE (EFFORT VS RESULT) ---
         body = abs(b_close - b_open)
         solid_body_ratio = round(body / rng, 2)
         clv = round((b_close - b_low) / rng, 2)
-        min_thrust = max(2.5, round(stock_atr * 0.06, 1))
 
-        if solid_body_ratio < 0.50 or body < min_thrust:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'WEAK_CANDLE_THRUST (Body {body:.1f} < {min_thrust:.1f}pts)', 'is_index': False}
+        if solid_body_ratio < 0.45:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'WEAK_CANDLE_THRUST (SolidBody={solid_body_ratio:.2f} < 0.45)', 'is_index': False}
 
-        clv_pass = (clv >= 0.60) if direction == 'CALL' else (clv <= 0.40)
+        clv_pass = (clv >= 0.55) if direction == 'CALL' else (clv <= 0.45)
         if not clv_pass:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLV_QUALITY_MISALIGNED (CLV={clv:.2f})', 'is_index': False}
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLV_ABSORPTION_WICK_REJECTED (CLV={clv:.2f})', 'is_index': False}
 
-        score = min(99.0, 50.0 + min(25.0, (real_rvol - 1.0) * 10.0) + (15.0 if abs(bar_delta_ratio) >= 0.35 else 5.0) + min(10.0, turnover_cr * 1.5))
+        # =========================================================================
+        # 5-PILLAR WEIGHTED COMPOSITE SCORING (MAX 100.0)
+        # =========================================================================
+        p1_score = min(25.0, 12.0 + min(8.0, (real_rvol - 1.80) * 8.0) + min(5.0, (turnover_cr - 6.0) * 0.8))
+        p2_score = min(25.0, 12.0 + min(8.0, abs(bar_delta_ratio) * 16.0) + min(5.0, abs(rec_cvd) * 20.0))
+        tight_bonus = min(6.0, max(0.0, (0.65 - comp_w / stock_atr) * 24.0))
+        at_fresh_dhl = (b_close >= stk_day_high - stock_atr * 0.03) if direction == 'CALL' else (b_close <= stk_day_low + stock_atr * 0.03)
+        p3_score = min(20.0, 10.0 + tight_bonus + (4.0 if at_fresh_dhl else 0.0))
+        p4_score = 16.0 + (4.0 if abs(day_pct_move) >= 1.0 else 0.0)
+
+        if 0.20 <= fuel_ratio <= 0.55:
+            p5_score = 10.0
+        elif 0.55 < fuel_ratio <= 1.10:
+            p5_score = 7.5
+        elif fuel_ratio < 0.20:
+            p5_score = 6.0
+        else:
+            p5_score = 4.0
+
+        master_score = round(p1_score + p2_score + p3_score + p4_score + p5_score, 2)
 
         return {
             'symbol': sym_clean,
@@ -609,11 +644,13 @@ class DailyAutonomousScreener:
             'pct_change': float(q.get('pct_change', 0.0)),
             'rvol': real_rvol,
             'turnover_cr': turnover_cr,
-            'score': round(score, 2),
+            'score': master_score,
             'is_index': False,
             'stock_atr': stock_atr,
             'is_compression_breakout': True,
-            'cvd_info': cvd_res
+            'cvd_info': cvd_res,
+            'vwap': round(vwap, 2),
+            'fuel_ratio': round(fuel_ratio, 2)
         }
 
     def evaluate_asset(self, symbol, nifty_context=None):

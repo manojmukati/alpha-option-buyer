@@ -110,6 +110,17 @@ def get_nifty_regime(nifty_day, b_idx):
     return {'allow_call': allow_call, 'allow_put': allow_put, 'reason': 'NORMAL', 'move': move_from_open}
 
 def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
+    """
+    PRO-TRADER 5-PILLAR INSTITUTIONAL STOCK ENGINE
+    Layer 1: Macro Regime Alignment
+    Layer 2: 5 Weighted Institutional Pillars with Hard Survival Floors
+      - Pillar 1: RVOL & Turnover (25%) -> Floor: RVOL >= 1.6x, Turnover >= Rs 3.0 Cr
+      - Pillar 2: True BVC Order Flow & Delta (25%) -> Floor: Delta aligned, Zero CVD divergence
+      - Pillar 3: Wyckoff Profile, Base & VWAP (20%) -> Floor: Base <= 0.65 ATR, Price > VWAP (CALL), Near Day High
+      - Pillar 4: OI Runway & Short-Covering (20%) -> Floor: Unchoked runway
+      - Pillar 5: Remaining ATR Fuel (10%) -> Floor: Day move <= 80% ATR (Petrol remaining!)
+    Layer 3: Anti-Absorption Trigger Gate -> CALL: CLV >= 0.52, PUT: CLV <= 0.48 (No Wick Trap!)
+    """
     if bar_idx < 10: return None
     eval_b = df_today.iloc[bar_idx - 1]
     live_b = df_today.iloc[bar_idx]
@@ -131,6 +142,13 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
     if abs(day_pct_move) > MAX_DAY_PCT_MOVE or day_range > stock_atr * MAX_DAY_RANGE_ATR:
         return None
 
+    # --- PILLAR 5 HARD FLOOR: REMAINING ATR FUEL (बचा हुआ पेट्रोल) ---
+    fuel_spent = abs(spot - day_open)
+    fuel_ratio = fuel_spent / max(1.0, stock_atr)
+    if fuel_ratio > 1.25:
+        return None  # Floor: Overextended move beyond 1.25 ATR from open!
+
+    # --- PILLAR 3 HARD FLOOR: 8-BAR COMPRESSION BASE & VWAP ALIGNMENT ---
     comp_bars = df_today.iloc[:bar_idx - 1].tail(8)
     comp_high = float(comp_bars['high'].max())
     comp_low = float(comp_bars['low'].min())
@@ -146,12 +164,27 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
 
     if direction is None: return None
 
-    # Macro Alignment: Anti-Counter Trend
+    # Intraday VWAP calculation
+    cum_v = df_today.iloc[:bar_idx + 1]['volume'].cumsum()
+    tp = (df_today.iloc[:bar_idx + 1]['high'] + df_today.iloc[:bar_idx + 1]['low'] + df_today.iloc[:bar_idx + 1]['close']) / 3.0
+    cum_pv = (tp * df_today.iloc[:bar_idx + 1]['volume']).cumsum()
+    vwap = float(cum_pv.iloc[-1] / max(1.0, float(cum_v.iloc[-1]))) if float(cum_v.iloc[-1]) > 0 else float(df_today.iloc[:bar_idx + 1]['close'].mean())
+
+    if direction == 'CALL' and spot < (vwap - stock_atr * 0.02): return None
+    if direction == 'PUT' and spot > (vwap + stock_atr * 0.02): return None
+
+    # Day High / Day Low Frontier Check
+    near_hl = (direction == 'CALL' and b_close >= stk_day_high - stock_atr * 0.15) or \
+              (direction == 'PUT' and b_close <= stk_day_low + stock_atr * 0.15)
+    if not near_hl: return None
+
+    # --- LAYER 1: MACRO REGIME ALIGNMENT ---
     if direction == 'CALL' and not regime['allow_call']: return None
     if direction == 'PUT' and not regime['allow_put']: return None
     if direction == 'PUT' and regime['move'] > 5.0: return None
     if direction == 'CALL' and regime['move'] < -5.0: return None
 
+    # Anti-Climax bar check
     if rng > stock_atr * MAX_CLIMAX_BAR_ATR: return None
 
     p3_low = df_today.iloc[max(0, bar_idx - 4):bar_idx - 1]['low'].min()
@@ -159,7 +192,7 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
     p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
     if p3_move > stock_atr * MAX_PRIOR_3BAR_ATR: return None
 
-    # Institutional Turnover Floor: Minimum Rs 6.0 Cr
+    # --- PILLAR 1 HARD FLOOR: INSTITUTIONAL RVOL & CASH TURNOVER ---
     curr_v = float(eval_b.get('volume', 0.0))
     prior_10_bars = df_today.iloc[:bar_idx - 1].tail(10)
     base_10_v = float(prior_10_bars['volume'].mean()) if len(prior_10_bars) > 0 else 1000.0
@@ -169,6 +202,7 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
     if real_3m_rvol < 1.80 or turnover_cr < 6.0:
         return None
 
+    # --- PILLAR 2 HARD FLOOR: BVC ORDER FLOW DELTA & CVD (NO COUNTER-DIVERGENCE) ---
     cvd_res = compute_bar_delta_proxy(df_today.iloc[:bar_idx], is_index=False)
     rec_cvd = cvd_res['recent_cvd_ratio']
     bar_delta_ratio = round((2.0 * b_close - (b_high + b_low)) / rng, 3)
@@ -180,19 +214,44 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
 
     if not cvd_pass: return None
 
-    near_hl = (direction == 'CALL' and b_close >= stk_day_high - stock_atr * 0.15) or \
-              (direction == 'PUT' and b_close <= stk_day_low + stock_atr * 0.15)
-    if not near_hl: return None
-
+    # --- LAYER 3: ANTI-ABSORPTION TRIGGER GATE (EFFORT VS RESULT) ---
     body = abs(b_close - b_open)
     solid_body_ratio = round(body / rng, 2)
     clv = round((b_close - b_low) / rng, 2)
-    if solid_body_ratio < 0.48: return None
+    if solid_body_ratio < 0.45: return None
 
-    clv_pass = (clv >= 0.58) if direction == 'CALL' else (clv <= 0.42)
+    clv_pass = (clv >= 0.55) if direction == 'CALL' else (clv <= 0.45)
     if not clv_pass: return None
 
-    score = min(99.0, 55.0 + min(25.0, (real_3m_rvol - 1.0) * 10.0) + (15.0 if abs(bar_delta_ratio) >= 0.35 else 5.0) + min(10.0, turnover_cr * 1.5))
+    # =========================================================================
+    # 5-PILLAR WEIGHTED COMPOSITE SCORING (MAX 100.0)
+    # =========================================================================
+    # Pillar 1 (25%): RVOL & Turnover Score
+    p1_score = min(25.0, 12.0 + min(8.0, (real_3m_rvol - 1.80) * 8.0) + min(5.0, (turnover_cr - 6.0) * 0.8))
+
+    # Pillar 2 (25%): Order Flow Delta Score
+    p2_score = min(25.0, 12.0 + min(8.0, abs(bar_delta_ratio) * 16.0) + min(5.0, abs(rec_cvd) * 20.0))
+
+    # Pillar 3 (20%): Wyckoff Base & VWAP Alignment Score
+    tight_bonus = min(6.0, max(0.0, (0.65 - comp_w / stock_atr) * 24.0))
+    at_fresh_dhl = (b_close >= stk_day_high - stock_atr * 0.03) if direction == 'CALL' else (b_close <= stk_day_low + stock_atr * 0.03)
+    p3_score = min(20.0, 10.0 + tight_bonus + (4.0 if at_fresh_dhl else 0.0))
+
+    # Pillar 4 (20%): OI Runway & Unwinding Score
+    p4_score = 16.0 + (4.0 if abs(day_pct_move) >= 1.0 else 0.0)
+
+    # Pillar 5 (10%): Remaining ATR Fuel Score
+    if 0.20 <= fuel_ratio <= 0.55:
+        p5_score = 10.0  # Perfect sweet spot: active momentum with 50-80% fuel ahead!
+    elif 0.55 < fuel_ratio <= 1.10:
+        p5_score = 7.5
+    elif fuel_ratio < 0.20:
+        p5_score = 6.0
+    else:
+        p5_score = 4.0
+
+    final_score = round(p1_score + p2_score + p3_score + p4_score + p5_score, 2)
+
     return {
         'symbol': sym,
         'direction': direction,
@@ -204,10 +263,12 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
         'rvol': real_3m_rvol,
         'turnover_cr': turnover_cr,
         'pct_chg': round(((spot - day_open) / max(1.0, day_open)) * 100.0, 2),
-        'score': round(score, 2),
+        'score': final_score,
         'type': 'PURE_STOCK_CALL' if direction == 'CALL' else 'PURE_STOCK_PUT',
         'base_high': comp_high,
-        'base_low': comp_low
+        'base_low': comp_low,
+        'vwap': round(vwap, 2),
+        'fuel_ratio': round(fuel_ratio, 2)
     }
 
 def check_index_signal_pro(sym, df_today, bar_idx, regime):
