@@ -50,7 +50,8 @@ CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
 # Configurable Price Floor: Blocks penny and noisy PSU stocks (< Rs 350), allows liquid F&O leaders
-MIN_STOCK_PRICE = 350.0
+MIN_STOCK_PRICE = 650.0
+MIN_STOCK_ATR = 25.0
 
 MAX_DAILY_SUPER_TRADES = 8  # 4 Morning + 4 Afternoon
 MAX_SLAB_TRADES = 3
@@ -431,11 +432,11 @@ class DailyAutonomousScreener:
 
         stock_atr = self.get_stock_atr(sym_clean, q)
         atr_pct = (stock_atr / max(1.0, cur_p)) * 100.0
-        if cur_p < MIN_STOCK_PRICE or atr_pct < 1.0:
+        if cur_p < MIN_STOCK_PRICE or stock_atr < MIN_STOCK_ATR:
             return {
                 'symbol': sym_clean,
                 'passed': False,
-                'failed_gate': f'STOCK_PRICE_BELOW_{int(MIN_STOCK_PRICE)}_INR: Spot Rs {cur_p:.1f} < {MIN_STOCK_PRICE} (or ATR% {atr_pct:.2f}% < 1.0%)',
+                'failed_gate': f'STOCK_PRICE_OR_ATR_BELOW_FLOOR: Spot Rs {cur_p:.1f} < {MIN_STOCK_PRICE} (or ATR {stock_atr:.1f} < {MIN_STOCK_ATR})',
                 'is_index': False
             }
 
@@ -443,7 +444,7 @@ class DailyAutonomousScreener:
         pct_change = float(q.get('pct_change', 0.0))
         if abs(pct_change) < 0.35:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INSIGNIFICANT_DAY_MOVE ({pct_change:.2f}% < 0.35%)', 'is_index': False}
-        if abs(pct_change) > 3.00:
+        if abs(pct_change) > 4.50:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'EXTREME_DAY_MOVE_OVEREXTENDED ({pct_change:+.2f}% > 3.00%)', 'is_index': False}
 
         stk_df = self.data_feed.get_live_intraday_bars(sym_clean)
@@ -468,7 +469,7 @@ class DailyAutonomousScreener:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'STOCK_BASE_TOO_WIDE ({comp_w:.1f} > {stock_atr * 0.60:.1f}pts)', 'is_index': False}
 
         # Anti-Chase Buffer: Maximum 0.08 * ATR runway above base (Zero chasing candle tops!)
-        max_dist_buffer = stock_atr * 0.08
+        max_dist_buffer = stock_atr * 0.20
         direction = None
         if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and cur_p >= (comp_high - stock_atr * 0.03):
             direction = 'CALL'
@@ -481,15 +482,15 @@ class DailyAutonomousScreener:
         # 2. ANTI-EXHAUSTION: "THAK RAHA HAI" / PROFIT BOOKING DETECTION
         # Climax Candle: If single bar range is > 0.40 ATR, smart money is climaxing!
         c_rng = b_high - b_low
-        if c_rng > stock_atr * 0.40:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLIMAX_EXHAUSTION_CANDLE ({c_rng:.1f} > {stock_atr * 0.40:.1f}pts)', 'is_index': False}
+        if c_rng > stock_atr * 0.65:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'CLIMAX_EXHAUSTION_CANDLE ({c_rng:.1f} > {stock_atr * 0.65:.1f}pts)', 'is_index': False}
 
         # Prior 3-Bar Run: If stock already moved > 0.55 ATR in preceding 9 mins, energy is spent!
         p3_low = stk_df.iloc[:-2].tail(3)['low'].min()
         p3_high = stk_df.iloc[:-2].tail(3)['high'].max()
         p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
-        if p3_move > stock_atr * 0.55:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.55:.1f}pts)', 'is_index': False}
+        if p3_move > stock_atr * 0.80:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PRIOR_RUNUP_EXHAUSTED ({p3_move:.1f} > {stock_atr * 0.80:.1f}pts)', 'is_index': False}
 
         # BUG 3 FIX: Full-Day Anti-Exhaustion Check (Move > 3.20% or Day Range > 1.30 * ATR)
         stk_open = float(stk_df['open'].iloc[0])
@@ -497,8 +498,8 @@ class DailyAutonomousScreener:
         stk_day_high = float(stk_df['high'].max())
         stk_day_low = float(stk_df['low'].min())
         day_range = stk_day_high - stk_day_low
-        if abs(day_pct_move) > 3.20 or day_range > stock_atr * 1.30:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'DAY_RANGE_EXHAUSTED (Move {day_pct_move:+.2f}%, Range {day_range:.1f} > {stock_atr * 1.30:.1f}pts)', 'is_index': False}
+        if abs(day_pct_move) > 4.50 or day_range > stock_atr * 2.20:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'DAY_RANGE_EXHAUSTED (Move {day_pct_move:+.2f}%, Range {day_range:.1f} > {stock_atr * 2.20:.1f}pts)', 'is_index': False}
 
         # 3. Volume, RVOL & Turnover Floor
         curr_v = float(eval_bar.get('volume', 0.0))
@@ -533,8 +534,8 @@ class DailyAutonomousScreener:
         comp_df = stk_df.iloc[:-1]
         day_high = float(comp_df['high'].max())
         day_low = float(comp_df['low'].min())
-        near_day_high = (direction == 'CALL' and b_close >= (day_high - stock_atr * 0.12))
-        near_day_low = (direction == 'PUT' and b_close <= (day_low + stock_atr * 0.12))
+        near_day_high = (direction == 'CALL' and b_close >= (day_high - stock_atr * 0.15))
+        near_day_low = (direction == 'PUT' and b_close <= (day_low + stock_atr * 0.15))
 
         # BUG 5 FIX: Strict Day High / Day Low Check with 0.12 * ATR Buffer (Applied to Morning & Afternoon to block mid-range chop)
         if not (near_day_high or near_day_low):

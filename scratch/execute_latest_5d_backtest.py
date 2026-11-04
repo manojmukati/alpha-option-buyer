@@ -27,7 +27,8 @@ REPORT_DIR = r"c:\Users\Mohit\.gemini\antigravity\playground\aphelion-zenith\scr
 ATR_CACHE_FILE = r"c:\Users\Mohit\.gemini\antigravity\playground\aphelion-zenith\alpha_profile_oi_system\config\stock_atr_cache.json"
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-MIN_STOCK_PRICE = 350.0
+MIN_STOCK_PRICE = 650.0
+MIN_STOCK_ATR = 25.0
 MAX_INDEX_PER_SLAB = 1
 MAX_STOCKS_PER_SLAB = 2
 NIFTY_HEAVYWEIGHTS = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'}
@@ -214,6 +215,9 @@ def check_index_signal(sym, df_today, bar_idx, regime):
 def check_stock_signal(sym, df_today, bar_idx, stock_atr, regime):
     if bar_idx < 10:
         return None
+    live_spot = float(df_today.iloc[bar_idx]['close'])
+    if live_spot < MIN_STOCK_PRICE or stock_atr < MIN_STOCK_ATR:
+        return None
 
     eval_b = df_today.iloc[bar_idx - 1]
     live_b = df_today.iloc[bar_idx]
@@ -233,7 +237,7 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, regime):
     stk_day_high = float(df_today.iloc[:bar_idx + 1]['high'].max())
     stk_day_low = float(df_today.iloc[:bar_idx + 1]['low'].min())
     day_range = stk_day_high - stk_day_low
-    if abs(day_pct_move) > 3.00 or day_range > stock_atr * 1.30:
+    if abs(day_pct_move) > 4.50 or day_range > stock_atr * 2.20:
         return None
 
     comp_bars = df_today.iloc[:bar_idx - 1].tail(8)
@@ -243,7 +247,7 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, regime):
     if comp_w > stock_atr * 0.60:
         return None
 
-    max_dist_buffer = stock_atr * 0.08
+    max_dist_buffer = stock_atr * 0.20
     direction = None
     if b_close >= comp_high and b_close <= comp_high + max_dist_buffer and b_close > b_open and spot >= (comp_high - stock_atr * 0.03):
         direction = 'CALL'
@@ -259,13 +263,13 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, regime):
         return None
 
     c_rng = b_high - b_low
-    if c_rng > stock_atr * 0.40:
+    if c_rng > stock_atr * 0.65:
         return None
 
     p3_low = df_today.iloc[max(0, bar_idx - 4):bar_idx - 1]['low'].min()
     p3_high = df_today.iloc[max(0, bar_idx - 4):bar_idx - 1]['high'].max()
     p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
-    if p3_move > stock_atr * 0.55:
+    if p3_move > stock_atr * 0.80:
         return None
 
     curr_3m_v = float(eval_b.get('volume', 0.0))
@@ -290,8 +294,8 @@ def check_stock_signal(sym, df_today, bar_idx, stock_atr, regime):
         return None
 
     # Day High / Low Frontier Check (Strictly eliminates mid-range chop in both morning & afternoon)
-    near_hl = (direction == 'CALL' and b_close >= stk_day_high - stock_atr * 0.12) or \
-              (direction == 'PUT' and b_close <= stk_day_low + stock_atr * 0.12)
+    near_hl = (direction == 'CALL' and b_close >= stk_day_high - stock_atr * 0.15) or \
+              (direction == 'PUT' and b_close <= stk_day_low + stock_atr * 0.15)
     if not near_hl:
         return None
 
