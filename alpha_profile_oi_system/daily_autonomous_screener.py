@@ -392,6 +392,11 @@ class DailyAutonomousScreener:
         if idx_rvol < 1.15:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_RANGE_EXPANSION_RVOL_LOW ({idx_rvol:.2f}x < 1.15x)', 'is_index': True}
 
+        # Anti-Climax Overextended Index Check: Never chase index moves beyond 1.10% from open
+        idx_pct_move = ((cur_p - idx_day_open) / max(1.0, idx_day_open)) * 100.0
+        if abs(idx_pct_move) > 1.10:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INDEX_OVEREXTENDED_DAY_MOVE ({idx_pct_move:+.2f}% > 1.10%)', 'is_index': True}
+
         score = min(99.0, 55.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.25 else 5.0) + (10.0 if solid_body >= 0.55 else 0.0))
 
         return {
@@ -512,8 +517,8 @@ class DailyAutonomousScreener:
 
         if real_rvol < 1.80:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_BELOW_INSTITUTIONAL_FLOOR ({real_rvol:.2f}x < 1.80x)', 'is_index': False}
-        if turnover_cr < 3.0:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TURNOVER_BELOW_FLOOR (Rs {turnover_cr:.1f}Cr < 3.0Cr)', 'is_index': False}
+        if turnover_cr < 6.0:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TURNOVER_BELOW_FLOOR (Rs {turnover_cr:.1f}Cr < 6.0Cr)', 'is_index': False}
 
         # BUG 1 FIX: True Breakout Bar Delta Ratio directly from BVC Microstructure formula with CVD Non-Divergence Lock
         completed_bars = stk_df.iloc[:-1]
