@@ -693,7 +693,7 @@ class LiveMarketDataFeed:
                 }
         return None
 
-    def get_live_dual_oi_confluence(self, symbol, cur_spot_or_strike, direction='CALL'):
+    def get_live_dual_oi_confluence(self, symbol, cur_spot_or_strike, direction='CALL', target_price=None, is_index=False):
         """
         Pillar 4: True -4 Strike | 0 (ATM/Spot) | +4 Strike Live Option Chain OI & Volume Engine.
         1. Strictly requires live NSE Option Chain (returns confluent=False if missing).
@@ -765,6 +765,21 @@ class LiveMarketDataFeed:
         atm_info = strike_data[atm_strike]
         tot_ce_vol = sum(strike_data[s]['ce_vol'] for s in window_9)
         tot_pe_vol = sum(strike_data[s]['pe_vol'] for s in window_9)
+        tot_window_ce_oi = sum(strike_data[s]['ce_oi'] for s in window_9)
+        tot_window_pe_oi = sum(strike_data[s]['pe_oi'] for s in window_9)
+
+        # Solution 1: Target-Aware Runway Corridor
+        # Strikes beyond Target 2 (+ buffer) are mathematically IRRELEVANT and PRUNED!
+        if direction == 'CALL':
+            target_barrier = float(target_price) if target_price else (ref_spot + (150.0 if is_index else 60.0))
+            candidate_wall_strikes = [s for s in sorted_strikes if (ref_spot - 5.0 <= s <= target_barrier + 15.0)]
+        else:
+            target_barrier = float(target_price) if target_price else (ref_spot - (150.0 if is_index else 60.0))
+            candidate_wall_strikes = [s for s in sorted_strikes if (target_barrier - 15.0 <= s <= ref_spot + 5.0)]
+
+        # Solution 2: Absolute Liquidity Floor & Solution 4: Standing Monster OI Threshold
+        min_wall_oi = 3000.0 if is_index else 400.0
+        monster_standing_oi = 5000.0 if is_index else 500.0
 
         if direction == 'CALL':
             if atm_info['ce_ltp'] <= 0 or atm_info['ce_vol'] <= 0:
@@ -780,23 +795,32 @@ class LiveMarketDataFeed:
             unwinding_or_dominance = (atm_info['ce_chg_oi'] <= 0) or (near_ce_chg <= 0) or (near_pe_chg > near_ce_chg * 1.3)
 
             res_wall_strike = None
-            for up_s in upper_4[:2]:
+            # Scan strictly candidate strikes within Target Corridor (includes ATM 6500!)
+            for up_s in candidate_wall_strikes:
                 st_d = strike_data[up_s]
-                # True Wall: Only if Call OI is massive (> 3.5x PE), writers adding aggressive volume, and Call Vol exceeds Put Vol by 2.0x
-                if st_d['ce_oi'] > (3.5 * max(1.0, st_d['pe_oi'])) and st_d['ce_chg_oi'] > (st_d['pe_chg_oi'] * 2.0) and st_d['ce_vol'] > (st_d['pe_vol'] * 2.0):
+                ce_oi = st_d['ce_oi']
+                pe_oi = st_d['pe_oi']
+
+                if ce_oi < min_wall_oi:
+                    continue
+
+                ce_conc = ce_oi / max(1.0, tot_window_ce_oi)
+                is_concentrated = (ce_conc >= 0.20) or (ce_oi >= 1.3 * max(1.0, atm_info['ce_oi']))
+                # Safe ratio without denominator collapse
+                is_ratio_heavy = (ce_oi > 1.6 * max(100.0, pe_oi))
+                is_standing_wall = (ce_oi >= monster_standing_oi)
+                is_active_building = (st_d['ce_chg_oi'] > 0 and st_d['ce_vol'] > st_d['pe_vol'])
+
+                if (is_concentrated or is_standing_wall) and is_ratio_heavy and (is_standing_wall or is_active_building):
+                    # Gamma Squeeze check: exploding call volume > 3.0x OI allows breakout
+                    if st_d['ce_vol'] >= 8.0 * ce_oi:
+                        continue
                     res_wall_strike = up_s
                     break
 
-            # If near strike has high OI but Call Volume is exploding (Gamma Squeeze), allow the breakout!
-            max_ce_oi_strike = max(window_9, key=lambda s: strike_data[s]['ce_oi'])
-            if max_ce_oi_strike in ([atm_strike] + upper_4[:1]) and strike_data[max_ce_oi_strike]['ce_chg_oi'] > 0:
-                # If Call volume > Put volume and CE OI is not heavily building, it's a short squeeze
-                if strike_data[max_ce_oi_strike]['ce_vol'] < (strike_data[max_ce_oi_strike]['pe_vol'] * 1.5):
-                    res_wall_strike = max_ce_oi_strike
-
             confluent = bool(unwinding_or_dominance and (res_wall_strike is None))
             reason = (
-                f"CALL_4STRIKE_RUNWAY_CLEAR_ATM_{int(atm_strike)}"
+                f"CALL_RUNWAY_CLEAR_ATM_{int(atm_strike)}"
                 if confluent else
                 (f"CALL_BLOCKED_BY_RESISTANCE_WALL_AT_{int(res_wall_strike)}" if res_wall_strike else "ATM_CALL_WRITERS_NOT_UNWINDING")
             )
@@ -815,19 +839,30 @@ class LiveMarketDataFeed:
             unwinding_or_dominance = (atm_info['pe_chg_oi'] <= 0) or (near_pe_chg <= 0) or (near_ce_chg > near_pe_chg * 1.3)
 
             sup_wall_strike = None
-            for dn_s in lower_4[-2:]:
+            # Scan candidate strikes high to low for PUT down to target
+            for dn_s in sorted(candidate_wall_strikes, reverse=True):
                 st_d = strike_data[dn_s]
-                if st_d['pe_oi'] > (2.2 * max(1.0, st_d['ce_oi'])) and st_d['pe_chg_oi'] > 0 and st_d['pe_vol'] > st_d['ce_vol']:
+                pe_oi = st_d['pe_oi']
+                ce_oi = st_d['ce_oi']
+
+                if pe_oi < min_wall_oi:
+                    continue
+
+                pe_conc = pe_oi / max(1.0, tot_window_pe_oi)
+                is_concentrated = (pe_conc >= 0.20) or (pe_oi >= 1.3 * max(1.0, atm_info['pe_oi']))
+                is_ratio_heavy = (pe_oi > 1.6 * max(100.0, ce_oi))
+                is_standing_wall = (pe_oi >= monster_standing_oi)
+                is_active_building = (st_d['pe_chg_oi'] > 0 and st_d['pe_vol'] > st_d['ce_vol'])
+
+                if (is_concentrated or is_standing_wall) and is_ratio_heavy and (is_standing_wall or is_active_building):
+                    if st_d['pe_vol'] >= 8.0 * pe_oi:
+                        continue
                     sup_wall_strike = dn_s
                     break
 
-            max_pe_oi_strike = max(window_9, key=lambda s: strike_data[s]['pe_oi'])
-            if max_pe_oi_strike in ([atm_strike] + lower_4[-1:]) and strike_data[max_pe_oi_strike]['pe_chg_oi'] > 0:
-                sup_wall_strike = max_pe_oi_strike
-
             confluent = bool(unwinding_or_dominance and (sup_wall_strike is None))
             reason = (
-                f"PUT_4STRIKE_RUNWAY_CLEAR_ATM_{int(atm_strike)}"
+                f"PUT_RUNWAY_CLEAR_ATM_{int(atm_strike)}"
                 if confluent else
                 (f"PUT_BLOCKED_BY_SUPPORT_WALL_AT_{int(sup_wall_strike)}" if sup_wall_strike else "ATM_PUT_WRITERS_NOT_UNWINDING")
             )
@@ -846,13 +881,13 @@ class LiveMarketDataFeed:
             'live_chain_verified': True
         }
 
-    def compute_option_pricing(self, spot_price, direction='CALL', symbol=''):
+    def compute_option_pricing(self, spot_price, direction='CALL', symbol='', target_price=None, is_index=False):
         """
         Pulls 100% REAL Option Contract Strike, Expiry, and Live LTP directly from NSE Option Chain.
         NEVER invents synthetic prices and NEVER falls back to SPOT_GOVERNED!
         """
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-        oi_res = self.get_live_dual_oi_confluence(sym_clean, spot_price, direction=direction)
+        oi_res = self.get_live_dual_oi_confluence(sym_clean, spot_price, direction=direction, target_price=target_price, is_index=is_index)
         if not oi_res.get('live_chain_verified', False):
             return None
 

@@ -1189,7 +1189,9 @@ class DailyAutonomousScreener:
                 stage2_rejections[sym] = f"LIVE_SPOT_FAILED_HOLDING (Spot {spot:.2f} vs Base Level)"
                 continue
 
-            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction)
+            target_pts = 150.0
+            t_price = (spot + target_pts) if direction == 'CALL' else (spot - target_pts)
+            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction, target_price=t_price, is_index=True)
             if not oi_conf.get('confluent', False):
                 stage2_rejections[sym] = f"OI_RUNWAY_REJECTED: {oi_conf.get('reason')}"
                 continue
@@ -1252,9 +1254,46 @@ class DailyAutonomousScreener:
                 stage2_rejections[sym] = f"LIVE_SPOT_FAILED_HOLDING (Spot {spot:.2f} vs Base Level)"
                 continue
 
-            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction)
+            target_pts = max(30.0, min(60.0, round(stock_atr * 0.50, 1)))
+            t_price = (spot + target_pts) if direction == 'CALL' else (spot - target_pts)
+            oi_conf = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction=direction, target_price=t_price, is_index=False)
             if not oi_conf.get('confluent', False):
-                stage2_rejections[sym] = f"OI_RUNWAY_REJECTED: {oi_conf.get('reason')}"
+                rej_reason = str(oi_conf.get('reason', ''))
+                # Solution 8: Wall Rejection Mean-Reversion PUT Alpha
+                # If CALL is blocked by a confirmed Resistance Wall at the high,
+                # check if stock is exhausted and reversing -> Trigger PUT Buy!
+                if direction == 'CALL' and 'CALL_BLOCKED_BY_RESISTANCE_WALL_AT_' in rej_reason:
+                    wall_str = rej_reason.split('CALL_BLOCKED_BY_RESISTANCE_WALL_AT_')[-1]
+                    try:
+                        wall_strike = float(wall_str)
+                    except Exception:
+                        wall_strike = 0.0
+
+                    b_high = float(live_bar['high'])
+                    b_low = float(live_bar['low'])
+                    b_rng = max(1.0, b_high - b_low)
+                    wick_ratio = (b_high - l_close) / b_rng
+                    near_wall = (wall_strike > 0) and (abs(b_high - wall_strike) <= stock_atr * 0.25)
+                    fuel_exhausted = float(cand.get('fuel_spent_ratio', 0.0)) >= 0.70 or (spot - float(cand.get('day_open', spot))) >= stock_atr * 0.70
+
+                    if near_wall and fuel_exhausted and (wick_ratio >= 0.30):
+                        put_target = spot - target_pts
+                        put_oi = self.data_feed.get_live_dual_oi_confluence(sym, spot, direction='PUT', target_price=put_target, is_index=False)
+                        if put_oi.get('confluent', False):
+                            opt_put = self.data_feed.compute_option_pricing(spot, direction='PUT', symbol=sym, target_price=put_target, is_index=False)
+                            if opt_put and opt_put.get('is_live_chain_verified', False) and float(opt_put.get('entry_price', 0.0)) >= 2.0:
+                                cand_put = dict(cand)
+                                cand_put['direction'] = 'PUT'
+                                cand_put['type'] = 'INSTITUTIONAL_WALL_REJECTION_PUT'
+                                cand_put['verified_opt'] = opt_put
+                                cand_put['oi_confluent'] = True
+                                cand_put['score'] = min(95.0, cand.get('score', 85.0) + 5.0)
+                                cand_put['wall_strike'] = wall_strike
+                                verified_super_trades.append(cand_put)
+                                active_slab_stock += 1
+                                continue
+
+                stage2_rejections[sym] = f"OI_RUNWAY_REJECTED: {rej_reason}"
                 continue
 
             opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym)
@@ -1313,20 +1352,20 @@ class DailyAutonomousScreener:
             # Realistic Option Targets calibrated via Delta (0.52 for Index, Risk:Reward for Stock)
             if is_idx:
                 delta = 0.52
-                is_mid = (sym == 'MIDCPNIFTY')
-                spot_t1 = 120.0 if sym == 'BANKNIFTY' else (60.0 if is_mid else 90.0)
-                spot_t2 = 250.0 if sym == 'BANKNIFTY' else (120.0 if is_mid else 160.0)
-                spot_sl = 60.0 if sym == 'BANKNIFTY' else (30.0 if is_mid else 40.0)
+                # Pro Index Specification: 25 Spot SL | 75 Spot T1 (50% Lock & SL Cost) | 150 Spot T2 Jackpot!
+                spot_sl = 25.0
+                spot_t1 = 75.0
+                spot_t2 = 150.0
 
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * delta)), 2)
                 opt_tgt1 = round(opt_entry + (spot_t1 * delta), 2)
                 opt_tgt2 = round(opt_entry + (spot_t2 * delta), 2)
             else:
                 stk_atr = cand.get('stock_atr', spot * 0.022)
-                # Pro Option Buyer Point Targets: 25 to 50+ pts T1, 55 to 100+ pts T2!
-                spot_t1 = max(25.0, min(50.0, round(stk_atr * 0.35, 1)))
-                spot_t2 = max(55.0, min(100.0, round(stk_atr * 0.75, 1)))
-                spot_sl = max(15.0, min(30.0, round(stk_atr * 0.18, 1)))
+                # Pro Stock Specification: 10 Spot SL | 30 Spot T1 | 60 Spot T2 Jackpot!
+                spot_sl = max(10.0, min(15.0, round(stk_atr * 0.10, 1)))
+                spot_t1 = max(25.0, min(35.0, round(stk_atr * 0.30, 1)))
+                spot_t2 = max(50.0, min(70.0, round(stk_atr * 0.60, 1)))
 
                 opt_delta = 0.50
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * opt_delta)), 2)

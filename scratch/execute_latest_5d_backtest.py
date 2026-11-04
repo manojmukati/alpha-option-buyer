@@ -264,9 +264,9 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
     bar_delta_ratio = round((2.0 * b_close - (b_high + b_low)) / rng, 3)
 
     if direction == 'CALL':
-        cvd_pass = (rec_cvd >= 0.15 or bar_delta_ratio >= 0.35) and (rec_cvd >= 0.0)
+        cvd_pass = (rec_cvd >= 0.15 or bar_delta_ratio >= 0.35) and (rec_cvd >= 0.0 if day_pct_move >= 0 else True)
     else:
-        cvd_pass = (rec_cvd <= -0.15 or bar_delta_ratio <= -0.35) and (rec_cvd <= 0.0)
+        cvd_pass = (rec_cvd <= -0.15 or bar_delta_ratio <= -0.35) and (rec_cvd <= 0.0 if day_pct_move <= 0 else True)
 
     if not cvd_pass: return None
 
@@ -417,15 +417,15 @@ class ActiveTrade:
         self.is_risk_free = False
 
         if self.is_idx:
-            is_mid = (self.sym == 'MIDCPNIFTY')
-            self.spot_t1 = 120.0 if self.is_bank else (60.0 if is_mid else 90.0)
-            self.spot_t2 = 250.0 if self.is_bank else (120.0 if is_mid else 160.0)
-            self.spot_sl = 60.0 if self.is_bank else (30.0 if is_mid else 40.0)
+            # Pro Index Specification: 25 Spot SL | 75 Spot T1 (50% Lock & SL Cost) | 150 Spot T2 Jackpot!
+            self.spot_sl = 25.0
+            self.spot_t1 = 75.0
+            self.spot_t2 = 150.0
         else:
-            # Pro Option Buyer Point Targets: 25 to 50+ pts T1, 55 to 100+ pts T2!
-            self.spot_t1 = max(25.0, min(50.0, round(self.atr * 0.35, 1)))
-            self.spot_t2 = max(55.0, min(100.0, round(self.atr * 0.75, 1)))
-            self.spot_sl = max(15.0, min(30.0, round(self.atr * 0.18, 1)))
+            # Pro Stock Specification: 10 Spot SL | 30 Spot T1 | 60 Spot T2 Jackpot!
+            self.spot_sl = max(10.0, min(15.0, round(self.atr * 0.10, 1)))
+            self.spot_t1 = max(25.0, min(35.0, round(self.atr * 0.30, 1)))
+            self.spot_t2 = max(50.0, min(70.0, round(self.atr * 0.60, 1)))
 
     def update(self, b_high, b_low, b_close, ts):
         if self.is_closed: return
