@@ -1352,20 +1352,20 @@ class DailyAutonomousScreener:
             # Realistic Option Targets calibrated via Delta (0.52 for Index, Risk:Reward for Stock)
             if is_idx:
                 delta = 0.52
-                # Pro Index Specification: 25 Spot SL | 75 Spot T1 (50% Lock & SL Cost) | 150 Spot T2 Jackpot!
-                spot_sl = 25.0
-                spot_t1 = 75.0
-                spot_t2 = 150.0
+                is_mid = (sym == 'MIDCPNIFTY')
+                spot_t1 = 120.0 if sym == 'BANKNIFTY' else (60.0 if is_mid else 90.0)
+                spot_t2 = 250.0 if sym == 'BANKNIFTY' else (120.0 if is_mid else 160.0)
+                spot_sl = 60.0 if sym == 'BANKNIFTY' else (30.0 if is_mid else 40.0)
 
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * delta)), 2)
                 opt_tgt1 = round(opt_entry + (spot_t1 * delta), 2)
                 opt_tgt2 = round(opt_entry + (spot_t2 * delta), 2)
             else:
                 stk_atr = cand.get('stock_atr', spot * 0.022)
-                # Pro Stock Specification: 10 Spot SL | 30 Spot T1 | 60 Spot T2 Jackpot!
-                spot_sl = max(10.0, min(15.0, round(stk_atr * 0.10, 1)))
-                spot_t1 = max(25.0, min(35.0, round(stk_atr * 0.30, 1)))
-                spot_t2 = max(50.0, min(70.0, round(stk_atr * 0.60, 1)))
+                # Pro Option Buyer Point Targets: 25 to 50+ pts T1, 55 to 100+ pts T2!
+                spot_t1 = max(25.0, min(50.0, round(stk_atr * 0.35, 1)))
+                spot_t2 = max(55.0, min(100.0, round(stk_atr * 0.75, 1)))
+                spot_sl = max(15.0, min(30.0, round(stk_atr * 0.18, 1)))
 
                 opt_delta = 0.50
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * opt_delta)), 2)

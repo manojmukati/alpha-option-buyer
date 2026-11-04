@@ -417,15 +417,15 @@ class ActiveTrade:
         self.is_risk_free = False
 
         if self.is_idx:
-            # Pro Index Specification: 25 Spot SL | 75 Spot T1 (50% Lock & SL Cost) | 150 Spot T2 Jackpot!
-            self.spot_sl = 25.0
-            self.spot_t1 = 75.0
-            self.spot_t2 = 150.0
+            is_mid = (self.sym == 'MIDCPNIFTY')
+            self.spot_t1 = 120.0 if self.is_bank else (60.0 if is_mid else 90.0)
+            self.spot_t2 = 250.0 if self.is_bank else (120.0 if is_mid else 160.0)
+            self.spot_sl = 60.0 if self.is_bank else (30.0 if is_mid else 40.0)
         else:
-            # Pro Stock Specification: 10 Spot SL | 30 Spot T1 | 60 Spot T2 Jackpot!
-            self.spot_sl = max(10.0, min(15.0, round(self.atr * 0.10, 1)))
-            self.spot_t1 = max(25.0, min(35.0, round(self.atr * 0.30, 1)))
-            self.spot_t2 = max(50.0, min(70.0, round(self.atr * 0.60, 1)))
+            # Pro Option Buyer Point Targets: 25 to 50+ pts T1, 55 to 100+ pts T2!
+            self.spot_t1 = max(25.0, min(50.0, round(self.atr * 0.35, 1)))
+            self.spot_t2 = max(55.0, min(100.0, round(self.atr * 0.75, 1)))
+            self.spot_sl = max(15.0, min(30.0, round(self.atr * 0.18, 1)))
 
     def update(self, b_high, b_low, b_close, ts):
         if self.is_closed: return
@@ -463,18 +463,10 @@ class ActiveTrade:
                 self.exit_time = ts
                 self.is_closed = True
                 return
-            # Pro Time SL Scratch:
-            # 1. At 15m (step == 4): Scratch ONLY if trade is breaking down severely (loss > 35% of SL)
-            if self.step == 4 and cur_gain < -(self.spot_sl * 0.35):
+            # Strict 15-Minute Time SL: At 15m (step >= 5, i.e. 5 bars of 3m), if trade is dead/negative, scratch immediately!
+            if self.step >= 5 and cur_gain <= 0.0:
                 self.exit_p = b_close
-                self.exit_reason = "15M_TIME_SL_EXIT"
-                self.exit_time = ts
-                self.is_closed = True
-                return
-            # 2. At 25-30m (step >= 8): If trade is still dead/negative without any profit traction, scratch it!
-            if self.step >= 8 and cur_gain <= 0.0:
-                self.exit_p = b_close
-                self.exit_reason = "30M_DEAD_SCRATCH"
+                self.exit_reason = "15M_TIME_SL_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
