@@ -51,7 +51,7 @@ INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
 # Configurable Price Floor: Blocks penny and noisy PSU stocks (< Rs 350), allows liquid F&O leaders
 MIN_STOCK_PRICE = 650.0
-MIN_STOCK_ATR = 25.0
+MIN_STOCK_ATR = 18.0
 
 MAX_DAILY_SUPER_TRADES = 8  # 4 Morning + 4 Afternoon
 MAX_SLAB_TRADES = 3
@@ -1200,24 +1200,20 @@ class DailyAutonomousScreener:
             # Realistic Option Targets calibrated via Delta (0.52 for Index, Risk:Reward for Stock)
             if is_idx:
                 delta = 0.52
-                # Exact Institutional Target Mandate: +100 to +150 pts Index Target (+180 to +300 pts BankNifty)
-                spot_t1 = 180.0 if sym == 'BANKNIFTY' else 100.0
-                spot_t2 = 300.0 if sym == 'BANKNIFTY' else 150.0
-                spot_sl = 75.0 if sym == 'BANKNIFTY' else 40.0
+                is_mid = (sym == 'MIDCPNIFTY')
+                spot_t1 = 120.0 if sym == 'BANKNIFTY' else (60.0 if is_mid else 90.0)
+                spot_t2 = 250.0 if sym == 'BANKNIFTY' else (120.0 if is_mid else 160.0)
+                spot_sl = 60.0 if sym == 'BANKNIFTY' else (30.0 if is_mid else 40.0)
 
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * delta)), 2)
                 opt_tgt1 = round(opt_entry + (spot_t1 * delta), 2)
                 opt_tgt2 = round(opt_entry + (spot_t2 * delta), 2)
             else:
                 stk_atr = cand.get('stock_atr', spot * 0.022)
-                # Exact Institutional Target Mandate: Minimum +30 to +60 pts Stock Target with Momentum
-                if spot >= 700.0:
-                    spot_t1 = max(30.0, round(stk_atr * 0.75, 1))
-                    spot_t2 = max(60.0, round(stk_atr * 1.50, 1))
-                else:
-                    spot_t1 = max(round(spot * 0.025, 1), round(stk_atr * 0.75, 1))
-                    spot_t2 = max(round(spot * 0.050, 1), round(stk_atr * 1.50, 1))
-                spot_sl = round(min(spot_t1 * 0.45, max(10.0, stk_atr * 0.30)), 1)
+                # Pro Option Buyer Point Targets: 25 to 50+ pts T1, 55 to 100+ pts T2!
+                spot_t1 = max(25.0, min(50.0, round(stk_atr * 0.35, 1)))
+                spot_t2 = max(55.0, min(100.0, round(stk_atr * 0.75, 1)))
+                spot_sl = max(15.0, min(30.0, round(stk_atr * 0.18, 1)))
 
                 opt_delta = 0.50
                 opt_sl = round(max(1.0, opt_entry - (spot_sl * opt_delta)), 2)

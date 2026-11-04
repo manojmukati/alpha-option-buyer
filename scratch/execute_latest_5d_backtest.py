@@ -10,17 +10,19 @@ CONFIG_DIR = os.path.join(os.path.dirname(REPORT_DIR), "alpha_profile_oi_system"
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 MIN_STOCK_PRICE = 650.0
-MIN_STOCK_ATR = 25.0
+MIN_STOCK_ATR = 18.0  # Allows SBICARD (18.8), HDFCBANK (22.0), RELIANCE (30.5), eliminates BEL (7.5), ITC (5.0), ONGC (6.1), BHEL (12.5)
 
 MAX_BASE_WIDTH_ATR = 0.65
-MAX_BREAKOUT_BUFFER_ATR = 0.20
+MAX_BREAKOUT_BUFFER_ATR = 0.20  # Unchoked institutional ignition
 MAX_CLIMAX_BAR_ATR = 0.65
 MAX_PRIOR_3BAR_ATR = 0.80
 MAX_DAY_RANGE_ATR = 2.20
 MAX_DAY_PCT_MOVE = 4.50
 
-MAX_INDEX_PER_SLAB = 2
-MAX_STOCKS_PER_SLAB = 2
+# Active position caps
+MAX_ACTIVE_STOCKS = 2
+MAX_ACTIVE_BROAD_INDEX = 1   # NIFTY, MIDCPNIFTY, FINNIFTY
+MAX_ACTIVE_BANK_INDEX = 1    # BANKNIFTY
 
 def load_resampled_3m_data():
     files = glob.glob(os.path.join(CACHE_DIR, "*.parquet"))
@@ -107,7 +109,7 @@ def get_nifty_regime(nifty_day, b_idx):
     allow_put = (move_from_open <= +20.0) and (n_spot <= ema9 + 15.0)
     return {'allow_call': allow_call, 'allow_put': allow_put, 'reason': 'NORMAL', 'move': move_from_open}
 
-def check_stock_signal_elite(sym, df_today, bar_idx, stock_atr, regime):
+def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
     if bar_idx < 10: return None
     eval_b = df_today.iloc[bar_idx - 1]
     live_b = df_today.iloc[bar_idx]
@@ -120,7 +122,6 @@ def check_stock_signal_elite(sym, df_today, bar_idx, stock_atr, regime):
     b_close = float(eval_b['close'])
     rng = max(0.01, b_high - b_low)
 
-    # 1. Day Range & Percent Move
     day_open = float(df_today['open'].iloc[0])
     day_pct_move = ((spot - day_open) / max(1.0, day_open)) * 100.0
     stk_day_high = float(df_today.iloc[:bar_idx + 1]['high'].max())
@@ -130,7 +131,6 @@ def check_stock_signal_elite(sym, df_today, bar_idx, stock_atr, regime):
     if abs(day_pct_move) > MAX_DAY_PCT_MOVE or day_range > stock_atr * MAX_DAY_RANGE_ATR:
         return None
 
-    # 2. 8-Bar Compression Base & Directional Breakout
     comp_bars = df_today.iloc[:bar_idx - 1].tail(8)
     comp_high = float(comp_bars['high'].max())
     comp_low = float(comp_bars['low'].min())
@@ -146,24 +146,20 @@ def check_stock_signal_elite(sym, df_today, bar_idx, stock_atr, regime):
 
     if direction is None: return None
 
-    # 3. Macro Alignment: Anti-Counter Trend
+    # Macro Alignment: Anti-Counter Trend
     if direction == 'CALL' and not regime['allow_call']: return None
     if direction == 'PUT' and not regime['allow_put']: return None
-    # If Nifty is up from open (> +5 pts), DO NOT SHORT STOCKS (kills Maruti PUT on 02-Nov!)
     if direction == 'PUT' and regime['move'] > 5.0: return None
-    # If Nifty is down from open (< -5 pts), DO NOT BUY CALLS!
     if direction == 'CALL' and regime['move'] < -5.0: return None
 
-    # 4. Anti-Climax Expansion Cap
     if rng > stock_atr * MAX_CLIMAX_BAR_ATR: return None
 
-    # 5. Prior 3-Bar Runup
     p3_low = df_today.iloc[max(0, bar_idx - 4):bar_idx - 1]['low'].min()
     p3_high = df_today.iloc[max(0, bar_idx - 4):bar_idx - 1]['high'].max()
     p3_move = (b_close - p3_low) if direction == 'CALL' else (p3_high - b_close)
     if p3_move > stock_atr * MAX_PRIOR_3BAR_ATR: return None
 
-    # 6. Pro Institutional Turnover Floor: Minimum Rs 6.0 Cr (eliminates low-volume drift like KEI, POLICYBZR, OFSS)
+    # Institutional Turnover Floor: Minimum Rs 6.0 Cr
     curr_v = float(eval_b.get('volume', 0.0))
     prior_10_bars = df_today.iloc[:bar_idx - 1].tail(10)
     base_10_v = float(prior_10_bars['volume'].mean()) if len(prior_10_bars) > 0 else 1000.0
@@ -173,7 +169,6 @@ def check_stock_signal_elite(sym, df_today, bar_idx, stock_atr, regime):
     if real_3m_rvol < 1.80 or turnover_cr < 6.0:
         return None
 
-    # 7. BVC CVD Order Flow & Bar Delta
     cvd_res = compute_bar_delta_proxy(df_today.iloc[:bar_idx], is_index=False)
     rec_cvd = cvd_res['recent_cvd_ratio']
     bar_delta_ratio = round((2.0 * b_close - (b_high + b_low)) / rng, 3)
@@ -185,7 +180,6 @@ def check_stock_signal_elite(sym, df_today, bar_idx, stock_atr, regime):
 
     if not cvd_pass: return None
 
-    # 8. Day High / Low Frontier Check (Within 0.15 ATR)
     near_hl = (direction == 'CALL' and b_close >= stk_day_high - stock_atr * 0.15) or \
               (direction == 'PUT' and b_close <= stk_day_low + stock_atr * 0.15)
     if not near_hl: return None
@@ -216,7 +210,7 @@ def check_stock_signal_elite(sym, df_today, bar_idx, stock_atr, regime):
         'base_low': comp_low
     }
 
-def check_index_signal_elite(sym, df_today, bar_idx, regime):
+def check_index_signal_pro(sym, df_today, bar_idx, regime):
     if bar_idx < 10: return None
     eval_b = df_today.iloc[bar_idx - 1]
     live_b = df_today.iloc[bar_idx]
@@ -266,10 +260,8 @@ def check_index_signal_elite(sym, df_today, bar_idx, regime):
     idx_rvol = round(rng / max(0.5, median_rng), 2)
     if idx_rvol < 1.15: return None
 
-    # Anti-Climax Overextended Index Check: If Index already moved > 1.2% from open, do not enter late
     idx_pct_move = ((cur_p - idx_day_open) / max(1.0, idx_day_open)) * 100.0
-    if abs(idx_pct_move) > 1.10:
-        return None  # Prevents late entries when index already exhausted!
+    if abs(idx_pct_move) > 1.10: return None
 
     score = min(99.0, 60.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.25 else 5.0))
     return {
@@ -289,181 +281,242 @@ def check_index_signal_elite(sym, df_today, bar_idx, regime):
         'type': 'INDEX_INSTITUTIONAL_BREAKOUT'
     }
 
-# Forward Trade Simulation with 30-Minute Stagnant Scratch Rule for Options
-def simulate_trade_elite(cand, df_today, entry_idx):
-    direction = cand['direction']
-    entry_p = float(cand['entry_price'])
-    is_idx = cand.get('is_index', False)
-    atr = cand.get('stock_atr', 30.0)
+class ActiveTrade:
+    def __init__(self, cand, entry_idx):
+        self.cand = cand
+        self.entry_idx = entry_idx
+        self.sym = cand['symbol']
+        self.direction = cand['direction']
+        self.entry_p = float(cand['entry_price'])
+        self.is_idx = cand.get('is_index', False)
+        self.is_bank = (self.sym == 'BANKNIFTY')
+        self.atr = cand.get('stock_atr', 30.0)
+        self.step = 0
+        self.is_closed = False
+        self.exit_p = self.entry_p
+        self.exit_reason = None
+        self.exit_time = None
+        self.t1_hit = False
+        self.is_risk_free = False
 
-    if is_idx:
-        sym = cand['symbol']
-        spot_t1 = 180.0 if sym == 'BANKNIFTY' else 100.0
-        spot_t2 = 300.0 if sym == 'BANKNIFTY' else 150.0
-        spot_sl = 75.0 if sym == 'BANKNIFTY' else 40.0
-    else:
-        spot_t1 = max(30.0, round(atr * 0.75, 1))
-        spot_t2 = max(60.0, round(atr * 1.50, 1))
-        spot_sl = max(round(atr * 0.20, 1), min(round(spot_t1 * 0.45, 1), 25.0))
-
-    bars_fwd = df_today.iloc[entry_idx + 1:]
-    exit_p = entry_p
-    exit_reason = "EOD_EXIT"
-    t1_hit = False
-
-    for step, (ts, b) in enumerate(bars_fwd.iterrows()):
-        b_high = float(b['high'])
-        b_low = float(b['low'])
-        b_close = float(b['close'])
-
-        fav_move = (b_high - entry_p) if direction == 'CALL' else (entry_p - b_low)
-        adv_move = (entry_p - b_low) if direction == 'CALL' else (b_high - entry_p)
-        cur_gain = (b_close - entry_p) if direction == 'CALL' else (entry_p - b_close)
-
-        if not t1_hit and fav_move >= spot_t1:
-            t1_hit = True
-
-        if t1_hit:
-            if fav_move >= spot_t2:
-                exit_p = (entry_p + spot_t2) if direction == 'CALL' else (entry_p - spot_t2)
-                exit_reason = "TARGET_2_HIT (JACKPOT)"
-                break
-            lock_pts = spot_t1 * 0.40
-            locked_sl = (entry_p + lock_pts) if direction == 'CALL' else (entry_p - lock_pts)
-            if (direction == 'CALL' and b_low <= locked_sl) or (direction == 'PUT' and b_high >= locked_sl):
-                exit_p = locked_sl
-                exit_reason = "T1_PROFIT_LOCKED_EXIT"
-                break
+        if self.is_idx:
+            is_mid = (self.sym == 'MIDCPNIFTY')
+            self.spot_t1 = 120.0 if self.is_bank else (60.0 if is_mid else 90.0)
+            self.spot_t2 = 250.0 if self.is_bank else (120.0 if is_mid else 160.0)
+            self.spot_sl = 60.0 if self.is_bank else (30.0 if is_mid else 40.0)
         else:
-            if adv_move >= spot_sl:
-                exit_p = (entry_p - spot_sl) if direction == 'CALL' else (entry_p + spot_sl)
-                exit_reason = "SL_HIT"
-                break
-            # 15M Time SL: If position is flat or in loss after 15m
-            if step == 4 and (not t1_hit) and cur_gain <= 0.0:
-                exit_p = b_close
-                exit_reason = "15M_TIME_SL_EXIT"
-                break
-            # 30M Stagnant Option Churn Scratch: If position has not made any progress after 30 mins (10 bars)
-            if step == 9 and (not t1_hit) and cur_gain < (spot_t1 * 0.25):
-                exit_p = b_close
-                exit_reason = "30M_STAGNANT_SCRATCH"
-                break
+            # Pro Option Buyer Point Targets: 25 to 50+ pts T1, 55 to 100+ pts T2!
+            self.spot_t1 = max(25.0, min(50.0, round(self.atr * 0.35, 1)))
+            self.spot_t2 = max(55.0, min(100.0, round(self.atr * 0.75, 1)))
+            self.spot_sl = max(15.0, min(30.0, round(self.atr * 0.18, 1)))
 
-    if exit_reason == "EOD_EXIT" and len(bars_fwd) > 0:
-        exit_p = float(bars_fwd.iloc[-1]['close'])
+    def update(self, b_high, b_low, b_close, ts):
+        if self.is_closed: return
+        self.step += 1
+        fav_move = (b_high - self.entry_p) if self.direction == 'CALL' else (self.entry_p - b_low)
+        adv_move = (self.entry_p - b_low) if self.direction == 'CALL' else (b_high - self.entry_p)
+        cur_gain = (b_close - self.entry_p) if self.direction == 'CALL' else (self.entry_p - b_close)
 
-    pts_captured = round((exit_p - entry_p) if direction == 'CALL' else (entry_p - exit_p), 2)
-    sl_denom = max(0.5, spot_sl)
-    rr_realized = round(pts_captured / sl_denom, 2) if pts_captured != 0 else 0.0
+        if fav_move >= max(20.0, self.spot_t1 * 0.40):
+            self.is_risk_free = True
 
-    return {
-        'symbol': cand['symbol'],
-        'direction': cand['direction'],
-        'entry_price': cand['entry_price'],
-        'eval_time': cand['eval_time'],
-        'is_index': cand['is_index'],
-        'stock_atr': cand.get('stock_atr', 0),
-        'rvol': cand['rvol'],
-        'turnover_cr': cand['turnover_cr'],
-        'pct_chg': cand['pct_chg'],
-        'score': cand['score'],
-        'type': cand['type'],
-        'exit_price': exit_p,
-        'points_captured': pts_captured,
-        'spot_sl': spot_sl,
-        'spot_t1': spot_t1,
-        'spot_t2': spot_t2,
-        'exit_reason': exit_reason,
-        'realized_r': rr_realized
-    }
+        if not self.t1_hit and fav_move >= self.spot_t1:
+            self.t1_hit = True
+            self.is_risk_free = True
 
-# Run the 5-day Backtest
-print("Loading latest resampled 3m data...")
-asset_data = load_resampled_3m_data()
-atrs = load_verified_atrs()
-all_dates = sorted(list(set(d for df in asset_data.values() for d in df.index.date)))
-print(f"Loaded {len(asset_data)} active assets. Backtest dates: {[str(d) for d in all_dates]}")
+        if self.t1_hit:
+            if fav_move >= self.spot_t2:
+                self.exit_p = (self.entry_p + self.spot_t2) if self.direction == 'CALL' else (self.entry_p - self.spot_t2)
+                self.exit_reason = "TARGET_2_HIT (JACKPOT)"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+            lock_pts = self.spot_t1 * 0.40
+            locked_sl = (self.entry_p + lock_pts) if self.direction == 'CALL' else (self.entry_p - lock_pts)
+            if (self.direction == 'CALL' and b_low <= locked_sl) or (self.direction == 'PUT' and b_high >= locked_sl):
+                self.exit_p = locked_sl
+                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+        else:
+            if adv_move >= self.spot_sl:
+                self.exit_p = (self.entry_p - self.spot_sl) if self.direction == 'CALL' else (self.entry_p + self.spot_sl)
+                self.exit_reason = "SL_HIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+            # Pro Time SL Scratch:
+            # 1. At 15m (step == 4): Scratch ONLY if trade is breaking down severely (loss > 35% of SL)
+            if self.step == 4 and cur_gain < -(self.spot_sl * 0.35):
+                self.exit_p = b_close
+                self.exit_reason = "15M_TIME_SL_EXIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+            # 2. At 25-30m (step >= 8): If trade is still dead/negative without any profit traction, scratch it!
+            if self.step >= 8 and cur_gain <= 0.0:
+                self.exit_p = b_close
+                self.exit_reason = "30M_DEAD_SCRATCH"
+                self.exit_time = ts
+                self.is_closed = True
+                return
 
-stock_syms = [s for s in asset_data.keys() if s not in INDEX_NAMES]
-executed_trades = []
+    def close_eod(self, final_close, ts):
+        if not self.is_closed:
+            self.exit_p = final_close
+            self.exit_reason = "EOD_EXIT"
+            self.exit_time = ts
+            self.is_closed = True
 
-for d in all_dates:
-    nifty_day = asset_data['NIFTY'][asset_data['NIFTY'].index.date == d].copy()
-    if nifty_day.empty: continue
-    nifty_day['ema9'] = nifty_day['close'].ewm(span=9, adjust=False).mean()
+    def get_summary(self, d_str):
+        pts_captured = round((self.exit_p - self.entry_p) if self.direction == 'CALL' else (self.entry_p - self.exit_p), 2)
+        sl_denom = max(0.5, self.spot_sl)
+        rr_realized = round(pts_captured / sl_denom, 2) if pts_captured != 0 else 0.0
+        return {
+            'date': d_str,
+            'symbol': self.sym,
+            'direction': self.direction,
+            'entry_price': self.entry_p,
+            'eval_time': self.cand['eval_time'],
+            'exit_time': self.exit_time,
+            'is_index': self.is_idx,
+            'stock_atr': self.atr,
+            'rvol': self.cand['rvol'],
+            'turnover_cr': self.cand['turnover_cr'],
+            'pct_chg': self.cand['pct_chg'],
+            'score': self.cand['score'],
+            'type': self.cand['type'],
+            'exit_price': self.exit_p,
+            'points_captured': pts_captured,
+            'spot_sl': self.spot_sl,
+            'spot_t1': self.spot_t1,
+            'spot_t2': self.spot_t2,
+            'exit_reason': self.exit_reason,
+            'realized_r': rr_realized
+        }
 
-    m_idx, m_stk = set(), set()
-    a_idx, a_stk = set(), set()
-    time_index = nifty_day.index
+if __name__ == "__main__":
+    print("Loading latest resampled 3m data...")
+    asset_data = load_resampled_3m_data()
+    atrs = load_verified_atrs()
+    all_dates = sorted(list(set(d for df in asset_data.values() for d in df.index.date)))
+    stock_syms = [s for s in asset_data.keys() if s not in INDEX_NAMES]
+    all_executed_trades = []
 
-    for b_idx in range(10, len(time_index)):
-        curr_t = time_index[b_idx]
-        tot_m = curr_t.hour * 60 + curr_t.minute
-        is_m = (570 <= tot_m <= 615)
-        is_a = (795 <= tot_m <= 855)
-        if not (is_m or is_a): continue
+    print(f"Loaded {len(asset_data)} active assets. Backtest dates: {[str(d) for d in all_dates]}")
 
-        regime = get_nifty_regime(nifty_day, b_idx)
-        if not (regime['allow_call'] or regime['allow_put']): continue
+    for d in all_dates:
+        nifty_day = asset_data['NIFTY'][asset_data['NIFTY'].index.date == d].copy()
+        if nifty_day.empty: continue
+        nifty_day['ema9'] = nifty_day['close'].ewm(span=9, adjust=False).mean()
 
-        # 1. INDEX
-        c_idx = len(m_idx) if is_m else len(a_idx)
-        if c_idx < 2:
+        active_trades = []
+        daily_traded_symbols = set()
+        time_index = nifty_day.index
+
+        for b_idx in range(10, len(time_index)):
+            curr_t = time_index[b_idx]
+            tot_m = curr_t.hour * 60 + curr_t.minute
+            is_m = (570 <= tot_m <= 615)
+            is_a = (795 <= tot_m <= 855)
+
+            # 1. Update active trades using exact timestamp matching!
+            for tr in active_trades:
+                if not tr.is_closed:
+                    df_asset = asset_data[tr.sym][asset_data[tr.sym].index.date == d]
+                    if curr_t in df_asset.index:
+                        b = df_asset.loc[curr_t]
+                        if isinstance(b, pd.DataFrame): b = b.iloc[0]
+                        tr.update(float(b['high']), float(b['low']), float(b['close']), curr_t)
+
+            # Remove closed trades from active list
+            active_trades = [tr for tr in active_trades if not tr.is_closed]
+
+            if not (is_m or is_a): continue
+
+            regime = get_nifty_regime(nifty_day, b_idx)
+            if not (regime['allow_call'] or regime['allow_put']): continue
+
+            # Count active positions with capital at risk (Risk-free runners with locked profit don't consume slots!)
+            act_stocks = sum(1 for tr in active_trades if (not tr.is_idx) and (not tr.is_risk_free))
+            act_broad_idx = sum(1 for tr in active_trades if tr.is_idx and (not tr.is_bank) and (not tr.is_risk_free))
+            act_bank_idx = sum(1 for tr in active_trades if tr.is_idx and tr.is_bank and (not tr.is_risk_free))
+
+            # 2. Check Index Candidates
             for isym in INDEX_NAMES:
-                if isym not in asset_data or isym in (m_idx if is_m else a_idx): continue
+                if isym not in asset_data or isym in daily_traded_symbols: continue
+                is_bank = (isym == 'BANKNIFTY')
+                if is_bank and act_bank_idx >= MAX_ACTIVE_BANK_INDEX: continue
+                if (not is_bank) and act_broad_idx >= MAX_ACTIVE_BROAD_INDEX: continue
+
                 idf = asset_data[isym][asset_data[isym].index.date == d]
                 if len(idf) <= b_idx: continue
-                sig = check_index_signal_elite(isym, idf, b_idx, regime)
+                sig = check_index_signal_pro(isym, idf, b_idx, regime)
                 if sig:
-                    out = simulate_trade_elite(sig, idf, b_idx)
-                    out['date'] = str(d)
-                    executed_trades.append(out)
-                    if is_m: m_idx.add(isym)
-                    else: a_idx.add(isym)
-                    if len(m_idx if is_m else a_idx) >= 2: break
+                    trade = ActiveTrade(sig, b_idx)
+                    active_trades.append(trade)
+                    all_executed_trades.append(trade)
+                    daily_traded_symbols.add(isym)
+                    if is_bank: act_bank_idx += 1
+                    else: act_broad_idx += 1
 
-        # 2. STOCKS
-        c_stk = len(m_stk) if is_m else len(a_stk)
-        if c_stk < 2:
-            stk_candidates = []
-            for ssym in stock_syms:
-                if ssym in (m_stk if is_m else a_stk): continue
-                sdf = asset_data[ssym][asset_data[ssym].index.date == d]
-                if len(sdf) <= b_idx: continue
-                satr = float(atrs.get(ssym, 30.0))
-                sig = check_stock_signal_elite(ssym, sdf, b_idx, satr, regime)
-                if sig:
-                    stk_candidates.append(sig)
+            # 3. Check Stock Candidates (Ranked by institutional score!)
+            if act_stocks < MAX_ACTIVE_STOCKS:
+                stock_cands = []
+                for ssym in stock_syms:
+                    if ssym in daily_traded_symbols: continue
+                    sdf = asset_data[ssym][asset_data[ssym].index.date == d]
+                    if len(sdf) <= b_idx: continue
+                    stock_atr = atrs.get(ssym, 30.0)
+                    sig = check_stock_signal_pro(ssym, sdf, b_idx, stock_atr, regime)
+                    if sig:
+                        stock_cands.append(sig)
 
-            stk_candidates.sort(key=lambda x: (x['score'], x['turnover_cr']), reverse=True)
-            for cand in stk_candidates[:2 - c_stk]:
-                out = simulate_trade_elite(cand, asset_data[cand['symbol']][asset_data[cand['symbol']].index.date == d], b_idx)
-                out['date'] = str(d)
-                executed_trades.append(out)
-                if is_m: m_stk.add(cand['symbol'])
-                else: a_stk.add(cand['symbol'])
-                c_stk += 1
+                # Sort by institutional score descending!
+                stock_cands.sort(key=lambda x: x['score'], reverse=True)
+                slots_available = MAX_ACTIVE_STOCKS - act_stocks
+                for chosen in stock_cands[:slots_available]:
+                    trade = ActiveTrade(chosen, b_idx)
+                    active_trades.append(trade)
+                    all_executed_trades.append(trade)
+                    daily_traded_symbols.add(chosen['symbol'])
+                    act_stocks += 1
 
-df_elite = pd.DataFrame(executed_trades)
-print("=" * 80)
-print("ELITE QUANT BACKTEST (ZERO CHOP & HIGH-VELOCITY TRADES)")
-print("=" * 80)
-print(f"Total Dispatched Trades: {len(df_elite)}")
-wins = df_elite[df_elite['realized_r'] > 0]
-scratches = df_elite[(df_elite['realized_r'] <= 0) & (df_elite['realized_r'] > -0.80)]
-full_sl = df_elite[df_elite['realized_r'] <= -0.80]
+        # End of day: close remaining active trades
+        for tr in active_trades:
+            if not tr.is_closed:
+                df_asset = asset_data[tr.sym][asset_data[tr.sym].index.date == d]
+                if len(df_asset) > 0:
+                    final_close = float(df_asset.iloc[-1]['close'])
+                    tr.close_eod(final_close, df_asset.index[-1])
 
-print(f"Wins: {len(wins)} ({len(wins)/max(1, len(df_elite))*100:.1f}%)")
-print(f"Scratches: {len(scratches)}")
-print(f"Full Stoploss: {len(full_sl)}")
-gross_profit = wins['realized_r'].sum()
-gross_loss = abs(df_elite[df_elite['realized_r'] < 0]['realized_r'].sum())
-net_profit = gross_profit - gross_loss
-pf = gross_profit / max(0.01, gross_loss)
-print(f"Gross Profit: +{gross_profit:.2f}R | Gross Loss: -{gross_loss:.2f}R | Net Profit: +{net_profit:.2f}R | Profit Factor: {pf:.2f}")
+    trade_summaries = [tr.get_summary(str(tr.cand['eval_time'].date())) for tr in all_executed_trades]
+    df_res = pd.DataFrame(trade_summaries)
 
-print("\n--- ALL EXECUTED TRADES ---")
-for idx, r in df_elite.iterrows():
-    t_str = str(r['eval_time'])[11:16]
-    print(f"{r['date']} {t_str} | {r['symbol']:<12} | {r['direction']:<4} | En: {r['entry_price']:>8.2f} | Ex: {r['exit_price']:>8.2f} | Pts: {r['points_captured']:>+7.2f} | R: {r['realized_r']:>+5.2f}R | {r['exit_reason']}")
+    csv_path = os.path.join(REPORT_DIR, "Alpha_Latest_5Day_Ending_Today_Backtest.csv")
+    df_res.to_csv(csv_path, index=False)
+    print(f"\nSaved authoritative backtest CSV to: {csv_path}")
+
+    print("\n" + "="*80)
+    print("PRO-TRADER SEPARATED ENGINE (TRUE HIGH-MOMENTUM WINNERS)")
+    print("="*80)
+    print(f"Total Dispatched Trades: {len(df_res)}")
+    wins = df_res[df_res['points_captured'] > 0]
+    losses = df_res[df_res['points_captured'] <= 0]
+    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL', na=False)]
+    full_sl = df_res[df_res['exit_reason'] == 'SL_HIT']
+
+    gross_p = wins['realized_r'].sum()
+    gross_l = abs(losses['realized_r'].sum())
+    net_p = gross_p - gross_l
+    pf = round(gross_p / max(0.01, gross_l), 2)
+
+    print(f"Wins: {len(wins)} ({len(wins)/max(1, len(df_res))*100:.1f}%)")
+    print(f"Scratches: {len(scratches)}")
+    print(f"Full Stoploss: {len(full_sl)}")
+    print(f"Gross Profit: +{gross_p:.2f}R | Gross Loss: -{gross_l:.2f}R | Net Profit: +{net_p:.2f}R | Profit Factor: {pf}")
+    print("\n--- ALL EXECUTED TRADES ---")
+    for _, r in df_res.iterrows():
+        e_str = r['eval_time'].strftime('%Y-%m-%d %H:%M')
+        print(f"{e_str} | {r['symbol']:<12} | {r['direction']:<4} | En: {r['entry_price']:8.2f} | Ex: {r['exit_price']:8.2f} | Pts: {r['points_captured']:+7.2f} | R: {r['realized_r']:+5.2f}R | {r['exit_reason']}")
