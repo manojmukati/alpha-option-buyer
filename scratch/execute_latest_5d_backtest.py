@@ -19,6 +19,22 @@ MAX_PRIOR_3BAR_ATR = 0.80
 MAX_DAY_RANGE_ATR = 2.20
 MAX_DAY_PCT_MOVE = 4.50
 
+# Sector mapping for anti-correlation de-duplication
+STOCK_SECTOR_MAP = {
+    'ICICIBANK': 'BANK', 'AXISBANK': 'BANK', 'HDFCBANK': 'BANK', 'KOTAKBANK': 'BANK', 'SBIN': 'BANK', 'INDUSINDBK': 'BANK',
+    'INFY': 'IT', 'PERSISTENT': 'IT', 'TCS': 'IT', 'WIPRO': 'IT', 'HCLTECH': 'IT', 'TECHM': 'IT', 'COFORGE': 'IT',
+    'PAYTM': 'FINTECH', 'BAJFINANCE': 'NBFC', 'CHOLAFIN': 'NBFC', 'BAJAJFINSV': 'NBFC', 'MUTHOOTFIN': 'NBFC', 'SHRIRAMFIN': 'NBFC',
+    'HYUNDAI': 'AUTO', 'MARUTI': 'AUTO', 'ATHERENERG': 'AUTO', 'TATAMOTORS': 'AUTO', 'M&M': 'AUTO', 'BAJAJ-AUTO': 'AUTO',
+    'JSWSTEEL': 'METALS', 'APLAPOLLO': 'METALS', 'TATASTEEL': 'METALS', 'HINDALCO': 'METALS', 'VEDL': 'METALS',
+    'LT': 'INFRA', 'POWERINDIA': 'POWER', 'NTPC': 'POWER', 'POWERGRID': 'POWER', 'TATAPOWER': 'POWER',
+    'AMBER': 'EMS', 'DIXON': 'EMS', 'KAYNES': 'EMS',
+    'RELIANCE': 'ENERGY', 'ONGC': 'ENERGY', 'BPCL': 'ENERGY', 'IOC': 'ENERGY',
+    'BSE': 'EXCHANGE', 'MCX': 'EXCHANGE',
+    'ZYDUSLIFE': 'PHARMA', 'SUNPHARMA': 'PHARMA', 'DRREDDY': 'PHARMA', 'CIPLA': 'PHARMA',
+    'TRENT': 'RETAIL', 'DMART': 'RETAIL', 'ADANIPORTS': 'PORTS',
+    'HDFCAMC': 'AMC', 'NAM-INDIA': 'AMC'
+}
+
 # Active position caps
 MAX_ACTIVE_STOCKS = 2
 MAX_ACTIVE_BROAD_INDEX = 1   # NIFTY, MIDCPNIFTY, FINNIFTY
@@ -201,6 +217,46 @@ def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
 
     if real_3m_rvol < 1.80 or turnover_cr < 6.0:
         return None
+
+    # --- PRO-TRADER RULE 3: LUNCHTIME / EUROPEAN OPEN COMPRESSION GATE (13:15 to 13:50 IST) ---
+    import datetime
+    eval_ts = df_today.index[bar_idx]
+    b_time = eval_ts.time()
+    if datetime.time(13, 15) <= b_time <= datetime.time(13, 50):
+        if turnover_cr < 10.0 or real_3m_rvol < 2.50:
+            return None
+
+    # --- PRO-TRADER RULES 1 & 2: DUAL-REGIME INSTITUTIONAL FRONTIER ---
+    # Regime A: Continuation Breakout (Green for CALL / Red for PUT at fresh Day High/Low)
+    # Regime B: Wyckoff Spring Bottom Reversal (Red Stock with bottom accumulation + clear runway to Open)
+    if direction == 'CALL':
+        if day_pct_move >= 0.0:
+            # Regime A: Continuation Breakout (Green Stock)
+            if b_close < stk_day_high - stock_atr * 0.15: return None
+            if abs(day_pct_move) > 3.40: return None
+            if fuel_ratio > 1.10: return None
+        else:
+            # Regime B: Wyckoff Spring Bottom Reversal (Red Stock with bottom buying)
+            # Required: Clean Runway to Day Open must be >= 0.40 * ATR (not choking right under open!)
+            runway_to_open = day_open - spot
+            runway_ratio = runway_to_open / max(1.0, stock_atr)
+            if runway_ratio < 0.40: return None
+            # Base must be formed at Day Low
+            if comp_low > stk_day_low + stock_atr * 0.08: return None
+            if real_3m_rvol < 2.20: return None
+    else: # PUT
+        if day_pct_move <= 0.0:
+            # Regime A: Continuation Breakdown (Red Stock)
+            if b_close > stk_day_low + stock_atr * 0.15: return None
+            if abs(day_pct_move) > 3.40: return None
+            if fuel_ratio > 1.10: return None
+        else:
+            # Regime B: UTAD Top Reversal (Green Stock with top distribution)
+            runway_to_open = spot - day_open
+            runway_ratio = runway_to_open / max(1.0, stock_atr)
+            if runway_ratio < 0.40: return None
+            if comp_high < stk_day_high - stock_atr * 0.08: return None
+            if real_3m_rvol < 2.20: return None
 
     # --- PILLAR 2 HARD FLOOR: BVC ORDER FLOW DELTA & CVD (NO COUNTER-DIVERGENCE) ---
     cvd_res = compute_bar_delta_proxy(df_today.iloc[:bar_idx], is_index=False)
@@ -474,6 +530,7 @@ if __name__ == "__main__":
 
         active_trades = []
         daily_traded_symbols = set()
+        sector_last_trade = {}
         time_index = nifty_day.index
 
         for b_idx in range(10, len(time_index)):
@@ -537,7 +594,18 @@ if __name__ == "__main__":
                 # Sort by institutional score descending!
                 stock_cands.sort(key=lambda x: x['score'], reverse=True)
                 slots_available = MAX_ACTIVE_STOCKS - act_stocks
-                for chosen in stock_cands[:slots_available]:
+                chosen_batch = []
+                for cand in stock_cands:
+                    if len(chosen_batch) >= slots_available:
+                        break
+                    sec = STOCK_SECTOR_MAP.get(cand['symbol'], cand['symbol'])
+                    last_sec_t = sector_last_trade.get(sec)
+                    if last_sec_t and (curr_t - last_sec_t).total_seconds() < 1800:
+                        continue
+                    chosen_batch.append(cand)
+                    sector_last_trade[sec] = curr_t
+
+                for chosen in chosen_batch:
                     trade = ActiveTrade(chosen, b_idx)
                     active_trades.append(trade)
                     all_executed_trades.append(trade)

@@ -59,6 +59,22 @@ MAX_INDEX_PER_SLAB = 2
 MAX_STOCKS_PER_SLAB = 2
 NIFTY_HEAVYWEIGHTS = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'}
 
+# Sector mapping for anti-correlation de-duplication
+STOCK_SECTOR_MAP = {
+    'ICICIBANK': 'BANK', 'AXISBANK': 'BANK', 'HDFCBANK': 'BANK', 'KOTAKBANK': 'BANK', 'SBIN': 'BANK', 'INDUSINDBK': 'BANK',
+    'INFY': 'IT', 'PERSISTENT': 'IT', 'TCS': 'IT', 'WIPRO': 'IT', 'HCLTECH': 'IT', 'TECHM': 'IT', 'COFORGE': 'IT',
+    'PAYTM': 'FINTECH', 'BAJFINANCE': 'NBFC', 'CHOLAFIN': 'NBFC', 'BAJAJFINSV': 'NBFC', 'MUTHOOTFIN': 'NBFC', 'SHRIRAMFIN': 'NBFC',
+    'HYUNDAI': 'AUTO', 'MARUTI': 'AUTO', 'ATHERENERG': 'AUTO', 'TATAMOTORS': 'AUTO', 'M&M': 'AUTO', 'BAJAJ-AUTO': 'AUTO',
+    'JSWSTEEL': 'METALS', 'APLAPOLLO': 'METALS', 'TATASTEEL': 'METALS', 'HINDALCO': 'METALS', 'VEDL': 'METALS',
+    'LT': 'INFRA', 'POWERINDIA': 'POWER', 'NTPC': 'POWER', 'POWERGRID': 'POWER', 'TATAPOWER': 'POWER',
+    'AMBER': 'EMS', 'DIXON': 'EMS', 'KAYNES': 'EMS',
+    'RELIANCE': 'ENERGY', 'ONGC': 'ENERGY', 'BPCL': 'ENERGY', 'IOC': 'ENERGY',
+    'BSE': 'EXCHANGE', 'MCX': 'EXCHANGE',
+    'ZYDUSLIFE': 'PHARMA', 'SUNPHARMA': 'PHARMA', 'DRREDDY': 'PHARMA', 'CIPLA': 'PHARMA',
+    'TRENT': 'RETAIL', 'DMART': 'RETAIL', 'ADANIPORTS': 'PORTS',
+    'HDFCAMC': 'AMC', 'NAM-INDIA': 'AMC'
+}
+
 
 def is_in_active_trading_slab(ist_time):
     """
@@ -536,6 +552,59 @@ class DailyAutonomousScreener:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RVOL_BELOW_INSTITUTIONAL_FLOOR ({real_rvol:.2f}x < 1.80x)', 'is_index': False}
         if turnover_cr < 6.0:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TURNOVER_BELOW_FLOOR (Rs {turnover_cr:.1f}Cr < 6.0Cr)', 'is_index': False}
+
+        # PRO-TRADER RULE 3: LUNCHTIME / EUROPEAN OPEN COMPRESSION GATE (13:15 to 13:50 IST)
+        ist_now = get_ist_time()
+        b_time = ist_now.time()
+        import datetime
+        if datetime.time(13, 15) <= b_time <= datetime.time(13, 50):
+            if turnover_cr < 10.0 or real_rvol < 2.50:
+                return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'LUNCHTIME_LOW_INSTITUTIONAL_PARTICIPATION (TO {turnover_cr:.1f}Cr < 10Cr, RVOL {real_rvol:.2f}x < 2.50x)', 'is_index': False}
+
+        # PRO-TRADER RULES 1 & 2: DUAL-REGIME INSTITUTIONAL FRONTIER
+        # Regime A: Continuation Breakout (Green for CALL / Red for PUT at fresh Day High/Low)
+        # Regime B: Wyckoff Spring Bottom Reversal (Red Stock with bottom accumulation + clear runway to Open)
+        comp_df = stk_df.iloc[:-1]
+        day_high = float(comp_df['high'].max())
+        day_low = float(comp_df['low'].min())
+        if direction == 'CALL':
+            if day_pct_move >= 0.0:
+                # Regime A: Continuation Breakout (Green Stock)
+                if b_close < day_high - stock_atr * 0.15:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'NOT_AT_FRESH_DAY_HIGH (Close {b_close:.1f} < High {day_high:.1f})', 'is_index': False}
+                if abs(day_pct_move) > 3.40:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PARABOLIC_GAP_EXHAUSTION ({day_pct_move:+.2f}% > +3.40%)', 'is_index': False}
+                if fuel_ratio > 1.10:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'ATR_FUEL_EXHAUSTED ({fuel_ratio:.2f} > 1.10 ATR)', 'is_index': False}
+            else:
+                # Regime B: Wyckoff Spring Bottom Reversal (Red Stock with bottom buying)
+                runway_to_open = stk_open - cur_p
+                runway_ratio = runway_to_open / max(1.0, stock_atr)
+                if runway_ratio < 0.40:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'BOTTOM_REVERSAL_CHOKED_UNDER_OPEN (Runway {runway_ratio:.2f} ATR < 0.40 ATR)', 'is_index': False}
+                if comp_low > day_low + stock_atr * 0.08:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'BOTTOM_REVERSAL_BASE_NOT_AT_DAY_LOW', 'is_index': False}
+                if real_rvol < 2.20:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'BOTTOM_REVERSAL_INSUFFICIENT_RVOL ({real_rvol:.2f}x < 2.20x)', 'is_index': False}
+        else: # PUT
+            if day_pct_move <= 0.0:
+                # Regime A: Continuation Breakdown (Red Stock)
+                if b_close > day_low + stock_atr * 0.15:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'NOT_AT_FRESH_DAY_LOW (Close {b_close:.1f} > Low {day_low:.1f})', 'is_index': False}
+                if abs(day_pct_move) > 3.40:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PARABOLIC_DROP_EXHAUSTION ({day_pct_move:+.2f}% < -3.40%)', 'is_index': False}
+                if fuel_ratio > 1.10:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'ATR_FUEL_EXHAUSTED ({fuel_ratio:.2f} > 1.10 ATR)', 'is_index': False}
+            else:
+                # Regime B: UTAD Top Reversal (Green Stock with top distribution)
+                runway_to_open = cur_p - stk_open
+                runway_ratio = runway_to_open / max(1.0, stock_atr)
+                if runway_ratio < 0.40:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TOP_REVERSAL_CHOKED_ABOVE_OPEN (Runway {runway_ratio:.2f} ATR < 0.40 ATR)', 'is_index': False}
+                if comp_high < day_high - stock_atr * 0.08:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'TOP_REVERSAL_BASE_NOT_AT_DAY_HIGH', 'is_index': False}
+                if real_rvol < 2.20:
+                    return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'TOP_REVERSAL_INSUFFICIENT_RVOL ({real_rvol:.2f}x < 2.20x)', 'is_index': False}
 
         # BUG 1 FIX: True Breakout Bar Delta Ratio directly from BVC Microstructure formula with CVD Non-Divergence Lock
         completed_bars = stk_df.iloc[:-1]
@@ -1149,6 +1218,13 @@ class DailyAutonomousScreener:
             sym = cand['symbol']
             if self.is_already_dispatched(sym):
                 stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
+                continue
+
+            # Sector Anti-Correlation Gate (Max 1 stock trade per sector within current slab)
+            cand_sec = STOCK_SECTOR_MAP.get(sym, sym)
+            dispatched_secs = [STOCK_SECTOR_MAP.get(t['symbol'], t['symbol']) for t in verified_super_trades if not t.get('is_index', False)]
+            if cand_sec in dispatched_secs:
+                stage2_rejections[sym] = f"SECTOR_CONCENTRATION_CAP_REACHED ({cand_sec} already dispatched in current slab)"
                 continue
 
             stk_df = self.data_feed.get_live_intraday_bars(sym)
