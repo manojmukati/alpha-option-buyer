@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 REPORT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(REPORT_DIR)
 CACHE_DIR = os.path.join(REPORT_DIR, "data_cache_latest_5d_1m")
 CONFIG_DIR = os.path.join(os.path.dirname(REPORT_DIR), "alpha_profile_oi_system", "config")
 
@@ -505,6 +506,171 @@ class ActiveTrade:
             'realized_r': rr_realized
         }
 
+# =============================================================================
+# INSTITUTIONAL BHAVCOPY -4 TO +4 OPTION CHAIN CONFLUENCE ENGINE
+# =============================================================================
+bhav_cache = {}
+def get_bhav(date_obj):
+    d_fmt = date_obj.strftime('%d-%m-%Y') if hasattr(date_obj, 'strftime') else str(date_obj)
+    p = os.path.join(REPO_ROOT, 'alpha_profile_oi_system', 'bhavcopy_cache', f'fno_bhav_{d_fmt}.parquet')
+    if p not in bhav_cache:
+        if os.path.exists(p):
+            bhav_cache[p] = pd.read_parquet(p)
+        else:
+            bhav_cache[p] = None
+    return bhav_cache[p]
+
+def check_oi_runway_bhavcopy(sym, date_obj, spot, direction, target_price=None, is_index=False):
+    df_bhav = get_bhav(date_obj)
+    if df_bhav is None:
+        return {'confluent': True, 'reason': 'NO_BHAVCOPY'}
+    
+    sub = df_bhav[(df_bhav['TckrSymb'] == sym) & (df_bhav['OptnTp'].isin(['CE', 'PE']))]
+    if sub.empty:
+        return {'confluent': True, 'reason': 'EMPTY_BHAVCOPY_OPTIONS'}
+    
+    cur_exp = sub['XpryDt'].min()
+    exp_df = sub[sub['XpryDt'] == cur_exp]
+    
+    strike_data = {}
+    for _, row in exp_df.iterrows():
+        stk = float(row['StrkPric'])
+        opt_tp = str(row['OptnTp']).upper().strip()
+        oi = float(row['OpnIntrst'])
+        chg_oi = float(row['ChngInOpnIntrst'])
+        vol = float(row['TtlTradgVol'])
+        
+        if stk not in strike_data:
+            strike_data[stk] = {'ce_oi': 0.0, 'ce_chg_oi': 0.0, 'ce_vol': 0.0, 'pe_oi': 0.0, 'pe_chg_oi': 0.0, 'pe_vol': 0.0}
+        
+        if opt_tp == 'CE':
+            strike_data[stk]['ce_oi'] += oi
+            strike_data[stk]['ce_chg_oi'] += chg_oi
+            strike_data[stk]['ce_vol'] += vol
+        elif opt_tp == 'PE':
+            strike_data[stk]['pe_oi'] += oi
+            strike_data[stk]['pe_chg_oi'] += chg_oi
+            strike_data[stk]['pe_vol'] += vol
+
+    sorted_strikes = sorted(strike_data.keys())
+    if not sorted_strikes:
+        return {'confluent': True, 'reason': 'NO_STRIKES'}
+
+    atm_strike = min(sorted_strikes, key=lambda s: abs(s - spot))
+    atm_idx = sorted_strikes.index(atm_strike)
+
+    lower_4 = sorted_strikes[max(0, atm_idx - 4) : atm_idx]
+    upper_4 = sorted_strikes[atm_idx + 1 : min(len(sorted_strikes), atm_idx + 5)]
+    window_9 = lower_4 + [atm_strike] + upper_4
+    strike_step = (sorted_strikes[1] - sorted_strikes[0]) if len(sorted_strikes) > 1 else 50.0
+
+    atm_info = strike_data[atm_strike]
+    tot_window_ce_oi = sum(strike_data[s]['ce_oi'] for s in window_9)
+    tot_window_pe_oi = sum(strike_data[s]['pe_oi'] for s in window_9)
+
+    tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
+    tot_upper_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in upper_4)
+    tot_upper_ce_vol = sum(strike_data[s]['ce_vol'] for s in upper_4)
+    tot_upper_ce_oi = sum(strike_data[s]['ce_oi'] for s in upper_4)
+
+    tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
+    tot_lower_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in lower_4)
+    tot_lower_pe_vol = sum(strike_data[s]['pe_vol'] for s in lower_4)
+    tot_lower_pe_oi = sum(strike_data[s]['pe_oi'] for s in lower_4)
+
+    support_pe_chg = atm_info['pe_chg_oi'] + tot_lower_pe_chg
+    resistance_ce_chg = atm_info['ce_chg_oi'] + tot_upper_ce_chg
+
+    min_wall_oi = 2500000.0 if is_index else 40000.0
+    monster_standing_oi = 5000000.0 if is_index else 80000.0
+    ambush_wall_min = 1500000.0 if is_index else 35000.0
+
+    if direction == 'CALL':
+        target_barrier = float(target_price) if target_price else (spot + (200.0 if is_index else 100.0))
+        candidate_wall_strikes = [s for s in sorted_strikes if (s >= (atm_strike - strike_step * 0.2) and s <= target_barrier + strike_step * 0.6)]
+
+        is_otm_ce_ambush = (tot_upper_ce_chg >= ambush_wall_min) and (tot_upper_ce_chg > 2.0 * max(3000.0, support_pe_chg)) and (atm_info['ce_chg_oi'] >= 0)
+        gamma_squeeze_call = (tot_upper_ce_vol >= 6.0 * max(1.0, tot_upper_ce_oi))
+
+        if is_otm_ce_ambush and not gamma_squeeze_call:
+            return {'confluent': False, 'reason': f'UPPER_OTM_CALL_WRITING_AMBUSH (+{int(tot_upper_ce_chg)} CE vs +{int(support_pe_chg)} PE)'}
+
+        atm_ce_chg = atm_info['ce_chg_oi']
+        atm_pe_chg = atm_info['pe_chg_oi']
+        atm_blocked = (atm_ce_chg > 0) and (atm_ce_chg > max(1000.0, atm_pe_chg * 1.15))
+        if atm_blocked:
+            return {'confluent': False, 'reason': f'ATM_CALL_WRITERS_FIGHTING (+{int(atm_ce_chg)} CE vs +{int(atm_pe_chg)} PE at {int(atm_strike)})'}
+
+        res_wall_strike = None
+        for up_s in candidate_wall_strikes:
+            st_d = strike_data[up_s]
+            ce_oi = st_d['ce_oi']
+            pe_oi = st_d['pe_oi']
+            ce_chg = st_d['ce_chg_oi']
+            pe_chg = st_d['pe_chg_oi']
+
+            if ce_chg < 0 or pe_chg >= ce_chg:
+                continue
+
+            if ce_oi < min_wall_oi: continue
+
+            ce_conc = ce_oi / max(1.0, tot_window_ce_oi)
+            is_concentrated = (ce_conc >= 0.18) or (ce_oi >= 1.25 * max(1.0, atm_info['ce_oi']))
+            is_standing_wall = (ce_oi >= monster_standing_oi)
+            is_ratio_heavy = (ce_oi > 1.5 * max(1000.0, pe_oi)) or (is_standing_wall and ce_oi > 1.20 * max(500.0, pe_oi))
+
+            if (is_concentrated or is_standing_wall) and is_ratio_heavy:
+                if st_d['ce_vol'] >= 6.0 * ce_oi: continue
+                res_wall_strike = up_s
+                break
+
+        confluent = (res_wall_strike is None)
+        reason = f'CALL_RUNWAY_CLEAR_ATM_{int(atm_strike)}' if confluent else f'CALL_BLOCKED_BY_WALL_AT_{int(res_wall_strike)}'
+        return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
+
+    else:
+        target_barrier = float(target_price) if target_price else (spot - (200.0 if is_index else 100.0))
+        candidate_wall_strikes = [s for s in sorted_strikes if (target_barrier - strike_step * 0.6 <= s <= atm_strike + strike_step * 0.2)]
+
+        is_otm_pe_ambush = (tot_lower_pe_chg >= ambush_wall_min) and (tot_lower_pe_chg > 2.0 * max(3000.0, resistance_ce_chg)) and (atm_info['pe_chg_oi'] >= 0)
+        gamma_squeeze_put = (tot_lower_pe_vol >= 6.0 * max(1.0, tot_lower_pe_oi))
+
+        if is_otm_pe_ambush and not gamma_squeeze_put:
+            return {'confluent': False, 'reason': f'LOWER_OTM_PUT_WRITING_AMBUSH (+{int(tot_lower_pe_chg)} PE vs +{int(resistance_ce_chg)} CE)'}
+
+        atm_pe_chg = atm_info['pe_chg_oi']
+        atm_ce_chg = atm_info['ce_chg_oi']
+        atm_blocked = (atm_pe_chg > 0) and (atm_pe_chg > max(1000.0, atm_ce_chg * 1.15))
+        if atm_blocked:
+            return {'confluent': False, 'reason': f'ATM_PUT_WRITERS_FIGHTING (+{int(atm_pe_chg)} PE vs +{int(atm_ce_chg)} CE at {int(atm_strike)})'}
+
+        sup_wall_strike = None
+        for dn_s in sorted(candidate_wall_strikes, reverse=True):
+            st_d = strike_data[dn_s]
+            pe_oi = st_d['pe_oi']
+            ce_oi = st_d['ce_oi']
+            pe_chg = st_d['pe_chg_oi']
+            ce_chg = st_d['ce_chg_oi']
+
+            if pe_chg < 0 or ce_chg >= pe_chg:
+                continue
+
+            if pe_oi < min_wall_oi: continue
+
+            pe_conc = pe_oi / max(1.0, tot_window_pe_oi)
+            is_concentrated = (pe_conc >= 0.18) or (pe_oi >= 1.25 * max(1.0, atm_info['pe_oi']))
+            is_standing_wall = (pe_oi >= monster_standing_oi)
+            is_ratio_heavy = (pe_oi > 1.5 * max(1000.0, ce_oi)) or (is_standing_wall and pe_oi > 1.20 * max(500.0, ce_oi))
+
+            if (is_concentrated or is_standing_wall) and is_ratio_heavy:
+                if st_d['pe_vol'] >= 6.0 * pe_oi: continue
+                sup_wall_strike = dn_s
+                break
+
+        confluent = (sup_wall_strike is None)
+        reason = f'PUT_RUNWAY_CLEAR_ATM_{int(atm_strike)}' if confluent else f'PUT_BLOCKED_BY_WALL_AT_{int(sup_wall_strike)}'
+        return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
+
 if __name__ == "__main__":
     print("Loading latest resampled 3m data...")
     asset_data = load_resampled_3m_data()
@@ -564,6 +730,10 @@ if __name__ == "__main__":
                 if len(idf) <= b_idx: continue
                 sig = check_index_signal_pro(isym, idf, b_idx, regime)
                 if sig:
+                    t_price = (sig['entry_price'] + sig.get('spot_t2', 150.0)) if sig['direction'] == 'CALL' else (sig['entry_price'] - sig.get('spot_t2', 150.0))
+                    oi_res = check_oi_runway_bhavcopy(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
+                    if not oi_res['confluent']:
+                        continue
                     trade = ActiveTrade(sig, b_idx)
                     active_trades.append(trade)
                     all_executed_trades.append(trade)
@@ -581,6 +751,10 @@ if __name__ == "__main__":
                     stock_atr = atrs.get(ssym, 30.0)
                     sig = check_stock_signal_pro(ssym, sdf, b_idx, stock_atr, regime)
                     if sig:
+                        t_price = (sig['entry_price'] + sig.get('spot_t2', 50.0)) if sig['direction'] == 'CALL' else (sig['entry_price'] - sig.get('spot_t2', 50.0))
+                        oi_res = check_oi_runway_bhavcopy(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
+                        if not oi_res['confluent']:
+                            continue
                         stock_cands.append(sig)
 
                 # Sort by institutional score descending!

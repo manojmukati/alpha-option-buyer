@@ -821,6 +821,18 @@ class LiveMarketDataFeed:
                     'live_chain_verified': True
                 }
 
+            # 2. Strict ATM Gate: If Call Writers are actively adding contracts faster than Put writers, block CALL!
+            atm_ce_chg = atm_info['ce_chg_oi']
+            atm_pe_chg = atm_info['pe_chg_oi']
+            atm_blocked = (atm_ce_chg > 0) and (atm_ce_chg > max(20.0, atm_pe_chg * 1.15))
+            if atm_blocked:
+                return {
+                    'confluent': False,
+                    'atm_strike': atm_strike,
+                    'reason': f"ATM_CALL_WRITERS_FIGHTING (+{int(atm_ce_chg)} CE Chg vs +{int(atm_pe_chg)} PE Chg at {int(atm_strike)})",
+                    'live_chain_verified': True
+                }
+
             near_ce_chg = atm_info['ce_chg_oi'] + (strike_data[upper_4[0]]['ce_chg_oi'] if upper_4 else 0.0)
             near_pe_chg = atm_info['pe_chg_oi'] + (strike_data[lower_4[-1]]['pe_chg_oi'] if lower_4 else 0.0)
             unwinding_or_dominance = (atm_info['ce_chg_oi'] <= 0) or (near_ce_chg <= 0) or (near_pe_chg > near_ce_chg * 1.3) or (support_pe_chg > resistance_ce_chg * 1.3)
@@ -831,6 +843,10 @@ class LiveMarketDataFeed:
                 st_d = strike_data[up_s]
                 ce_oi = st_d['ce_oi']
                 pe_oi = st_d['pe_oi']
+
+                # If call writers are unwinding (ce_chg < 0) or PE writers dominate (pe_chg >= ce_chg), this strike is supported, NOT a wall!
+                if st_d['ce_chg_oi'] < 0 or st_d['pe_chg_oi'] >= st_d['ce_chg_oi']:
+                    continue
 
                 if ce_oi < min_wall_oi:
                     continue
@@ -877,6 +893,18 @@ class LiveMarketDataFeed:
                     'live_chain_verified': True
                 }
 
+            # 2. Strict ATM Gate: If Put Writers are actively adding contracts faster than Call writers, block PUT!
+            atm_pe_chg = atm_info['pe_chg_oi']
+            atm_ce_chg = atm_info['ce_chg_oi']
+            atm_blocked = (atm_pe_chg > 0) and (atm_pe_chg > max(20.0, atm_ce_chg * 1.15))
+            if atm_blocked:
+                return {
+                    'confluent': False,
+                    'atm_strike': atm_strike,
+                    'reason': f"ATM_PUT_WRITERS_FIGHTING (+{int(atm_pe_chg)} PE Chg vs +{int(atm_ce_chg)} CE Chg at {int(atm_strike)})",
+                    'live_chain_verified': True
+                }
+
             near_pe_chg = atm_info['pe_chg_oi'] + (strike_data[lower_4[-1]]['pe_chg_oi'] if lower_4 else 0.0)
             near_ce_chg = atm_info['ce_chg_oi'] + (strike_data[upper_4[0]]['ce_chg_oi'] if upper_4 else 0.0)
             unwinding_or_dominance = (atm_info['pe_chg_oi'] <= 0) or (near_pe_chg <= 0) or (near_ce_chg > near_pe_chg * 1.3) or (resistance_ce_chg > support_pe_chg * 1.3)
@@ -887,6 +915,10 @@ class LiveMarketDataFeed:
                 st_d = strike_data[dn_s]
                 pe_oi = st_d['pe_oi']
                 ce_oi = st_d['ce_oi']
+
+                # If put writers are unwinding (pe_chg < 0) or CE writers dominate (ce_chg >= pe_chg), this strike is resisted, NOT a floor!
+                if st_d['pe_chg_oi'] < 0 or st_d['ce_chg_oi'] >= st_d['pe_chg_oi']:
+                    continue
 
                 if pe_oi < min_wall_oi:
                     continue
