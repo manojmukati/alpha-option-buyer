@@ -461,12 +461,26 @@ class DailyAutonomousScreener:
                 'is_index': False
             }
 
-        # BUG 6 FIX: Fast Pre-Filter for 213 Stocks (Zero Network calls for dead/flat or overextended stocks)
+        # PRO-TRADER HIGH-SPEED PRE-FILTER: Zero network calls for non-frontier or illiquid stocks
         pct_change = float(q.get('pct_change', 0.0))
         if abs(pct_change) < 0.35:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'INSIGNIFICANT_DAY_MOVE ({pct_change:.2f}% < 0.35%)', 'is_index': False}
         if abs(pct_change) > 4.50:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'EXTREME_DAY_MOVE_OVEREXTENDED ({pct_change:+.2f}% > 3.00%)', 'is_index': False}
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'EXTREME_DAY_MOVE_OVEREXTENDED ({pct_change:+.2f}% > 4.50%)', 'is_index': False}
+
+        # Turnover Pre-Check from instant NSE bulk snapshot
+        tot_v = float(q.get('volume', 0.0))
+        est_to_cr = (tot_v * cur_p) / 1e7
+        if est_to_cr < 3.0:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'PREFILTER_TURNOVER_BELOW_FLOOR (Rs {est_to_cr:.1f}Cr < 3.0Cr)', 'is_index': False}
+
+        # Day High / Low Frontier Fast Check before any network call
+        d_high = float(q.get('high', cur_p))
+        d_low = float(q.get('low', cur_p))
+        near_d_high = (cur_p >= d_high - stock_atr * 0.25) or (cur_p >= d_high * 0.992)
+        near_d_low = (cur_p <= d_low + stock_atr * 0.25) or (cur_p <= d_low * 1.008)
+        if not (near_d_high or near_d_low):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NOT_NEAR_DAY_HIGH_LOW_FRONTIER', 'is_index': False}
 
         stk_df = self.data_feed.get_live_intraday_bars(sym_clean)
         if stk_df is None or len(stk_df) < 10:

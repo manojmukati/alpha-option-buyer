@@ -422,7 +422,9 @@ class LiveMarketDataFeed:
             try:
                 import yfinance as yf
                 t = yf.Ticker(ticker)
-                df_hist = t.history(period='5d', interval='1m')
+                df_hist = t.history(period='2d', interval='1m')
+                if df_hist is None or len(df_hist) < 10:
+                    df_hist = t.history(period='5d', interval='1m')
                 if df_hist is not None and not df_hist.empty:
                     break
             except Exception:
@@ -704,7 +706,7 @@ class LiveMarketDataFeed:
         """
         q = self.get_live_asset_quote(symbol)
         live_spot = float(q.get('live_spot', 0.0)) if q else 0.0
-        ref_spot = live_spot if live_spot > 0 else float(cur_spot_or_strike)
+        ref_spot = float(cur_spot_or_strike) if float(cur_spot_or_strike or 0.0) > 0 else (live_spot if live_spot > 0 else 0.0)
 
         oc_data = self.fetch_live_option_chain_data(symbol)
         if not oc_data or 'records' not in oc_data:
@@ -768,6 +770,22 @@ class LiveMarketDataFeed:
         tot_window_ce_oi = sum(strike_data[s]['ce_oi'] for s in window_9)
         tot_window_pe_oi = sum(strike_data[s]['pe_oi'] for s in window_9)
 
+        # Cumulative Upper (+1 to +4) Strikes Pressure
+        tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
+        tot_upper_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in upper_4)
+        tot_upper_ce_vol = sum(strike_data[s]['ce_vol'] for s in upper_4)
+        tot_upper_ce_oi = sum(strike_data[s]['ce_oi'] for s in upper_4)
+
+        # Cumulative Lower (-4 to -1) Strikes Support / Floor
+        tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
+        tot_lower_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in lower_4)
+        tot_lower_pe_vol = sum(strike_data[s]['pe_vol'] for s in lower_4)
+        tot_lower_pe_oi = sum(strike_data[s]['pe_oi'] for s in lower_4)
+
+        # Institutional Support Floor vs Resistance Ceiling Pressures
+        support_pe_chg = atm_info['pe_chg_oi'] + tot_lower_pe_chg
+        resistance_ce_chg = atm_info['ce_chg_oi'] + tot_upper_ce_chg
+
         # Solution 1: Target-Aware Runway Corridor
         # Strikes beyond Target 2 (+ buffer) are mathematically IRRELEVANT and PRUNED!
         if direction == 'CALL':
@@ -780,6 +798,7 @@ class LiveMarketDataFeed:
         # Solution 2: Absolute Liquidity Floor & Solution 4: Standing Monster OI Threshold
         min_wall_oi = 3000.0 if is_index else 400.0
         monster_standing_oi = 5000.0 if is_index else 500.0
+        ambush_wall_min = 2000.0 if is_index else 250.0
 
         if direction == 'CALL':
             if atm_info['ce_ltp'] <= 0 or atm_info['ce_vol'] <= 0:
@@ -790,9 +809,21 @@ class LiveMarketDataFeed:
                     'live_chain_verified': True
                 }
 
+            # 1. Ambush Detection: Did Call Writers build an impenetrable OTM roof across +1 to +4 strikes? (e.g. Eicher Motors +659 CE Chg)
+            is_otm_ce_ambush = (tot_upper_ce_chg >= ambush_wall_min) and (tot_upper_ce_chg > 1.8 * max(30.0, support_pe_chg))
+            gamma_squeeze_call = (tot_upper_ce_vol >= 6.0 * max(1.0, tot_upper_ce_oi))
+
+            if is_otm_ce_ambush and not gamma_squeeze_call:
+                return {
+                    'confluent': False,
+                    'atm_strike': atm_strike,
+                    'reason': f"UPPER_OTM_CALL_WRITING_AMBUSH (+{int(tot_upper_ce_chg)} CE Chg vs +{int(support_pe_chg)} PE Chg)",
+                    'live_chain_verified': True
+                }
+
             near_ce_chg = atm_info['ce_chg_oi'] + (strike_data[upper_4[0]]['ce_chg_oi'] if upper_4 else 0.0)
             near_pe_chg = atm_info['pe_chg_oi'] + (strike_data[lower_4[-1]]['pe_chg_oi'] if lower_4 else 0.0)
-            unwinding_or_dominance = (atm_info['ce_chg_oi'] <= 0) or (near_ce_chg <= 0) or (near_pe_chg > near_ce_chg * 1.3)
+            unwinding_or_dominance = (atm_info['ce_chg_oi'] <= 0) or (near_ce_chg <= 0) or (near_pe_chg > near_ce_chg * 1.3) or (support_pe_chg > resistance_ce_chg * 1.3)
 
             res_wall_strike = None
             # Scan strictly candidate strikes within Target Corridor (includes ATM 6500!)
@@ -807,13 +838,13 @@ class LiveMarketDataFeed:
                 ce_conc = ce_oi / max(1.0, tot_window_ce_oi)
                 is_concentrated = (ce_conc >= 0.20) or (ce_oi >= 1.3 * max(1.0, atm_info['ce_oi']))
                 # Safe ratio without denominator collapse
-                is_ratio_heavy = (ce_oi > 1.6 * max(100.0, pe_oi))
                 is_standing_wall = (ce_oi >= monster_standing_oi)
+                is_ratio_heavy = (ce_oi > 1.6 * max(100.0, pe_oi)) or (is_standing_wall and ce_oi > 1.25 * max(50.0, pe_oi))
                 is_active_building = (st_d['ce_chg_oi'] > 0 and st_d['ce_vol'] > st_d['pe_vol'])
 
                 if (is_concentrated or is_standing_wall) and is_ratio_heavy and (is_standing_wall or is_active_building):
-                    # Gamma Squeeze check: exploding call volume > 3.0x OI allows breakout
-                    if st_d['ce_vol'] >= 8.0 * ce_oi:
+                    # Gamma Squeeze check: exploding call volume > 6.0x OI allows breakout
+                    if st_d['ce_vol'] >= 6.0 * ce_oi:
                         continue
                     res_wall_strike = up_s
                     break
@@ -834,9 +865,21 @@ class LiveMarketDataFeed:
                     'live_chain_verified': True
                 }
 
+            # 1. Ambush Detection: Did Put Writers build an impenetrable OTM floor across -4 to -1 strikes?
+            is_otm_pe_ambush = (tot_lower_pe_chg >= ambush_wall_min) and (tot_lower_pe_chg > 1.8 * max(30.0, resistance_ce_chg))
+            gamma_squeeze_put = (tot_lower_pe_vol >= 6.0 * max(1.0, tot_lower_pe_oi))
+
+            if is_otm_pe_ambush and not gamma_squeeze_put:
+                return {
+                    'confluent': False,
+                    'atm_strike': atm_strike,
+                    'reason': f"LOWER_OTM_PUT_WRITING_AMBUSH (+{int(tot_lower_pe_chg)} PE Chg vs +{int(resistance_ce_chg)} CE Chg)",
+                    'live_chain_verified': True
+                }
+
             near_pe_chg = atm_info['pe_chg_oi'] + (strike_data[lower_4[-1]]['pe_chg_oi'] if lower_4 else 0.0)
             near_ce_chg = atm_info['ce_chg_oi'] + (strike_data[upper_4[0]]['ce_chg_oi'] if upper_4 else 0.0)
-            unwinding_or_dominance = (atm_info['pe_chg_oi'] <= 0) or (near_pe_chg <= 0) or (near_ce_chg > near_pe_chg * 1.3)
+            unwinding_or_dominance = (atm_info['pe_chg_oi'] <= 0) or (near_pe_chg <= 0) or (near_ce_chg > near_pe_chg * 1.3) or (resistance_ce_chg > support_pe_chg * 1.3)
 
             sup_wall_strike = None
             # Scan candidate strikes high to low for PUT down to target
@@ -850,12 +893,12 @@ class LiveMarketDataFeed:
 
                 pe_conc = pe_oi / max(1.0, tot_window_pe_oi)
                 is_concentrated = (pe_conc >= 0.20) or (pe_oi >= 1.3 * max(1.0, atm_info['pe_oi']))
-                is_ratio_heavy = (pe_oi > 1.6 * max(100.0, ce_oi))
                 is_standing_wall = (pe_oi >= monster_standing_oi)
+                is_ratio_heavy = (pe_oi > 1.6 * max(100.0, ce_oi)) or (is_standing_wall and pe_oi > 1.25 * max(50.0, ce_oi))
                 is_active_building = (st_d['pe_chg_oi'] > 0 and st_d['pe_vol'] > st_d['ce_vol'])
 
                 if (is_concentrated or is_standing_wall) and is_ratio_heavy and (is_standing_wall or is_active_building):
-                    if st_d['pe_vol'] >= 8.0 * pe_oi:
+                    if st_d['pe_vol'] >= 6.0 * pe_oi:
                         continue
                     sup_wall_strike = dn_s
                     break
