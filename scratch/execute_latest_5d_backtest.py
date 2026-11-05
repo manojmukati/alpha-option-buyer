@@ -119,12 +119,18 @@ def get_nifty_regime(nifty_day, b_idx):
 
     recent_rng = nifty_day['high'].iloc[max(0, b_idx - 5):b_idx + 1].max() - nifty_day['low'].iloc[max(0, b_idx - 5):b_idx + 1].min()
     ema_dist = abs(n_spot - ema9)
+    allow_index = True
     if recent_rng < 22.0 and ema_dist < 12.0:
-        return {'allow_call': False, 'allow_put': False, 'reason': 'CHOP_TRAP', 'move': move_from_open}
+        allow_index = False
+        allow_call = True
+        allow_put = True
+        reason = 'CHOP_TRAP_INDEX_FROZEN'
+    else:
+        allow_call = (move_from_open >= -35.0) and (n_spot >= ema9 - 25.0)
+        allow_put = (move_from_open <= +35.0) and (n_spot <= ema9 + 25.0)
+        reason = 'NORMAL'
 
-    allow_call = (move_from_open >= -20.0) and (n_spot >= ema9 - 15.0)
-    allow_put = (move_from_open <= +20.0) and (n_spot <= ema9 + 15.0)
-    return {'allow_call': allow_call, 'allow_put': allow_put, 'reason': 'NORMAL', 'move': move_from_open}
+    return {'allow_call': allow_call, 'allow_put': allow_put, 'allow_index': allow_index, 'reason': reason, 'move': move_from_open}
 
 def check_stock_signal_pro(sym, df_today, bar_idx, stock_atr, regime):
     """
@@ -675,7 +681,7 @@ if __name__ == "__main__":
     print("Loading latest resampled 3m data...")
     asset_data = load_resampled_3m_data()
     atrs = load_verified_atrs()
-    all_dates = sorted(list(set(d for df in asset_data.values() for d in df.index.date)))
+    all_dates = sorted(list(set(d for df in asset_data.values() for d in df.index.date)))[-5:]
     stock_syms = [s for s in asset_data.keys() if s not in INDEX_NAMES]
     all_executed_trades = []
 
@@ -721,6 +727,7 @@ if __name__ == "__main__":
 
             # 2. Check Index Candidates
             for isym in INDEX_NAMES:
+                if not regime.get('allow_index', True): continue
                 if isym not in asset_data or isym in daily_traded_symbols: continue
                 is_bank = (isym == 'BANKNIFTY')
                 if is_bank and act_bank_idx >= MAX_ACTIVE_BANK_INDEX: continue
@@ -807,10 +814,26 @@ if __name__ == "__main__":
     net_p = gross_p - gross_l
     pf = round(gross_p / max(0.01, gross_l), 2)
 
-    print(f"Wins: {len(wins)} ({len(wins)/max(1, len(df_res))*100:.1f}%)")
-    print(f"Scratches: {len(scratches)}")
-    print(f"Full Stoploss: {len(full_sl)}")
-    print(f"Gross Profit: +{gross_p:.2f}R | Gross Loss: -{gross_l:.2f}R | Net Profit: +{net_p:.2f}R | Profit Factor: {pf}")
+    win_rate = len(wins) / max(1, len(df_res)) * 100.0
+    expectancy = net_p / max(1, len(df_res))
+    
+    # Calculate Max Drawdown in R
+    cum_r = df_res['realized_r'].cumsum()
+    peak = cum_r.cummax()
+    drawdown = peak - cum_r
+    max_dd = round(float(drawdown.max()), 2) if not drawdown.empty else 0.0
+
+    calls = df_res[df_res['direction'] == 'CALL']
+    puts = df_res[df_res['direction'] == 'PUT']
+    call_wins = len(calls[calls['points_captured'] > 0])
+    put_wins = len(puts[puts['points_captured'] > 0])
+    call_net = calls['realized_r'].sum()
+    put_net = puts['realized_r'].sum()
+
+    print(f"Wins: {len(wins)} ({win_rate:.1f}%) | Losses/Scratches: {len(losses)} | Full SL: {len(full_sl)}")
+    print(f"Gross Profit: +{gross_p:.2f}R | Gross Loss: -{gross_l:.2f}R | Net Profit: +{net_p:.2f}R")
+    print(f"Profit Factor: {pf} | Expectancy: +{expectancy:.2f}R per trade | Max Drawdown: {max_dd:.2f}R")
+    print(f"CALL Trades: {len(calls)} (Wins: {call_wins}, Net: {call_net:+.2f}R) | PUT Trades: {len(puts)} (Wins: {put_wins}, Net: {put_net:+.2f}R)")
     print("\n--- ALL EXECUTED TRADES ---")
     for _, r in df_res.iterrows():
         e_str = r['eval_time'].strftime('%Y-%m-%d %H:%M')

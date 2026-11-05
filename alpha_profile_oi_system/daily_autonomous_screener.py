@@ -293,10 +293,12 @@ class DailyAutonomousScreener:
                 recent_rng = round(df_nifty['high'].tail(6).max() - df_nifty['low'].tail(6).min(), 2)
                 ema_distance = abs(nifty_spot - ema9)
 
+                allow_index = True
                 if recent_rng < 22.0 and ema_distance < 12.0:
-                    allow_call = False
-                    allow_put = False
-                    reason = f"NIFTY_SIDEWAYS_CHOP_TRAP (18m Range {recent_rng:.1f} pts < 22 pts)"
+                    allow_index = False
+                    allow_call = True
+                    allow_put = True
+                    reason = f"NIFTY_SIDEWAYS_CHOP_TRAP (Index Breakouts Frozen | Decoupled Stock Alpha Active)"
                 else:
                     if move_from_open < -10.0 or nifty_spot < ema9 - 15.0:
                         allow_call = False
@@ -308,6 +310,7 @@ class DailyAutonomousScreener:
         self.nifty_regime_cache = {
             'allow_stock_call': allow_call,
             'allow_stock_put': allow_put,
+            'allow_index': allow_index if 'allow_index' in locals() else True,
             'reason': reason,
             'timestamp': now
         }
@@ -328,6 +331,10 @@ class DailyAutonomousScreener:
         q = live_q or self.data_feed.get_live_asset_quote(sym_clean)
         if not q:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'NO_NSE_LIVE_QUOTE', 'is_index': True}
+
+        nifty_regime = self.get_nifty_market_regime()
+        if not nifty_regime.get('allow_index', True):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f"INDEX_SIDEWAYS_CHOP_BLOCKED ({nifty_regime.get('reason')})", 'is_index': True}
 
         cur_p = float(q.get('live_spot', q.get('close', 0.0)))
         if cur_p <= 0:
@@ -678,6 +685,23 @@ class DailyAutonomousScreener:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'MACRO_REGIME_BLOCKS_CALL: {regime_reason}', 'is_index': False}
         if direction == 'PUT' and not allow_put:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'MACRO_REGIME_BLOCKS_PUT: {regime_reason}', 'is_index': False}
+
+        # Gate 1 Relative Strength (RS) check: Stock must not severely underperform Nifty
+        stk_pct = float(q.get('pct_change', 0.0))
+        n_spot = nifty_context.get('spot', 0.0) if nifty_context else 0.0
+        n_open = nifty_context.get('open', n_spot) if nifty_context else n_spot
+        n_pct = ((n_spot - n_open) / max(1.0, n_open)) * 100.0 if n_open > 0 else 0.0
+
+        if direction == 'CALL' and stk_pct < (n_pct - 0.20):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RELATIVE_STRENGTH_WEAK (Stock {stk_pct:+.2f}% < Nifty {n_pct:+.2f}%)', 'is_index': False}
+        if direction == 'PUT' and stk_pct > (n_pct + 0.20):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'RELATIVE_STRENGTH_STRONG (Stock {stk_pct:+.2f}% > Nifty {n_pct:+.2f}%)', 'is_index': False}
+
+        # Gate 2 Live Holding Check: Live Spot must hold outside breakout boundary
+        if direction == 'CALL' and cur_p < (comp_high - stock_atr * 0.05):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'LIVE_SPOT_FAILED_HOLDING (Spot {cur_p:.1f} < Breakout {comp_high:.1f})', 'is_index': False}
+        if direction == 'PUT' and cur_p > (comp_low + stock_atr * 0.05):
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'LIVE_SPOT_FAILED_HOLDING (Spot {cur_p:.1f} > Breakdown {comp_low:.1f})', 'is_index': False}
 
         # Mega heavyweights: Only block if Nifty Macro Regime actively prohibits or dumping severely
         if sym_clean in NIFTY_HEAVYWEIGHTS:

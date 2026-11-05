@@ -392,10 +392,12 @@ class LiveMarketDataFeed:
 
         return {'symbol': symbol, 'status': 'NSE_DATA_UNAVAILABLE', 'live_spot': 0.0}
 
-    def get_live_intraday_bars(self, symbol):
+    def get_live_intraday_bars(self, symbol, include_warmup=True):
         """
         Fetches REAL intraday 1-minute candles (last 5 days) and resamples them
         strictly to 3-minute candles aligned to 09:15 AM IST (09:15, 09:18, 09:21...).
+        Computes historical 3m slot baseline volume, Market Profile (VWAP, VAH, VAL, POC),
+        and order-flow BVC Delta columns.
         """
         now = time.time()
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
@@ -422,23 +424,19 @@ class LiveMarketDataFeed:
             try:
                 import yfinance as yf
                 t = yf.Ticker(ticker)
-                df_hist = t.history(period='2d', interval='1m')
-                if df_hist is None or len(df_hist) < 10:
-                    df_hist = t.history(period='5d', interval='1m')
-                if df_hist is not None and not df_hist.empty:
+                df_hist = t.history(period='5d', interval='1m')
+                if df_hist is not None and not df_hist.empty and len(df_hist) >= 10:
                     break
             except Exception:
                 pass
             if attempt == 0:
-                time.sleep(0.4)
+                time.sleep(0.3)
 
         if df_hist is not None and not df_hist.empty:
             try:
                 df_hist.columns = [c.lower() for c in df_hist.columns]
-
                 is_spot_index = sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NSEI', 'NSEBANK']
 
-                # Enrich Index with real ETF constituent volume
                 if sym_clean in ['NIFTY', 'BANKNIFTY']:
                     try:
                         etf_sym = 'NIFTYBEES.NS' if sym_clean == 'NIFTY' else 'BANKBEES.NS'
@@ -451,7 +449,6 @@ class LiveMarketDataFeed:
                         pass
 
                 if is_spot_index:
-                    # True Range-weighted Order-Flow Delta for spot indices (Never multiply by 0 volume!)
                     df_hist['delta'] = (2.0 * df_hist['close'] - (df_hist['high'] + df_hist['low']))
                 elif 'delta' not in df_hist.columns:
                     rng_1m = np.maximum(0.01, df_hist['high'] - df_hist['low'])
@@ -459,8 +456,11 @@ class LiveMarketDataFeed:
 
                 if df_hist.index.tz is not None:
                     df_hist.index = df_hist.index.tz_convert('Asia/Kolkata')
+                else:
+                    ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                    df_hist.index = df_hist.index.tz_localize(ist_tz)
 
-                # Compute 5-day average 3-minute bar volume as an institutional baseline + 9-EMA
+                # Resample all 5-day 1m bars into 3m candles
                 df_all_3m = df_hist.resample('3min', label='left', closed='left').agg({
                     'open': 'first',
                     'high': 'max',
@@ -469,22 +469,64 @@ class LiveMarketDataFeed:
                     'volume': 'sum',
                     'delta': 'sum'
                 }).dropna(subset=['open', 'high', 'low', 'close'])
-                df_all_3m['ema9'] = df_all_3m['close'].ewm(span=9, adjust=False).mean()
-                pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
-                hist_avg_3m_vol = float(pos_vols.mean()) if not pos_vols.empty else 0.0
 
-                # Isolate today's session strictly (zero cross-day bar contamination)
                 latest_date = df_hist.index[-1].date()
-                raw_today = df_hist[df_hist.index.date == latest_date]
-                df_3m = raw_today.resample('3min', label='left', closed='left').agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum',
-                    'delta': 'sum'
-                }).dropna(subset=['open', 'high', 'low', 'close'])
+                prior_vols = df_all_3m[df_all_3m.index.date < latest_date]
+                pos_prior_vols = prior_vols[prior_vols['volume'] > 0]['volume']
+                if not pos_prior_vols.empty:
+                    hist_avg_3m_vol = float(pos_prior_vols.mean())
+                else:
+                    pos_all_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
+                    hist_avg_3m_vol = float(pos_all_vols.mean()) if not pos_all_vols.empty else 1000.0
+
+                raw_today = df_all_3m[df_all_3m.index.date == latest_date].copy()
+                if include_warmup and len(raw_today) < 10 and not prior_vols.empty:
+                    needed = 10 - len(raw_today)
+                    warmup_bars = prior_vols.tail(needed).copy()
+                    warmup_bars['is_warmup'] = True
+                    raw_today['is_warmup'] = False
+                    combined_3m = pd.concat([warmup_bars, raw_today])
+                else:
+                    raw_today['is_warmup'] = False
+                    combined_3m = raw_today
+
+                df_3m = combined_3m.copy()
                 df_3m['ema9'] = df_3m['close'].ewm(span=9, adjust=False).mean()
+
+                # BVC Delta & CVD
+                rng = np.maximum(0.01, df_3m['high'] - df_3m['low'])
+                clv = (df_3m['close'] - df_3m['low']) / rng
+                df_3m['bar_delta_ratio'] = (2.0 * clv - 1.0).round(4)
+                df_3m['bvc_est_delta'] = (df_3m['volume'] * df_3m['bar_delta_ratio']).round(2)
+                df_3m['cvd'] = df_3m['bvc_est_delta'].cumsum().round(2)
+
+                # Intraday Market Profile (VWAP, VAH, VAL, POC)
+                tp = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3.0
+                cum_v = df_3m['volume'].cumsum()
+                cum_pv = (tp * df_3m['volume']).cumsum()
+                vwap = cum_pv / np.maximum(1.0, cum_v)
+                df_3m['vwap'] = vwap.round(2)
+
+                cum_pv2 = ((tp ** 2) * df_3m['volume']).cumsum()
+                variance = np.maximum(0.0, (cum_pv2 / np.maximum(1.0, cum_v)) - (vwap ** 2))
+                std_dev = np.sqrt(variance)
+                df_3m['vah'] = (vwap + 1.28 * std_dev).round(2)
+                df_3m['val'] = (vwap - 1.28 * std_dev).round(2)
+
+                avg_p = float(df_3m['close'].mean())
+                bin_sz = max(0.05, round(avg_p * 0.001, 2))
+                binned_prices = (tp / bin_sz).round() * bin_sz
+                poc_series = []
+                vol_bins = {}
+                max_v = -1.0
+                curr_poc = avg_p
+                for pb, v in zip(binned_prices, df_3m['volume']):
+                    vol_bins[pb] = vol_bins.get(pb, 0.0) + v
+                    if vol_bins[pb] > max_v:
+                        max_v = vol_bins[pb]
+                        curr_poc = pb
+                    poc_series.append(curr_poc)
+                df_3m['poc'] = poc_series
 
                 if not df_3m.empty:
                     df_3m.reset_index(inplace=True)
@@ -495,66 +537,6 @@ class LiveMarketDataFeed:
                     return df_3m
             except Exception:
                 pass
-
-        # 2. Fallback: Yahoo Finance direct REST API
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=5d&interval=1m"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        try:
-            r = requests.get(url, headers=headers, timeout=8, verify=False)
-            if r.status_code == 200:
-                res = r.json().get('chart', {}).get('result', [])
-                if res:
-                    ts_list = res[0].get('timestamp', [])
-                    quote = res[0].get('indicators', {}).get('quote', [{}])[0]
-                    if ts_list and quote.get('close'):
-                        ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-                        df_1m = pd.DataFrame({
-                            'datetime': [datetime.datetime.fromtimestamp(t, tz=ist_tz) for t in ts_list],
-                            'open': quote.get('open', []),
-                            'high': quote.get('high', []),
-                            'low': quote.get('low', []),
-                            'close': quote.get('close', []),
-                            'volume': quote.get('volume', [])
-                        }).dropna(subset=['open', 'high', 'low', 'close'])
-
-                        if not df_1m.empty:
-                            df_1m['volume'] = df_1m['volume'].fillna(0.0)
-                            df_1m.set_index('datetime', inplace=True)
-
-                            is_spot_index = sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NSEI', 'NSEBANK']
-                            if is_spot_index:
-                                df_1m['delta'] = (2.0 * df_1m['close'] - (df_1m['high'] + df_1m['low']))
-                            else:
-                                rng_1m = np.maximum(0.01, df_1m['high'] - df_1m['low'])
-                                df_1m['delta'] = df_1m['volume'] * ((2.0 * df_1m['close'] - (df_1m['high'] + df_1m['low'])) / rng_1m)
-
-                            # Compute 5-day average 3-minute bar volume as institutional baseline + 9-EMA + Sub-Bar Micro-Delta
-                            df_all_3m = df_1m.resample('3min', origin='start').agg({
-                                'open': 'first',
-                                'high': 'max',
-                                'low': 'min',
-                                'close': 'last',
-                                'volume': 'sum',
-                                'delta': 'sum'
-                            }).dropna(subset=['open', 'high', 'low', 'close'])
-                            df_all_3m['ema9'] = df_all_3m['close'].ewm(span=9, adjust=False).mean()
-                            pos_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
-                            hist_avg_3m_vol = float(pos_vols.mean()) if not pos_vols.empty else 0.0
-
-                            latest_date = df_1m.index[-1].date()
-                            df_3m = df_all_3m[df_all_3m.index.date == latest_date].copy()
-
-                            if not df_3m.empty:
-                                df_3m.reset_index(inplace=True)
-                                df_3m['hist_avg_3m_vol'] = hist_avg_3m_vol
-                                self._intraday_cache[sym_clean] = df_3m
-                                self._intraday_ts[sym_clean] = now
-                                return df_3m
-        except Exception:
-            pass
-
-        return None
-
     def fetch_live_option_chain_data(self, symbol):
         """
         Fetches live NSE Option Chain sequentially with thread-lock and official v3 endpoints
@@ -736,15 +718,24 @@ class LiveMarketDataFeed:
                 continue
             ce = item.get('CE', {})
             pe = item.get('PE', {})
+            ce_ltp = clean_num(ce.get('lastPrice', 0.0))
+            pe_ltp = clean_num(pe.get('lastPrice', 0.0))
             strike_data[stk] = {
+                'strike': stk,
                 'ce_oi': float(ce.get('openInterest', 0.0) or 0.0),
                 'ce_chg_oi': float(ce.get('changeinOpenInterest', 0.0) or 0.0),
                 'ce_vol': float(ce.get('totalTradedVolume', 0.0) or 0.0),
-                'ce_ltp': float(ce.get('lastPrice', 0.0) or 0.0),
+                'ce_ltp': ce_ltp,
+                'ce_bid': float(ce.get('buyPrice1', ce.get('bidprice', ce_ltp)) or ce_ltp),
+                'ce_ask': float(ce.get('sellPrice1', ce.get('askPrice', ce_ltp)) or ce_ltp),
+                'ce_iv': float(ce.get('impliedVolatility', 0.0) or 0.0),
                 'pe_oi': float(pe.get('openInterest', 0.0) or 0.0),
                 'pe_chg_oi': float(pe.get('changeinOpenInterest', 0.0) or 0.0),
                 'pe_vol': float(pe.get('totalTradedVolume', 0.0) or 0.0),
-                'pe_ltp': float(pe.get('lastPrice', 0.0) or 0.0),
+                'pe_ltp': pe_ltp,
+                'pe_bid': float(pe.get('buyPrice1', pe.get('bidprice', pe_ltp)) or pe_ltp),
+                'pe_ask': float(pe.get('sellPrice1', pe.get('askPrice', pe_ltp)) or pe_ltp),
+                'pe_iv': float(pe.get('impliedVolatility', 0.0) or 0.0),
             }
 
         sorted_strikes = sorted(strike_data.keys())
@@ -763,6 +754,14 @@ class LiveMarketDataFeed:
         lower_4 = sorted_strikes[max(0, atm_idx - 4) : atm_idx]
         upper_4 = sorted_strikes[atm_idx + 1 : min(len(sorted_strikes), atm_idx + 5)]
         window_9 = lower_4 + [atm_strike] + upper_4
+
+        if len(lower_4) < 4 or len(upper_4) < 4:
+            return {
+                'confluent': False,
+                'atm_strike': atm_strike,
+                'reason': f'INSUFFICIENT_SYMMETRIC_4STRIKE_WINDOW (Lower: {len(lower_4)}, Upper: {len(upper_4)})',
+                'live_chain_verified': True
+            }
 
         atm_info = strike_data[atm_strike]
         tot_ce_vol = sum(strike_data[s]['ce_vol'] for s in window_9)
@@ -948,6 +947,7 @@ class LiveMarketDataFeed:
             'expiry_date': curr_expiry,
             'lower_4_strikes': lower_4,
             'upper_4_strikes': upper_4,
+            'atm_info': atm_info,
             'atm_ce_ltp': atm_info['ce_ltp'],
             'atm_pe_ltp': atm_info['pe_ltp'],
             'tot_ce_vol': tot_ce_vol,
@@ -959,7 +959,9 @@ class LiveMarketDataFeed:
     def compute_option_pricing(self, spot_price, direction='CALL', symbol='', target_price=None, is_index=False):
         """
         Pulls 100% REAL Option Contract Strike, Expiry, and Live LTP directly from NSE Option Chain.
-        NEVER invents synthetic prices and NEVER falls back to SPOT_GOVERNED!
+        Computes bidPrice, askPrice, spread_pct, totalTradedVolume, impliedVolatility,
+        and realistic stop_loss, target_1, and target_2.
+        Rejects illiquid options where spread_pct > 3.0%.
         """
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         oi_res = self.get_live_dual_oi_confluence(sym_clean, spot_price, direction=direction, target_price=target_price, is_index=is_index)
@@ -970,10 +972,19 @@ class LiveMarketDataFeed:
         if atm_strike <= 0:
             return None
 
+        atm_info = oi_res.get('atm_info', {})
         opt_type = 'CE' if direction == 'CALL' else 'PE'
         live_ltp = float(oi_res.get('atm_ce_ltp' if opt_type == 'CE' else 'atm_pe_ltp', 0.0))
-        # Institutional liquidity shield: Discard illiquid penny options (< Rs. 2.00)
         if live_ltp < 2.0:
+            return None
+
+        bid_p = float(atm_info.get('ce_bid' if opt_type == 'CE' else 'pe_bid', live_ltp))
+        ask_p = float(atm_info.get('ce_ask' if opt_type == 'CE' else 'pe_ask', live_ltp))
+        tot_vol = float(atm_info.get('ce_vol' if opt_type == 'CE' else 'pe_vol', 0.0))
+        iv = float(atm_info.get('ce_iv' if opt_type == 'CE' else 'pe_iv', 0.0))
+
+        spread_pct = round(((ask_p - bid_p) / max(0.5, live_ltp)) * 100.0, 2) if (bid_p > 0 and ask_p >= bid_p) else 0.0
+        if spread_pct > 3.0:
             return None
 
         exp_str = str(oi_res.get('expiry_date', ''))
@@ -988,6 +999,8 @@ class LiveMarketDataFeed:
 
         sl_pts = round(max(2.0, live_ltp * 0.20), 2)
         opt_sl = round(max(0.5, live_ltp - sl_pts), 2)
+        opt_t1 = round(live_ltp + (sl_pts * 1.5), 2)
+        opt_t2 = round(live_ltp + (sl_pts * 3.5), 2)
 
         return {
             'contract': contract_name,
@@ -995,8 +1008,19 @@ class LiveMarketDataFeed:
             'atm_strike': atm_strike,
             'expiry_date': exp_str,
             'entry_price': round(live_ltp, 2),
+            'bidPrice': round(bid_p, 2),
+            'askPrice': round(ask_p, 2),
+            'spread_pct': spread_pct,
+            'totalTradedVolume': tot_vol,
+            'impliedVolatility': iv,
             'sl_price': opt_sl,
             'sl_points': sl_pts,
+            'target_1': opt_t1,
+            'target_2': opt_t2,
             'price_mode': 'LIVE_OPTION_LTP',
             'is_live_chain_verified': True
         }
+
+
+# Global Aliases so both names are 100% compatible across repository
+LiveDataFeed = LiveMarketDataFeed
