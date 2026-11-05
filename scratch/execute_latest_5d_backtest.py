@@ -519,12 +519,26 @@ bhav_cache = {}
 def get_bhav(date_obj):
     d_fmt = date_obj.strftime('%d-%m-%Y') if hasattr(date_obj, 'strftime') else str(date_obj)
     p = os.path.join(REPO_ROOT, 'alpha_profile_oi_system', 'bhavcopy_cache', f'fno_bhav_{d_fmt}.parquet')
-    if p not in bhav_cache:
-        if os.path.exists(p):
-            bhav_cache[p] = pd.read_parquet(p)
-        else:
-            bhav_cache[p] = None
-    return bhav_cache[p]
+    if p in bhav_cache:
+        return bhav_cache[p]
+    if os.path.exists(p):
+        bhav_cache[p] = pd.read_parquet(p)
+        return bhav_cache[p]
+    # Standing OI fallback for latest session if official EOD bhavcopy is not yet published
+    try:
+        cur_dt = pd.to_datetime(date_obj)
+        for delta in range(1, 6):
+            prior_fmt = (cur_dt - pd.Timedelta(days=delta)).strftime('%d-%m-%Y')
+            prior_p = os.path.join(REPO_ROOT, 'alpha_profile_oi_system', 'bhavcopy_cache', f'fno_bhav_{prior_fmt}.parquet')
+            if os.path.exists(prior_p):
+                if prior_p not in bhav_cache:
+                    bhav_cache[prior_p] = pd.read_parquet(prior_p)
+                bhav_cache[p] = bhav_cache[prior_p]
+                return bhav_cache[p]
+    except Exception:
+        pass
+    bhav_cache[p] = None
+    return None
 
 def check_oi_runway_bhavcopy(sym, date_obj, spot, direction, target_price=None, is_index=False):
     df_bhav = get_bhav(date_obj)
