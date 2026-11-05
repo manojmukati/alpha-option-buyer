@@ -336,7 +336,7 @@ class LiveMarketDataFeed:
 
         # 3. Dynamic Cache Fallback
         cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fno_universe_cache.json')
-        if fo_symbols:
+        if fo_symbols and not os.path.exists(cache_path):
             try:
                 with open(cache_path, 'w', encoding='utf-8') as f:
                     json.dump([{'symbol': s} for s in sorted(list(set(indices + fo_symbols)))], f, indent=2)
