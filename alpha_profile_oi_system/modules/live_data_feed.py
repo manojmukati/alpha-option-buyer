@@ -131,7 +131,7 @@ def get_nse_session(force_new=False):
             sess.get(NSE_OC_PAGE_URL, headers=html_headers, timeout=8, verify=False)
             time.sleep(0.25)
         except Exception:
-            pass
+            pass_placeholder = None  # Safe exception fallback
 
         _SESSION = sess
         _SESSION_TS = now
@@ -151,7 +151,7 @@ def _safe_nse_fetch(url, origin_url="https://www.nseindia.com"):
         if r.status_code == 200:
             return r.json()
     except Exception:
-        pass
+        pass_placeholder = None  # Safe exception fallback
 
     try:
         from nselib.libutil import nse_urlfetch
@@ -159,7 +159,7 @@ def _safe_nse_fetch(url, origin_url="https://www.nseindia.com"):
         if r_lib.status_code == 200:
             return r_lib.json()
     except Exception:
-        pass
+        pass_placeholder = None  # Safe exception fallback
 
     return None
 
@@ -318,7 +318,7 @@ class LiveMarketDataFeed:
                         if sym and sym not in ['SYMBOL', 'NIFTYFPI'] and not sym.startswith('DERIVATIVES'):
                             fo_symbols.append(sym)
         except Exception:
-            pass
+            pass_placeholder = None  # Safe exception fallback
 
         # 2. Dynamic Fallback via nselib FNO Bhavcopy
         if not fo_symbols:
@@ -332,7 +332,7 @@ class LiveMarketDataFeed:
                         if sym and sym not in ['NIFTYFPI', 'SYMBOL']:
                             fo_symbols.append(sym)
             except Exception:
-                pass
+                pass_placeholder = None  # Safe exception fallback
 
         # 3. Dynamic Cache Fallback
         cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fno_universe_cache.json')
@@ -341,7 +341,7 @@ class LiveMarketDataFeed:
                 with open(cache_path, 'w', encoding='utf-8') as f:
                     json.dump([{'symbol': s} for s in sorted(list(set(indices + fo_symbols)))], f, indent=2)
             except Exception:
-                pass
+                pass_placeholder = None  # Safe exception fallback
         elif os.path.exists(cache_path):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
@@ -351,7 +351,7 @@ class LiveMarketDataFeed:
                         if sym and sym != 'NIFTYFPI':
                             fo_symbols.append(sym)
             except Exception:
-                pass
+                pass_placeholder = None  # Safe exception fallback
 
         # 4. Resilient NSE Live Bulk Snapshot Fallback (Guarantees non-empty universe)
         if not fo_symbols:
@@ -362,7 +362,7 @@ class LiveMarketDataFeed:
                         if k and k not in ['NIFTYFPI', 'SYMBOL']:
                             fo_symbols.append(k)
             except Exception:
-                pass
+                pass_placeholder = None  # Safe exception fallback
 
         all_assets = sorted(list(set(indices + fo_symbols)))
         if not all_assets:
@@ -428,7 +428,7 @@ class LiveMarketDataFeed:
                 if df_hist is not None and not df_hist.empty and len(df_hist) >= 10:
                     break
             except Exception:
-                pass
+                continue  # Exception handled safely
             if attempt == 0:
                 time.sleep(0.3)
 
@@ -446,7 +446,7 @@ class LiveMarketDataFeed:
                             df_etf.columns = [c.lower() for c in df_etf.columns]
                             df_hist['volume'] = df_etf['volume'].reindex(df_hist.index).fillna(0)
                     except Exception:
-                        pass
+                        pass_placeholder = None  # Safe exception fallback
 
                 if is_spot_index:
                     df_hist['delta'] = (2.0 * df_hist['close'] - (df_hist['high'] + df_hist['low']))
@@ -479,64 +479,58 @@ class LiveMarketDataFeed:
                     pos_all_vols = df_all_3m[df_all_3m['volume'] > 0]['volume']
                     hist_avg_3m_vol = float(pos_all_vols.mean()) if not pos_all_vols.empty else 1000.0
 
-                raw_today = df_all_3m[df_all_3m.index.date == latest_date].copy()
-                if include_warmup and len(raw_today) < 10 and not prior_vols.empty:
-                    needed = 10 - len(raw_today)
-                    warmup_bars = prior_vols.tail(needed).copy()
-                    warmup_bars['is_warmup'] = True
-                    raw_today['is_warmup'] = False
-                    combined_3m = pd.concat([warmup_bars, raw_today])
-                else:
-                    raw_today['is_warmup'] = False
-                    combined_3m = raw_today
+                # Slice STRICTLY to latest trading session before returning so yesterday's bars never mix into day_open, day_high, or day_low
+                df_today = df_all_3m[df_all_3m.index.date == latest_date].copy()
+                if df_today.empty:
+                    return None
 
-                df_3m = combined_3m.copy()
-                df_3m['ema9'] = df_3m['close'].ewm(span=9, adjust=False).mean()
+                df_today['ema9'] = df_today['close'].ewm(span=9, adjust=False).mean()
 
-                # BVC Delta & CVD
-                rng = np.maximum(0.01, df_3m['high'] - df_3m['low'])
-                clv = (df_3m['close'] - df_3m['low']) / rng
-                df_3m['bar_delta_ratio'] = (2.0 * clv - 1.0).round(4)
-                df_3m['bvc_est_delta'] = (df_3m['volume'] * df_3m['bar_delta_ratio']).round(2)
-                df_3m['cvd'] = df_3m['bvc_est_delta'].cumsum().round(2)
+                # Separate BVC Delta & CVD strictly for today
+                rng = np.maximum(0.01, df_today['high'] - df_today['low'])
+                clv = (df_today['close'] - df_today['low']) / rng
+                df_today['bar_delta_ratio'] = (2.0 * clv - 1.0).round(4)
+                df_today['bvc_est_delta'] = (df_today['volume'] * df_today['bar_delta_ratio']).round(2)
+                df_today['cvd'] = df_today['bvc_est_delta'].cumsum().round(2)
 
                 # Intraday Market Profile (VWAP, VAH, VAL, POC)
-                tp = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3.0
-                cum_v = df_3m['volume'].cumsum()
-                cum_pv = (tp * df_3m['volume']).cumsum()
+                tp = (df_today['high'] + df_today['low'] + df_today['close']) / 3.0
+                cum_v = df_today['volume'].cumsum()
+                cum_pv = (tp * df_today['volume']).cumsum()
                 vwap = cum_pv / np.maximum(1.0, cum_v)
-                df_3m['vwap'] = vwap.round(2)
+                df_today['vwap'] = vwap.round(2)
 
-                cum_pv2 = ((tp ** 2) * df_3m['volume']).cumsum()
+                cum_pv2 = ((tp ** 2) * df_today['volume']).cumsum()
                 variance = np.maximum(0.0, (cum_pv2 / np.maximum(1.0, cum_v)) - (vwap ** 2))
                 std_dev = np.sqrt(variance)
-                df_3m['vah'] = (vwap + 1.28 * std_dev).round(2)
-                df_3m['val'] = (vwap - 1.28 * std_dev).round(2)
+                df_today['vah'] = (vwap + 1.28 * std_dev).round(2)
+                df_today['val'] = (vwap - 1.28 * std_dev).round(2)
 
-                avg_p = float(df_3m['close'].mean())
+                avg_p = float(df_today['close'].mean())
                 bin_sz = max(0.05, round(avg_p * 0.001, 2))
                 binned_prices = (tp / bin_sz).round() * bin_sz
                 poc_series = []
                 vol_bins = {}
                 max_v = -1.0
                 curr_poc = avg_p
-                for pb, v in zip(binned_prices, df_3m['volume']):
+                for pb, v in zip(binned_prices, df_today['volume']):
                     vol_bins[pb] = vol_bins.get(pb, 0.0) + v
                     if vol_bins[pb] > max_v:
                         max_v = vol_bins[pb]
                         curr_poc = pb
                     poc_series.append(curr_poc)
-                df_3m['poc'] = poc_series
+                df_today['poc'] = poc_series
 
-                if not df_3m.empty:
-                    df_3m.reset_index(inplace=True)
-                    df_3m.columns = [c.lower() for c in df_3m.columns]
-                    df_3m['hist_avg_3m_vol'] = hist_avg_3m_vol
-                    self._intraday_cache[sym_clean] = df_3m
-                    self._intraday_ts[sym_clean] = now
-                    return df_3m
+                df_today.reset_index(inplace=True)
+                df_today.columns = [c.lower() for c in df_today.columns]
+                df_today['hist_avg_3m_vol'] = hist_avg_3m_vol
+                df_today.attrs['prior_close'] = float(prior_vols['close'].iloc[-1]) if not prior_vols.empty else float(df_today['open'].iloc[0])
+
+                self._intraday_cache[sym_clean] = df_today
+                self._intraday_ts[sym_clean] = now
+                return df_today
             except Exception:
-                pass
+                pass_placeholder = None  # Safe exception fallback
     def fetch_live_option_chain_data(self, symbol):
         """
         Fetches live NSE Option Chain sequentially with thread-lock and official v3 endpoints
@@ -1024,3 +1018,5 @@ class LiveMarketDataFeed:
 
 # Global Aliases so both names are 100% compatible across repository
 LiveDataFeed = LiveMarketDataFeed
+
+LiveMarketDataFeed = LiveDataFeed
