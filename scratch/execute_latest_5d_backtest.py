@@ -11,8 +11,9 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from alpha_profile_oi_system.modules.fno_universe import determine_step_size
+
 CACHE_DIR = os.path.join(REPORT_DIR, "data_cache_latest_5d_1m")
-CONFIG_DIR = os.path.join(os.path.dirname(REPORT_DIR), "alpha_profile_oi_system", "config")
+CONFIG_DIR = os.path.join(REPO_ROOT, "alpha_profile_oi_system", "config")
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 MIN_STOCK_PRICE = 650.0
@@ -25,8 +26,8 @@ MAX_PRIOR_3BAR_ATR = 0.80
 MAX_DAY_RANGE_ATR = 2.20
 MAX_DAY_PCT_MOVE = 4.50
 
-# Active position caps
-MAX_ACTIVE_STOCKS = 3
+# Active position caps matching daily_autonomous_screener.py
+MAX_ACTIVE_STOCKS = 2
 MAX_ACTIVE_BROAD_INDEX = 1   # NIFTY, MIDCPNIFTY, FINNIFTY
 MAX_ACTIVE_BANK_INDEX = 1    # BANKNIFTY
 
@@ -334,10 +335,10 @@ def check_index_signal_pro(sym, df_today, bar_idx, regime):
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    max_allowed_base = 120.0 if sym != 'BANKNIFTY' else 350.0
+    max_allowed_base = 150.0 if sym != 'BANKNIFTY' else 350.0
     if comp_width > max_allowed_base: return None
 
-    idx_dist = 35.0 if sym != 'BANKNIFTY' else 80.0
+    idx_dist = 40.0 if sym != 'BANKNIFTY' else 90.0
     direction = None
     if b_close >= comp_high and b_close <= comp_high + idx_dist and cur_p >= comp_high and b_close > b_open:
         direction = 'CALL'
@@ -357,16 +358,16 @@ def check_index_signal_pro(sym, df_today, bar_idx, regime):
 
     cvd_res = compute_bar_delta_proxy(df_today.iloc[:bar_idx], is_index=True)
     rec_cvd = cvd_res['recent_cvd_ratio']
-    cvd_pass = (rec_cvd >= 0.12) if direction == 'CALL' else (rec_cvd <= -0.12)
+    cvd_pass = (rec_cvd >= 0.10) if direction == 'CALL' else (rec_cvd <= -0.10)
     if not cvd_pass: return None
 
     session_rngs = df_today.iloc[:bar_idx]['high'] - df_today.iloc[:bar_idx]['low']
     median_rng = float(session_rngs.median()) if len(session_rngs) > 0 else 15.0
     idx_rvol = round(rng / max(0.5, median_rng), 2)
-    if idx_rvol < 1.15: return None
+    if idx_rvol < 1.10: return None
 
     idx_pct_move = ((cur_p - idx_day_open) / max(1.0, idx_day_open)) * 100.0
-    if abs(idx_pct_move) > 1.10: return None
+    if abs(idx_pct_move) > 1.25: return None
 
     score = min(99.0, 60.0 + min(25.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.25 else 5.0))
     return {
@@ -424,14 +425,15 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
     
     cur_exp = sub['XpryDt'].min()
     exp_df = sub[sub['XpryDt'] == cur_exp]
+    lot_size = float(exp_df['NewBrdLotQty'].iloc[0]) if ('NewBrdLotQty' in exp_df.columns and float(exp_df['NewBrdLotQty'].iloc[0]) > 0) else (25.0 if is_index else 250.0)
     
     strike_data = {}
     for _, row in exp_df.iterrows():
         stk = float(row['StrkPric'])
         opt_tp = str(row['OptnTp']).upper().strip()
-        oi = float(row['OpnIntrst'])
-        chg_oi = float(row['ChngInOpnIntrst'])
-        vol = float(row['TtlTradgVol'])
+        oi = float(row['OpnIntrst']) / lot_size
+        chg_oi = float(row['ChngInOpnIntrst']) / lot_size
+        vol = float(row['TtlTradgVol']) / lot_size
         
         if stk not in strike_data:
             strike_data[stk] = {'ce_oi': 0.0, 'ce_chg_oi': 0.0, 'ce_vol': 0.0, 'pe_oi': 0.0, 'pe_chg_oi': 0.0, 'pe_vol': 0.0}
@@ -474,15 +476,15 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
     support_pe_chg = atm_info['pe_chg_oi'] + tot_lower_pe_chg
     resistance_ce_chg = atm_info['ce_chg_oi'] + tot_upper_ce_chg
 
-    min_wall_oi = 2500000.0 if is_index else 40000.0
-    monster_standing_oi = 5000000.0 if is_index else 80000.0
-    ambush_wall_min = 1500000.0 if is_index else 35000.0
+    min_wall_oi = 25000.0 if is_index else 400.0
+    monster_standing_oi = 50000.0 if is_index else 600.0
+    ambush_wall_min = 15000.0 if is_index else 250.0
 
     if direction == 'CALL':
-        target_barrier = float(target_price) if target_price else (spot + (200.0 if is_index else 100.0))
-        candidate_wall_strikes = [s for s in sorted_strikes if (s >= (atm_strike - strike_step * 0.2) and s <= target_barrier + strike_step * 0.6)]
+        target_barrier = float(target_price) if target_price else (spot + (120.0 if is_index else 50.0))
+        candidate_wall_strikes = [s for s in sorted_strikes if (s >= (atm_strike - strike_step * 0.1) and s <= target_barrier + strike_step * 0.2)]
 
-        is_otm_ce_ambush = (tot_upper_ce_chg >= ambush_wall_min) and (tot_upper_ce_chg > 2.0 * max(3000.0, support_pe_chg)) and (atm_info['ce_chg_oi'] >= 0)
+        is_otm_ce_ambush = (tot_upper_ce_chg >= ambush_wall_min) and (tot_upper_ce_chg > 2.0 * max(100.0, support_pe_chg)) and (atm_info['ce_chg_oi'] >= 0)
         gamma_squeeze_call = (tot_upper_ce_vol >= 6.0 * max(1.0, tot_upper_ce_oi))
 
         if is_otm_ce_ambush and not gamma_squeeze_call:
@@ -490,7 +492,7 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
 
         atm_ce_chg = atm_info['ce_chg_oi']
         atm_pe_chg = atm_info['pe_chg_oi']
-        atm_blocked = (atm_ce_chg > 0) and (atm_ce_chg > max(1000.0, atm_pe_chg * 1.15))
+        atm_blocked = (atm_ce_chg > 0) and (atm_ce_chg > max(50.0, atm_pe_chg * 1.25))
         if atm_blocked:
             return {'confluent': False, 'reason': f'ATM_CALL_WRITERS_FIGHTING (+{int(atm_ce_chg)} CE vs +{int(atm_pe_chg)} PE at {int(atm_strike)})'}
 
@@ -508,9 +510,9 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
             if ce_oi < min_wall_oi: continue
 
             ce_conc = ce_oi / max(1.0, tot_window_ce_oi)
-            is_concentrated = (ce_conc >= 0.18) or (ce_oi >= 1.25 * max(1.0, atm_info['ce_oi']))
+            is_concentrated = (ce_conc >= 0.22) or (ce_oi >= 1.35 * max(1.0, atm_info['ce_oi']))
             is_standing_wall = (ce_oi >= monster_standing_oi)
-            is_ratio_heavy = (ce_oi > 1.5 * max(1000.0, pe_oi)) or (is_standing_wall and ce_oi > 1.20 * max(500.0, pe_oi))
+            is_ratio_heavy = (ce_oi > 1.6 * max(100.0, pe_oi)) or (is_standing_wall and ce_oi > 1.25 * max(50.0, pe_oi))
 
             if (is_concentrated or is_standing_wall) and is_ratio_heavy:
                 if st_d['ce_vol'] >= 6.0 * ce_oi: continue
@@ -522,10 +524,10 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
         return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
 
     else:
-        target_barrier = float(target_price) if target_price else (spot - (200.0 if is_index else 100.0))
-        candidate_wall_strikes = [s for s in sorted_strikes if (target_barrier - strike_step * 0.6 <= s <= atm_strike + strike_step * 0.2)]
+        target_barrier = float(target_price) if target_price else (spot - (120.0 if is_index else 50.0))
+        candidate_wall_strikes = [s for s in sorted_strikes if (target_barrier - strike_step * 0.2 <= s <= atm_strike + strike_step * 0.1)]
 
-        is_otm_pe_ambush = (tot_lower_pe_chg >= ambush_wall_min) and (tot_lower_pe_chg > 2.0 * max(3000.0, resistance_ce_chg)) and (atm_info['pe_chg_oi'] >= 0)
+        is_otm_pe_ambush = (tot_lower_pe_chg >= ambush_wall_min) and (tot_lower_pe_chg > 2.0 * max(100.0, resistance_ce_chg)) and (atm_info['pe_chg_oi'] >= 0)
         gamma_squeeze_put = (tot_lower_pe_vol >= 6.0 * max(1.0, tot_lower_pe_oi))
 
         if is_otm_pe_ambush and not gamma_squeeze_put:
@@ -533,7 +535,7 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
 
         atm_pe_chg = atm_info['pe_chg_oi']
         atm_ce_chg = atm_info['ce_chg_oi']
-        atm_blocked = (atm_pe_chg > 0) and (atm_pe_chg > max(1000.0, atm_ce_chg * 1.15))
+        atm_blocked = (atm_pe_chg > 0) and (atm_pe_chg > max(50.0, atm_ce_chg * 1.25))
         if atm_blocked:
             return {'confluent': False, 'reason': f'ATM_PUT_WRITERS_FIGHTING (+{int(atm_pe_chg)} PE vs +{int(atm_ce_chg)} CE at {int(atm_strike)})'}
 
@@ -551,9 +553,9 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
             if pe_oi < min_wall_oi: continue
 
             pe_conc = pe_oi / max(1.0, tot_window_pe_oi)
-            is_concentrated = (pe_conc >= 0.18) or (pe_oi >= 1.25 * max(1.0, atm_info['pe_oi']))
+            is_concentrated = (pe_conc >= 0.22) or (pe_oi >= 1.35 * max(1.0, atm_info['pe_oi']))
             is_standing_wall = (pe_oi >= monster_standing_oi)
-            is_ratio_heavy = (pe_oi > 1.5 * max(1000.0, ce_oi)) or (is_standing_wall and pe_oi > 1.20 * max(500.0, ce_oi))
+            is_ratio_heavy = (pe_oi > 1.6 * max(100.0, ce_oi)) or (is_standing_wall and pe_oi > 1.25 * max(50.0, ce_oi))
 
             if (is_concentrated or is_standing_wall) and is_ratio_heavy:
                 if st_d['pe_vol'] >= 6.0 * pe_oi: continue
@@ -567,151 +569,149 @@ def verify_bhavcopy_oi_confluence(sym, date_obj, spot, direction, target_price=N
 check_oi_runway_bhavcopy = verify_bhavcopy_oi_confluence
 
 # =============================================================================
-# FORWARD OPTION BUYER TRADE SIMULATION ENGINE (PRO-TRADER)
+# CONCURRENT POSITION MANAGER (IDENTICAL TO DAILY_AUTONOMOUS_SCREENER.PY)
 # =============================================================================
-def simulate_trade_forward(cand, df_today, entry_idx, lot_map):
-    sym = cand['symbol']
-    direction = cand['direction']
-    spot_entry = float(cand['entry_price'])
-    is_idx = cand.get('is_index', False)
-    is_bank = (sym == 'BANKNIFTY')
-    atr = cand.get('stock_atr', 30.0)
+class ActiveOptionTrade:
+    def __init__(self, cand, b_idx, curr_t, lot_map):
+        self.cand = cand
+        self.entry_idx = b_idx
+        self.sym = cand['symbol']
+        self.direction = cand['direction']
+        self.spot_entry = float(cand['entry_price'])
+        self.is_idx = cand.get('is_index', False)
+        self.is_bank = (self.sym == 'BANKNIFTY')
+        self.atr = cand.get('stock_atr', 30.0)
+        self.step = 0
+        self.is_closed = False
+        self.spot_exit = self.spot_entry
+        self.exit_reason = None
+        self.exit_time = curr_t
+        self.t1_hit = False
+        self.is_risk_free = False
+        self.max_fav_pts = 0.0
+        self.max_adv_pts = 0.0
 
-    # Spot SL, T1, T2
-    if is_idx:
-        is_mid = (sym == 'MIDCPNIFTY')
-        spot_t1 = 120.0 if is_bank else (60.0 if is_mid else 90.0)
-        spot_t2 = 250.0 if is_bank else (120.0 if is_mid else 160.0)
-        spot_sl = 60.0 if is_bank else (30.0 if is_mid else 40.0)
-    else:
-        spot_t1 = max(25.0, min(50.0, round(atr * 0.35, 1)))
-        spot_t2 = max(55.0, min(100.0, round(atr * 0.75, 1)))
-        spot_sl = max(15.0, min(30.0, round(atr * 0.18, 1)))
-
-    # Real Option Contract Details
-    step = determine_step_size(spot_entry, is_index=is_idx, symbol=sym)
-    atm_strike = round(spot_entry / step) * step
-    opt_type = 'CE' if direction == 'CALL' else 'PE'
-    stk_str = f"{int(atm_strike)}" if atm_strike == int(atm_strike) else f"{atm_strike:.1f}"
-    contract_name = f"{sym} {stk_str} {opt_type}"
-    lot_size = lot_map.get(sym, (25 if is_idx else 250))
-
-    # Option Premium Model: Delta ~ 0.52 ATM
-    opt_entry_premium = max(5.0, round(spot_sl * 1.50, 2))
-    opt_sl_pts = round(spot_sl * 0.50, 2)
-
-    bars_fwd = df_today.iloc[entry_idx + 1:]
-    spot_exit = spot_entry
-    exit_reason = "EOD_EXIT"
-    exit_time = df_today.index[-1]
-    t1_hit = False
-    is_risk_free = False
-
-    max_fav_pts = 0.0
-    max_adv_pts = 0.0
-
-    for step_num, (ts, b) in enumerate(bars_fwd.iterrows()):
-        b_high = float(b['high'])
-        b_low = float(b['low'])
-        b_close = float(b['close'])
-
-        fav_move = (b_high - spot_entry) if direction == 'CALL' else (spot_entry - b_low)
-        adv_move = (spot_entry - b_low) if direction == 'CALL' else (b_high - spot_entry)
-        cur_gain = (b_close - spot_entry) if direction == 'CALL' else (spot_entry - b_close)
-
-        if fav_move > max_fav_pts: max_fav_pts = fav_move
-        if adv_move > max_adv_pts: max_adv_pts = adv_move
-
-        if fav_move >= max(20.0, spot_t1 * 0.40):
-            is_risk_free = True
-
-        if not t1_hit and fav_move >= spot_t1:
-            t1_hit = True
-            is_risk_free = True
-
-        if t1_hit:
-            if fav_move >= spot_t2:
-                spot_exit = (spot_entry + spot_t2) if direction == 'CALL' else (spot_entry - spot_t2)
-                exit_reason = "TARGET_2_HIT (JACKPOT)"
-                exit_time = ts
-                break
-            lock_pts = spot_t1 * 0.40
-            locked_sl = (spot_entry + lock_pts) if direction == 'CALL' else (spot_entry - lock_pts)
-            if (direction == 'CALL' and b_low <= locked_sl) or (direction == 'PUT' and b_high >= locked_sl):
-                spot_exit = locked_sl
-                exit_reason = "T1_PROFIT_LOCKED_EXIT"
-                exit_time = ts
-                break
+        if self.is_idx:
+            is_mid = (self.sym == 'MIDCPNIFTY')
+            self.spot_t1 = 120.0 if self.is_bank else (60.0 if is_mid else 80.0)
+            self.spot_t2 = 250.0 if self.is_bank else (120.0 if is_mid else 150.0)
+            self.spot_sl = 60.0 if self.is_bank else (30.0 if is_mid else 40.0)
         else:
-            if adv_move >= spot_sl:
-                spot_exit = (spot_entry - spot_sl) if direction == 'CALL' else (spot_entry + spot_sl)
-                exit_reason = "SL_HIT"
-                exit_time = ts
-                break
-            if step_num >= 4 and cur_gain <= 0.0:
-                spot_exit = b_close
-                exit_reason = "15M_TIME_SL_SCRATCH"
-                exit_time = ts
-                break
+            self.spot_t1 = max(25.0, min(50.0, round(self.atr * 0.35, 1)))
+            self.spot_t2 = max(55.0, min(100.0, round(self.atr * 0.75, 1)))
+            self.spot_sl = max(15.0, min(30.0, round(self.atr * 0.18, 1)))
 
-    if exit_reason == "EOD_EXIT" and len(bars_fwd) > 0:
-        spot_exit = float(bars_fwd.iloc[-1]['close'])
+        step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
+        self.atm_strike = round(self.spot_entry / step) * step
+        self.opt_type = 'CE' if self.direction == 'CALL' else 'PE'
+        stk_str = f"{int(self.atm_strike)}" if self.atm_strike == int(self.atm_strike) else f"{self.atm_strike:.1f}"
+        self.contract_name = f"{self.sym} {stk_str} {self.opt_type}"
+        self.lot_size = lot_map.get(self.sym, (25 if self.is_idx else 250))
+        self.opt_entry_premium = max(5.0, round(self.spot_sl * 1.50, 2))
+        self.opt_sl_pts = round(self.spot_sl * 0.50, 2)
 
-    spot_pts = round((spot_exit - spot_entry) if direction == 'CALL' else (spot_entry - spot_exit), 2)
+    def update(self, b_high, b_low, b_close, ts):
+        if self.is_closed: return
+        self.step += 1
+        fav_move = (b_high - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - b_low)
+        adv_move = (self.spot_entry - b_low) if self.direction == 'CALL' else (b_high - self.spot_entry)
+        cur_gain = (b_close - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - b_close)
 
-    # Option Point Calculation with Gamma Expansion & Theta decay on scratch
-    if "JACKPOT" in exit_reason:
-        eff_delta = 0.72  # In-the-money gamma acceleration
-    elif "T1" in exit_reason:
-        eff_delta = 0.58
-    elif "15M" in exit_reason:
-        eff_delta = 0.45  # Mild theta/spread friction
-    elif "SL" in exit_reason:
-        eff_delta = 0.50
-    else:
-        eff_delta = 0.50
+        if fav_move > self.max_fav_pts: self.max_fav_pts = fav_move
+        if adv_move > self.max_adv_pts: self.max_adv_pts = adv_move
 
-    opt_pts = round(spot_pts * eff_delta, 2)
-    opt_exit_premium = max(0.50, round(opt_entry_premium + opt_pts, 2))
+        if fav_move >= max(20.0, self.spot_t1 * 0.40):
+            self.is_risk_free = True
 
-    gross_pnl = round(opt_pts * lot_size, 2)
+        if not self.t1_hit and fav_move >= self.spot_t1:
+            self.t1_hit = True
+            self.is_risk_free = True
 
-    # Realistic Option Buyer Taxes & Brokerage
-    brokerage = 40.0
-    stt = round(opt_exit_premium * lot_size * 0.001, 2)
-    turnover_fee = round((opt_entry_premium + opt_exit_premium) * lot_size * 0.0005, 2)
-    gst = round((brokerage + turnover_fee) * 0.18, 2)
-    stamp_duty = round(opt_entry_premium * lot_size * 0.00003, 2)
-    tx_costs = round(brokerage + stt + turnover_fee + gst + stamp_duty, 2)
-    net_pnl = round(gross_pnl - tx_costs, 2)
+        if self.t1_hit:
+            if fav_move >= self.spot_t2:
+                self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
+                self.exit_reason = "TARGET_2_HIT (JACKPOT)"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+            lock_pts = self.spot_t1 * 0.40
+            locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
+            if (self.direction == 'CALL' and b_low <= locked_sl) or (self.direction == 'PUT' and b_high >= locked_sl):
+                self.spot_exit = locked_sl
+                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+        else:
+            if adv_move >= self.spot_sl:
+                self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
+                self.exit_reason = "SL_HIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+            if self.step >= 5 and cur_gain <= 0.0:
+                self.spot_exit = b_close
+                self.exit_reason = "15M_TIME_SL_SCRATCH"
+                self.exit_time = ts
+                self.is_closed = True
+                return
 
-    realized_r = round(opt_pts / max(0.5, opt_sl_pts), 2)
-    mfe_r = round((max_fav_pts * 0.60) / max(0.5, opt_sl_pts), 2)
-    mae_r = round((max_adv_pts * 0.50) / max(0.5, opt_sl_pts), 2)
+    def close_eod(self, final_close, ts):
+        if not self.is_closed:
+            self.spot_exit = final_close
+            self.exit_reason = "EOD_EXIT"
+            self.exit_time = ts
+            self.is_closed = True
 
-    return {
-        'symbol': sym,
-        'contract': contract_name,
-        'direction': direction,
-        'eval_time': cand['eval_time'],
-        'exit_time': exit_time,
-        'spot_entry': spot_entry,
-        'spot_exit': spot_exit,
-        'spot_pts': spot_pts,
-        'opt_entry': opt_entry_premium,
-        'opt_exit': opt_exit_premium,
-        'opt_pts': opt_pts,
-        'lot_size': lot_size,
-        'gross_pnl': gross_pnl,
-        'tx_costs': tx_costs,
-        'net_pnl': net_pnl,
-        'realized_r': realized_r,
-        'mfe_r': mfe_r,
-        'mae_r': mae_r,
-        'exit_reason': exit_reason,
-        'score': cand['score'],
-        'type': cand['type']
-    }
+    def get_summary(self, d_str):
+        spot_pts = round((self.spot_exit - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - self.spot_exit), 2)
+        if "JACKPOT" in self.exit_reason: eff_delta = 0.72
+        elif "T1" in self.exit_reason: eff_delta = 0.58
+        elif "15M" in self.exit_reason: eff_delta = 0.45
+        elif "SL" in self.exit_reason: eff_delta = 0.50
+        else: eff_delta = 0.50
+
+        opt_pts = round(spot_pts * eff_delta, 2)
+        opt_exit_premium = max(0.50, round(self.opt_entry_premium + opt_pts, 2))
+        gross_pnl = round(opt_pts * self.lot_size, 2)
+
+        brokerage = 40.0
+        stt = round(opt_exit_premium * self.lot_size * 0.001, 2)
+        turnover_fee = round((self.opt_entry_premium + opt_exit_premium) * self.lot_size * 0.0005, 2)
+        gst = round((brokerage + turnover_fee) * 0.18, 2)
+        stamp_duty = round(self.opt_entry_premium * self.lot_size * 0.00003, 2)
+        tx_costs = round(brokerage + stt + turnover_fee + gst + stamp_duty, 2)
+        net_pnl = round(gross_pnl - tx_costs, 2)
+
+        realized_r = round(opt_pts / max(0.5, self.opt_sl_pts), 2)
+        mfe_r = round((self.max_fav_pts * 0.60) / max(0.5, self.opt_sl_pts), 2)
+        mae_r = round((self.max_adv_pts * 0.50) / max(0.5, self.opt_sl_pts), 2)
+
+        return {
+            'date': d_str,
+            'symbol': self.sym,
+            'contract': self.contract_name,
+            'direction': self.direction,
+            'eval_time': self.cand['eval_time'],
+            'exit_time': self.exit_time,
+            'spot_entry': self.spot_entry,
+            'spot_exit': self.spot_exit,
+            'spot_pts': spot_pts,
+            'opt_entry': self.opt_entry_premium,
+            'opt_exit': opt_exit_premium,
+            'opt_pts': opt_pts,
+            'lot_size': self.lot_size,
+            'gross_pnl': gross_pnl,
+            'tx_costs': tx_costs,
+            'net_pnl': net_pnl,
+            'realized_r': realized_r,
+            'mfe_r': mfe_r,
+            'mae_r': mae_r,
+            'exit_reason': self.exit_reason,
+            'score': self.cand['score'],
+            'type': self.cand['type'],
+            'is_index': self.is_idx
+        }
 
 if __name__ == "__main__":
     print("Loading latest resampled 3m data...")
@@ -720,7 +720,7 @@ if __name__ == "__main__":
     lot_map = load_dynamic_lot_sizes()
     unique_dates = sorted(list(set(d.strftime('%Y-%m-%d') for df in asset_data.values() for d in df.index)))[-5:]
     stock_syms = [s for s in asset_data.keys() if s not in INDEX_NAMES]
-    all_trades = []
+    all_closed_trades = []
 
     print(f"Loaded {len(asset_data)} active assets ({len(stock_syms)} equities, {len(INDEX_NAMES)} indices).")
     print(f"Authoritative 5-Day Backtest Window: {unique_dates}")
@@ -731,7 +731,7 @@ if __name__ == "__main__":
         if nifty_day.empty: continue
         nifty_day['ema9'] = nifty_day['close'].ewm(span=9, adjust=False).mean()
 
-        active_traders = []
+        active_trades = []
         daily_traded_symbols = set()
         time_index = nifty_day.index
 
@@ -741,38 +741,56 @@ if __name__ == "__main__":
             is_m = (570 <= tot_m <= 615)
             is_a = (795 <= tot_m <= 855)
 
+            # 1. Update Open Active Trades Concurrently
+            for tr in active_trades:
+                if not tr.is_closed:
+                    df_asset = asset_data[tr.sym][asset_data[tr.sym].index.date == d]
+                    if curr_t in df_asset.index:
+                        b = df_asset.loc[curr_t]
+                        if isinstance(b, pd.DataFrame): b = b.iloc[0]
+                        tr.update(float(b['high']), float(b['low']), float(b['close']), curr_t)
+
+            # Collect closed trades
+            for tr in active_trades:
+                if tr.is_closed and tr not in all_closed_trades:
+                    all_closed_trades.append(tr)
+
+            # Retain only active open positions
+            active_trades = [tr for tr in active_trades if not tr.is_closed]
+
             if not (is_m or is_a): continue
 
             regime = get_nifty_regime(nifty_day, b_idx)
             if not (regime['allow_call'] or regime['allow_put']): continue
 
-            act_stocks = len([tr for tr in active_traders if not tr['is_index']])
-            act_idx = len([tr for tr in active_traders if tr['is_index']])
+            act_broad = sum(1 for tr in active_trades if tr.is_idx and (not tr.is_bank) and (not tr.is_risk_free))
+            act_bank = sum(1 for tr in active_trades if tr.is_idx and tr.is_bank and (not tr.is_risk_free))
+            act_stocks = sum(1 for tr in active_trades if (not tr.is_idx) and (not tr.is_risk_free))
 
-            # 1. Index Evaluation
-            if act_idx < MAX_ACTIVE_BROAD_INDEX:
+            # 2. Evaluate Stock AND Index Candidates TOGETHER (Synchronized Dual Engine)
+            candidates = []
+
+            # A. Index Candidates
+            if (act_broad < MAX_ACTIVE_BROAD_INDEX or act_bank < MAX_ACTIVE_BANK_INDEX) and regime.get('allow_index', True):
                 for isym in INDEX_NAMES:
-                    if not regime.get('allow_index', True): continue
-                    if isym not in asset_data or isym in daily_traded_symbols: continue
+                    if isym in daily_traded_symbols or isym not in asset_data: continue
+                    is_bank = (isym == 'BANKNIFTY')
+                    if is_bank and act_bank >= MAX_ACTIVE_BANK_INDEX: continue
+                    if (not is_bank) and act_broad >= MAX_ACTIVE_BROAD_INDEX: continue
+
                     idf = asset_data[isym][asset_data[isym].index.date == d]
                     if len(idf) <= b_idx: continue
                     sig = check_index_signal_pro(isym, idf, b_idx, regime)
                     if sig:
-                        t_price = (sig['entry_price'] + 150.0) if sig['direction'] == 'CALL' else (sig['entry_price'] - 150.0)
+                        t_price = (sig['entry_price'] + 100.0) if sig['direction'] == 'CALL' else (sig['entry_price'] - 100.0)
                         oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
-                        if not oi_res['confluent']: continue
-                        sim_res = simulate_trade_forward(sig, idf, b_idx, lot_map)
-                        sim_res['date'] = d_str
-                        all_trades.append(sim_res)
-                        daily_traded_symbols.add(isym)
-                        act_idx += 1
-                        break
+                        if oi_res['confluent']:
+                            candidates.append(sig)
 
-            # 2. Stock Evaluation
+            # B. Stock Candidates
             if act_stocks < MAX_ACTIVE_STOCKS:
-                stock_cands = []
                 for ssym in stock_syms:
-                    if ssym in daily_traded_symbols: continue
+                    if ssym in daily_traded_symbols or ssym not in asset_data: continue
                     sdf = asset_data[ssym][asset_data[ssym].index.date == d]
                     if len(sdf) <= b_idx: continue
                     stock_atr = atrs.get(ssym, 30.0)
@@ -780,25 +798,48 @@ if __name__ == "__main__":
                     if sig:
                         t_price = (sig['entry_price'] + 50.0) if sig['direction'] == 'CALL' else (sig['entry_price'] - 50.0)
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
-                        if not oi_res['confluent']: continue
-                        stock_cands.append((sig, sdf))
+                        if oi_res['confluent']:
+                            candidates.append(sig)
 
-                stock_cands.sort(key=lambda x: x[0]['score'], reverse=True)
-                slots_avail = MAX_ACTIVE_STOCKS - act_stocks
-                for chosen_sig, chosen_df in stock_cands[:slots_avail]:
-                    sim_res = simulate_trade_forward(chosen_sig, chosen_df, b_idx, lot_map)
-                    sim_res['date'] = d_str
-                    all_trades.append(sim_res)
-                    daily_traded_symbols.add(chosen_sig['symbol'])
+            # Sort combined candidates by 100-point 5-Pillar Score
+            candidates.sort(key=lambda x: x['score'], reverse=True)
+
+            # Dispatch new trades into available slots
+            for cand in candidates:
+                is_i = cand.get('is_index', False)
+                is_b = (cand['symbol'] == 'BANKNIFTY')
+                if is_i:
+                    if is_b and act_bank >= MAX_ACTIVE_BANK_INDEX: continue
+                    if (not is_b) and act_broad >= MAX_ACTIVE_BROAD_INDEX: continue
+                else:
+                    if act_stocks >= MAX_ACTIVE_STOCKS: continue
+
+                new_trade = ActiveOptionTrade(cand, b_idx, curr_t, lot_map)
+                active_trades.append(new_trade)
+                daily_traded_symbols.add(cand['symbol'])
+                if is_i:
+                    if is_b: act_bank += 1
+                    else: act_broad += 1
+                else:
                     act_stocks += 1
 
-    df_res = pd.DataFrame(all_trades)
+        # End of day: close remaining active trades
+        for tr in active_trades:
+            if not tr.is_closed:
+                df_asset = asset_data[tr.sym][asset_data[tr.sym].index.date == d]
+                if len(df_asset) > 0:
+                    final_close = float(df_asset.iloc[-1]['close'])
+                    tr.close_eod(final_close, df_asset.index[-1])
+                    all_closed_trades.append(tr)
+
+    summaries = [tr.get_summary(str(tr.cand['eval_time'].date())) for tr in all_closed_trades]
+    df_res = pd.DataFrame(summaries)
     csv_path = os.path.join(REPORT_DIR, "Alpha_Latest_5Day_Ending_Today_Backtest.csv")
     df_res.to_csv(csv_path, index=False)
     print(f"\nSaved authoritative backtest CSV to: {csv_path}")
 
     print("\n" + "="*85)
-    print("PRO-TRADER 5-PILLAR INSTITUTIONAL OPTION BUYER ENGINE (5-DAY ENDING TODAY)")
+    print("PRO-TRADER SYNCHRONIZED DUAL ENGINE: STOCK & INDEX TOGETHER (5-DAY ENDING TODAY)")
     print("="*85)
     print(f"Total Dispatched Option Trades: {len(df_res)}")
     wins = df_res[df_res['opt_pts'] > 0]
@@ -830,10 +871,18 @@ if __name__ == "__main__":
     call_net = calls['realized_r'].sum()
     put_net = puts['realized_r'].sum()
 
+    idx_trades = df_res[df_res['is_index'] == True]
+    stk_trades = df_res[df_res['is_index'] == False]
+    idx_wins = len(idx_trades[idx_trades['opt_pts'] > 0])
+    stk_wins = len(stk_trades[stk_trades['opt_pts'] > 0])
+    idx_net = idx_trades['realized_r'].sum()
+    stk_net = stk_trades['realized_r'].sum()
+
     print(f"Wins: {len(wins)} ({win_rate:.1f}%) | Losses/Scratches: {len(losses)} | Full SL Hits: {len(full_sl)}")
     print(f"Gross Profit: +{gross_r:.2f}R | Gross Loss: -{loss_r:.2f}R | Net Profit: +{net_r:.2f}R | Net PnL: Rs {total_net_pnl:,.2f}")
     print(f"Profit Factor: {pf} | Expectancy: +{expectancy_r:.2f}R per trade | Max Drawdown: {max_dd:.2f}R")
     print(f"Average MFE: +{avg_mfe:.2f}R | Average MAE: -{avg_mae:.2f}R")
+    print(f"INDEX Trades: {len(idx_trades)} (Wins: {idx_wins}, Net: {idx_net:+.2f}R) | STOCK Trades: {len(stk_trades)} (Wins: {stk_wins}, Net: {stk_net:+.2f}R)")
     print(f"CALL Trades: {len(calls)} (Wins: {call_wins}, Net: {call_net:+.2f}R) | PUT Trades: {len(puts)} (Wins: {put_wins}, Net: {put_net:+.2f}R)")
 
     print("\n--- ALL EXECUTED OPTION TRADES ---")
