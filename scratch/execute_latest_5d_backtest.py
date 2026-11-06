@@ -183,12 +183,20 @@ def load_dynamic_lot_sizes() -> Dict[str, int]:
 def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
     if b_idx < 2:
         return {'allow_call': True, 'allow_put': True, 'allow_stock_call': True, 'allow_stock_put': True, 'reason': 'START', 'move': 0.0}
+    comp_df = nifty_day.iloc[:b_idx + 1]
     eval_b = nifty_day.iloc[b_idx - 1]
     live_b = nifty_day.iloc[b_idx]
     n_spot = float(live_b['close'])
     ema9 = float(nifty_day['ema9'].iloc[b_idx])
+    ema21 = float(nifty_day['ema21'].iloc[b_idx]) if 'ema21' in nifty_day.columns else float(comp_df['close'].ewm(span=21, adjust=False).mean().iloc[-1])
     day_open = float(nifty_day['open'].iloc[0])
+    day_high = float(comp_df['high'].max())
+    day_low = float(comp_df['low'].min())
     move_from_open = n_spot - day_open
+    drop_from_high = day_high - n_spot
+    rise_from_low = n_spot - day_low
+
+    tp_vwap = float(((comp_df['high'] + comp_df['low'] + comp_df['close']) / 3.0).mean())
 
     n_last_bar_rng = float(eval_b['high'] - eval_b['low'])
     if n_last_bar_rng > 65.0:
@@ -196,20 +204,21 @@ def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
 
     recent_rng = nifty_day['high'].iloc[max(0, b_idx - 5):b_idx + 1].max() - nifty_day['low'].iloc[max(0, b_idx - 5):b_idx + 1].min()
     ema_dist = abs(n_spot - ema9)
-    allow_index = True
+
+    is_nifty_bullish = (n_spot >= tp_vwap and n_spot >= ema21) or (move_from_open >= 12.0 and drop_from_high < 40.0)
+    is_nifty_bearish = (n_spot <= tp_vwap and n_spot <= ema21) or (move_from_open <= -12.0 and rise_from_low < 40.0)
+
+    allow_stock_put = not is_nifty_bullish
+    allow_stock_call = not is_nifty_bearish
+
     if recent_rng < 22.0 and ema_dist < 12.0:
-        allow_index = False
         allow_call = False
         allow_put = False
-        allow_stock_call = True
-        allow_stock_put = True
         reason = 'CHOP_TRAP_INDEX_FROZEN'
     else:
-        allow_call = (move_from_open >= 10.0) and (n_spot >= ema9)
-        allow_put = (move_from_open <= -10.0) and (n_spot <= ema9)
-        allow_stock_call = (move_from_open >= -40.0)
-        allow_stock_put = (move_from_open <= 40.0)
-        reason = 'NORMAL'
+        allow_call = is_nifty_bullish and (n_spot >= ema9)
+        allow_put = is_nifty_bearish and (n_spot <= ema9)
+        reason = 'NIFTY_BULLISH' if is_nifty_bullish else ('NIFTY_BEARISH' if is_nifty_bearish else 'NORMAL')
 
     return {
         'allow_call': allow_call,
@@ -421,6 +430,7 @@ class ActiveOptionTrade:
         self.exit_time = curr_t
         self.t1_hit = False
         self.is_risk_free = False
+        self.breakeven_armed = False
         self.max_fav_pts = 0.0
         self.max_adv_pts = 0.0
 
@@ -430,9 +440,9 @@ class ActiveOptionTrade:
             self.spot_t2 = 250.0 if self.is_bank else (120.0 if is_mid else 150.0)
             self.spot_sl = 60.0 if self.is_bank else (30.0 if is_mid else 40.0)
         else:
-            self.spot_sl = max(4.0, round(self.atr * 0.28, 2))
-            self.spot_t1 = max(5.5, round(self.atr * 0.32, 2))
-            self.spot_t2 = max(14.0, round(self.atr * 0.75, 1))
+            self.spot_sl = max(4.0, round(self.atr * 0.25, 2))
+            self.spot_t1 = max(5.0, round(self.atr * 0.30, 2))
+            self.spot_t2 = max(11.0, round(self.atr * 0.65, 2))
 
         step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
@@ -440,8 +450,8 @@ class ActiveOptionTrade:
         stk_str = f"{int(self.atm_strike)}" if self.atm_strike == int(self.atm_strike) else f"{self.atm_strike:.1f}"
         self.contract_name = f"{self.sym} {stk_str} {self.opt_type}"
         self.lot_size = lot_map.get(self.sym, (25 if self.is_idx else 250))
-        self.opt_entry_premium = max(5.0, round(self.spot_sl * 1.50, 2))
-        self.opt_sl_pts = round(max(2.0, self.opt_entry_premium * 0.20), 2)
+        self.opt_entry_premium = max(6.0, round(self.spot_sl * 2.00, 2))
+        self.opt_sl_pts = round(max(1.5, self.spot_sl * 0.50), 2)
 
     def update(self, b_high: float, b_low: float, b_close: float, ts):
         """
@@ -467,10 +477,14 @@ class ActiveOptionTrade:
         # Force EOD Exit at 15:20 IST
         if tot_m >= 920:
             if self.t1_hit:
-                lock_pts = self.spot_t1 * 0.50
+                lock_pts = self.spot_t1 * 0.55
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, b_close) if self.direction == 'CALL' else min(locked_sl, b_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+            elif self.breakeven_armed:
+                be_sl = (self.spot_entry + 0.15 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.15 * self.spot_sl)
+                self.spot_exit = max(be_sl, b_close) if self.direction == 'CALL' else min(be_sl, b_close)
+                self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
             else:
                 self.spot_exit = b_close
                 self.exit_reason = "EOD_EXIT"
@@ -478,15 +492,18 @@ class ActiveOptionTrade:
             self.is_closed = True
             return
 
-        # Check Intrabar SL First (Conservative SL-First Resolution)
+        # Check Intrabar SL and Trailing Logic
         if not self.t1_hit:
-            if adv_move >= self.spot_sl:
-                self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
-                self.exit_reason = "SL_HIT"
-                self.exit_time = ts
-                self.is_closed = True
-                return
+            # Check Initial SL Breach (only if Breakeven Shield not yet armed)
+            if not self.breakeven_armed:
+                if adv_move >= self.spot_sl:
+                    self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
+                    self.exit_reason = "SL_HIT"
+                    self.exit_time = ts
+                    self.is_closed = True
+                    return
 
+            # Check Target 1 and Target 2 (Jackpot) FIRST
             if fav_move >= self.spot_t1:
                 self.t1_hit = True
                 self.is_risk_free = True
@@ -497,7 +514,7 @@ class ActiveOptionTrade:
                     self.is_closed = True
                     return
                 # Check locked floor immediately if price retraced below floor on same candle
-                lock_pts = self.spot_t1 * 0.50
+                lock_pts = self.spot_t1 * 0.55
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
                 if sl_breached:
@@ -507,16 +524,47 @@ class ActiveOptionTrade:
                     self.is_closed = True
                     return
 
+            # Check Breakeven Shield Breach (if already armed on a previous bar)
+            if self.breakeven_armed:
+                locked_be = (self.spot_entry + 0.15 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.15 * self.spot_sl)
+                be_breached = (b_low <= locked_be) if self.direction == 'CALL' else (b_high >= locked_be)
+                if be_breached:
+                    self.spot_exit = locked_be
+                    self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
+                    self.exit_time = ts
+                    self.is_closed = True
+                    return
+            else:
+                # Arm Breakeven Shield once favorable move reaches 0.55 * T1 before full SL
+                if fav_move >= (self.spot_t1 * 0.55) and adv_move < self.spot_sl:
+                    self.breakeven_armed = True
+                    locked_be = (self.spot_entry + 0.15 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.15 * self.spot_sl)
+                    be_closed_below = (b_close <= locked_be) if self.direction == 'CALL' else (b_close >= locked_be)
+                    if be_closed_below:
+                        self.spot_exit = locked_be
+                        self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
+                        self.exit_time = ts
+                        self.is_closed = True
+                        return
+
             # 15-Minute Epoch Stagnation Loss Scratch (strictly at step 5)
-            if self.step == 5 and (self.max_fav_pts < self.spot_t1 * 0.45) and (cur_gain < -(self.spot_sl * 0.15)):
+            if self.step == 5 and (not self.breakeven_armed) and (cur_gain < -(self.spot_sl * 0.10)):
                 self.spot_exit = b_close
                 self.exit_reason = "15M_TIME_SL_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
+
+            # 30-Minute Non-Performer Exit (strictly at step 10)
+            if self.step == 10 and (not self.t1_hit) and (cur_gain <= (self.spot_sl * 0.15)):
+                self.spot_exit = b_close
+                self.exit_reason = "30M_STAGNANT_SCRATCH"
+                self.exit_time = ts
+                self.is_closed = True
+                return
         else:
-            # T1 was already hit -> Trailing SL locked at +0.50 * T1
-            lock_pts = self.spot_t1 * 0.50
+            # T1 was already hit -> Trailing SL locked at +0.55 * T1
+            lock_pts = self.spot_t1 * 0.55
             locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             
             # Check Trailing SL breach
@@ -546,10 +594,14 @@ class ActiveOptionTrade:
     def close_eod(self, final_close: float, ts):
         if not self.is_closed:
             if self.t1_hit:
-                lock_pts = self.spot_t1 * 0.50
+                lock_pts = self.spot_t1 * 0.55
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, final_close) if self.direction == 'CALL' else min(locked_sl, final_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+            elif self.breakeven_armed:
+                be_sl = (self.spot_entry + 0.15 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.15 * self.spot_sl)
+                self.spot_exit = max(be_sl, final_close) if self.direction == 'CALL' else min(be_sl, final_close)
+                self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
             else:
                 self.spot_exit = final_close
                 self.exit_reason = "EOD_EXIT"
@@ -562,7 +614,9 @@ class ActiveOptionTrade:
             eff_delta = 0.72
         elif "T1" in self.exit_reason:
             eff_delta = 0.58
-        elif "15M" in self.exit_reason:
+        elif "BREAKEVEN" in self.exit_reason:
+            eff_delta = 0.50
+        elif "SCRATCH" in self.exit_reason or "TIME_SL" in self.exit_reason:
             eff_delta = 0.45
         elif "SL" in self.exit_reason:
             eff_delta = 0.50
@@ -627,7 +681,7 @@ def print_institutional_tearsheet(df_res: pd.DataFrame, csv_path: str):
 
     wins = df_res[df_res['opt_pts'] > 0]
     losses = df_res[df_res['opt_pts'] <= 0]
-    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL', na=False)]
+    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL|BREAKEVEN', na=False)]
     full_sl = df_res[df_res['exit_reason'] == 'SL_HIT']
 
     gross_win_pnl = wins['net_pnl'].sum() if not wins.empty else 0.0
@@ -713,6 +767,7 @@ if __name__ == "__main__":
         if nifty_day.empty:
             continue
         nifty_day['ema9'] = nifty_day['close'].ewm(span=9, adjust=False).mean()
+        nifty_day['ema21'] = nifty_day['close'].ewm(span=21, adjust=False).mean()
 
         active_trades = []
         daily_traded_symbols = set()
