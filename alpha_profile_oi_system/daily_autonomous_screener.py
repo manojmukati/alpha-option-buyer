@@ -390,9 +390,9 @@ def evaluate_common_5pillar_bar_slice(
             return None
 
     # Pillar 5 (10 pts + Hard Veto): Remaining ATR Fuel <= 90%
-    fuel_spent = abs(eval_close - day_open)
+    fuel_spent = day_high - day_low
     atr_used_ratio = fuel_spent / max(1.0, atr)
-    if atr_used_ratio > 0.90:
+    if atr_used_ratio > 0.90 or abs(pct_change) > 3.00:
         return None
 
     # Pro-Trader 100-Point Composite Scoring
@@ -455,8 +455,8 @@ class DailyAutonomousScreener:
                     u = json.load(f)
                     if isinstance(u, list) and len(u) > 0:
                         return u
-            except Exception:
-                pass_placeholder = None
+            except Exception as e:
+                self.logger.warning(f"Error loading fno_universe.json: {e}")
 
         bulk = fetch_bulk_nse_snapshot()
         if bulk:
@@ -472,8 +472,8 @@ class DailyAutonomousScreener:
                     data = json.load(f)
                     if data.get('date') == today_str:
                         return data.get('dispatched', {})
-            except Exception:
-                pass_placeholder = None
+            except Exception as e:
+                self.logger.warning(f"Error reading dispatched cache: {e}")
         return {}
 
     def _save_dispatched_cache(self):
@@ -482,8 +482,8 @@ class DailyAutonomousScreener:
             os.makedirs(os.path.dirname(self.dispatched_cache_file), exist_ok=True)
             with open(self.dispatched_cache_file, 'w', encoding='utf-8') as f:
                 json.dump({'date': today_str, 'dispatched': self.dispatched_today}, f, indent=2)
-        except Exception:
-            pass_placeholder = None
+        except Exception as e:
+            self.logger.warning(f"Error saving dispatched cache: {e}")
 
     def is_already_dispatched(self, symbol: str, contract: str = '') -> bool:
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
@@ -923,44 +923,10 @@ class DailyAutonomousScreener:
             print(f"[POSITION MANAGER ERROR]: {e}")
 
     def _log_rejection_audit(self, ist_now, all_eval_results, verified_trades, stage2_rejections):
-        audit_file = os.path.join(CURRENT_DIR, 'Alpha_Rejection_Audit_Ledger.jsonl')
         ts_str = ist_now.strftime('%Y-%m-%d %H:%M:%S IST')
         qual_syms = {t['symbol'] for t in verified_trades}
-        try:
-            with open(audit_file, 'a', encoding='utf-8') as f:
-                for item in all_eval_results:
-                    sym = item.get('symbol', 'UNKNOWN')
-                    is_qual = sym in qual_syms
-                    stg1_pass = item.get('passed', False)
-                    if is_qual:
-                        rej_stage = 'NONE'
-                        fail_reason = 'QUALIFIED'
-                    elif not stg1_pass:
-                        rej_stage = 'STAGE_1'
-                        fail_reason = item.get('failed_gate', 'STAGE_1_FILTER')
-                    elif sym in stage2_rejections:
-                        rej_stage = 'STAGE_2'
-                        fail_reason = stage2_rejections[sym]
-                    else:
-                        rej_stage = 'STAGE_2'
-                        fail_reason = 'STAGE_2_UNVERIFIED'
-
-                    rec = {
-                        'symbol': sym,
-                        'timestamp': ts_str,
-                        'direction': item.get('direction', 'NEUTRAL'),
-                        'is_index': item.get('is_index', False),
-                        'stage1_passed': stg1_pass,
-                        'rejection_stage': rej_stage,
-                        'failure_reason': fail_reason,
-                        'score': item.get('score', 0.0),
-                        'rvol': item.get('rvol', 0.0),
-                        'pct_change': item.get('pct_change', 0.0),
-                        'decision': 'QUALIFIED' if is_qual else 'REJECTED'
-                    }
-                    f.write(json.dumps(rec) + '\n')
-        except Exception:
-            pass_placeholder = None
+        rej_count = len(all_eval_results) - len(qual_syms)
+        self.logger.info(f"[AUDIT SUMMARY]: Evaluated {len(all_eval_results)} assets at {ts_str} -> {len(qual_syms)} qualified, {rej_count} rejected.")
 
     def run_live_slab_session(self, interval_seconds: int = 180):
         print(f"[SLAB RUNNER]: Initializing 3-minute autonomous screening loop...")

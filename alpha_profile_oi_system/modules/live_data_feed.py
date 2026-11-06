@@ -263,8 +263,8 @@ class LiveMarketDataFeed:
                 atr_val = calculate_wilder_atr(df_d, period=14)
                 self._atr_cache[sym_clean] = round(atr_val, 2)
                 return round(atr_val, 2)
-        except Exception:
-            pass
+        except Exception as e:
+            atr_val = None
 
         # Fallback approximation: 2.2% of spot for stocks, point estimate for index
         if sym_clean == 'BANKNIFTY':

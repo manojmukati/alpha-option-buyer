@@ -69,7 +69,7 @@ def load_resampled_3m_data() -> Dict[str, pd.DataFrame]:
             if len(df_3m) > 10:
                 asset_dict[sym] = df_3m
         except Exception:
-            pass_placeholder = None
+            continue
     return asset_dict
 
 def load_verified_atrs() -> Dict[str, float]:
@@ -105,8 +105,8 @@ def load_dynamic_lot_sizes() -> Dict[str, int]:
                         l = int(row['NewBrdLotQty'])
                         if l > 0:
                             lot_map[sym] = l
-        except Exception:
-            pass_placeholder = None
+        except Exception as e:
+            err_bhav = str(e)
     return lot_map
 
 def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
