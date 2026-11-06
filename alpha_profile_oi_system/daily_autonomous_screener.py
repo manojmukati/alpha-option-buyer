@@ -81,15 +81,15 @@ STOCK_SECTOR_MAP = {
 
 def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     """
-    Checks if current IST time falls strictly within designated prime trading slabs:
-    - Prime Morning:   09:30 AM to 10:00 AM IST (570 to 600 mins) — blocks 600 < tot_m <= 615
-    - Prime Afternoon: 01:12 PM to 01:57 PM IST (792 to 837 mins) — blocks 837 < tot_m <= 855
+    Checks if current IST time falls strictly within designated trading slabs:
+    - Morning:   09:30 AM to 10:15 AM IST (570 to 615 mins)
+    - Afternoon: 01:12 PM to 02:15 PM IST (792 to 855 mins)
     """
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 600)
-    slab2 = (792 <= tot_mins <= 837)
+    slab1 = (570 <= tot_mins <= 615)
+    slab2 = (792 <= tot_mins <= 855)
     return slab1 or slab2
 
 
@@ -237,11 +237,11 @@ def evaluate_common_5pillar_bar_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # Check prime trading slab window
+    # Check trading slab window
     if hasattr(eval_bar, 'name') and hasattr(eval_bar.name, 'hour'):
         tot_m = eval_bar.name.hour * 60 + eval_bar.name.minute
-        is_m = (570 <= tot_m <= 600)   # 09:30 AM to 10:00 AM IST (block 600 < tot_m <= 615)
-        is_a = (792 <= tot_m <= 837)   # 01:12 PM to 01:57 PM IST (block 837 < tot_m <= 855)
+        is_m = (570 <= tot_m <= 615)   # 09:30 AM to 10:15 AM IST
+        is_a = (792 <= tot_m <= 855)   # 01:12 PM to 02:15 PM IST
         if not (is_m or is_a):
             return None
 

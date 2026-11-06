@@ -414,6 +414,7 @@ class ActiveOptionTrade:
     def __init__(self, cand: Dict[str, Any], b_idx: int, curr_t, lot_map: Dict[str, int]):
         self.cand = cand
         self.entry_idx = b_idx
+        self.entry_time = curr_t
         self.sym = cand['symbol']
         self.direction = cand['direction']
         self.spot_entry = float(cand['entry_price'])
@@ -771,8 +772,8 @@ if __name__ == "__main__":
         for b_idx in range(len(time_index)):
             curr_t = time_index[b_idx]
             tot_m = curr_t.hour * 60 + curr_t.minute
-            is_m = (570 <= tot_m <= 600)   # 09:30 to 10:00 AM IST (block 600 < tot_m <= 615)
-            is_a = (792 <= tot_m <= 837)   # 13:12 to 13:57 PM IST (block 837 < tot_m <= 855)
+            is_m = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
+            is_a = (792 <= tot_m <= 855)   # 01:12 to 02:15 PM IST
 
             # 1. Update Open Active Trades Concurrently
             for tr in active_trades:
