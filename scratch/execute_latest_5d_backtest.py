@@ -223,7 +223,9 @@ def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
         'allow_stock_put': allow_stock_put,
         'reason': reason,
         'move': move_from_open,
-        'nifty_pct': n_pct
+        'move_pts': move_from_open,
+        'nifty_pct': n_pct,
+        'nifty_spot': n_spot
     }
 
 def parse_bhav_date(fpath: str) -> datetime.date:

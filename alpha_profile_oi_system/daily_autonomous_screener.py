@@ -549,16 +549,39 @@ class DailyAutonomousScreener:
         move_pts = cur_close - day_open
         n_pct = round((move_pts / max(1.0, day_open)) * 100.0, 2)
 
+        n_last_bar_rng = float(df_nifty['high'].iloc[-1] - df_nifty['low'].iloc[-1])
+        if n_last_bar_rng > 65.0:
+            res = {
+                'allow_stock_call': False,
+                'allow_stock_put': False,
+                'allow_call': False,
+                'allow_put': False,
+                'move': move_pts,
+                'move_pts': move_pts,
+                'nifty_pct': n_pct,
+                'nifty_spot': cur_close,
+                'reason': 'NIFTY_CLIMAX_EXHAUSTION',
+                'timestamp': now
+            }
+            self.nifty_regime_cache = res
+            return res
+
+        recent_rng = float(df_nifty['high'].iloc[-6:].max() - df_nifty['low'].iloc[-6:].min())
+        ema_dist = abs(cur_close - ema9)
+        is_chop = (recent_rng < 22.0 and ema_dist < 12.0)
+
         is_nifty_bullish = (cur_close >= tp_vwap and move_pts >= 10.0)
         is_nifty_bearish = (cur_close <= tp_vwap and move_pts <= -10.0)
 
         allow_stock_call = not is_nifty_bearish
         allow_stock_put = is_nifty_bearish
-        allow_index_put = is_nifty_bearish
-        allow_index_call = is_nifty_bullish and (cur_close >= ema9)
+        allow_index_call = is_nifty_bullish and not is_chop
+        allow_index_put = is_nifty_bearish and not is_chop
 
         regime_desc = "NEUTRAL"
-        if allow_index_call and not is_nifty_bearish:
+        if is_chop:
+            regime_desc = "CHOP_TRAP_INDEX_FROZEN"
+        elif allow_index_call and not is_nifty_bearish:
             regime_desc = "NIFTY_UPTREND"
         elif allow_index_put and not is_nifty_bullish:
             regime_desc = "NIFTY_DOWNTREND"
@@ -570,6 +593,7 @@ class DailyAutonomousScreener:
             'allow_stock_put': allow_stock_put,
             'allow_call': allow_index_call,
             'allow_put': allow_index_put,
+            'move': move_pts,
             'move_pts': move_pts,
             'nifty_pct': n_pct,
             'nifty_spot': cur_close,
