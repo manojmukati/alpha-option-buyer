@@ -610,7 +610,7 @@ class LiveMarketDataFeed:
                 s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0)
                 if s_ce >= min_wall_oi:
-                    if (s_ce > 1.6 * max(500.0, s_pe)) or (s_ce_chg > 0 and s_ce_chg > 1.5 * max(200.0, s_pe_chg)):
+                    if (s_ce > 1.35 * max(500.0, s_pe)) or (s_ce_chg > 0 and s_ce_chg > 1.5 * max(200.0, s_pe_chg)) or (s_ce >= 2.0 * min_wall_oi and s_ce >= 1.0 * s_pe):
                         if s_ce_vol >= 2.5 * s_ce:
                             continue  # Squeeze exception
                         call_wall_detected = True
@@ -658,7 +658,7 @@ class LiveMarketDataFeed:
                 s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0)
                 if s_pe >= min_wall_oi:
-                    if (s_pe > 1.6 * max(500.0, s_ce)) or (s_pe_chg > 0 and s_pe_chg > 1.5 * max(200.0, s_ce_chg)):
+                    if (s_pe > 1.35 * max(500.0, s_ce)) or (s_pe_chg > 0 and s_pe_chg > 1.5 * max(200.0, s_ce_chg)) or (s_pe >= 2.0 * min_wall_oi and s_pe >= 1.0 * s_ce):
                         if s_pe_vol >= 2.5 * s_pe:
                             continue  # Squeeze exception
                         put_wall_detected = True

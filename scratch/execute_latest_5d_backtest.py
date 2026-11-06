@@ -238,8 +238,8 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
     strike_step = sorted_strikes[1] - sorted_strikes[0] if len(sorted_strikes) > 1 else 50.0
 
     if direction == 'CALL':
-        target_barrier = max(float(target_price), spot + 2.5 * strike_step) if target_price else (spot + max(2.5 * strike_step, 60.0 if is_index else 30.0))
-        candidate_wall_strikes = [s for s in sorted_strikes if (s >= (atm_strike - strike_step * 0.1) and s <= target_barrier + strike_step * 0.2)]
+        target_barrier = float(target_price) if target_price else (spot + max(2.0 * strike_step, 60.0 if is_index else 25.0))
+        candidate_wall_strikes = [s for s in sorted_strikes if (s >= (atm_strike - strike_step * 0.1) and s <= target_barrier + strike_step * 0.15)]
 
         # 1. Upper OTM Call Ambush
         tot_upper_ce_vol = sum(strike_data[s]['ce_vol'] for s in upper_4)
@@ -266,7 +266,11 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
                 continue
 
             ce_conc = ce_oi / max(1.0, tot_window_ce_oi)
-            is_standing_wall = (ce_conc >= 0.20 or ce_oi >= 1.25 * max(1.0, atm_info['ce_oi'])) and (ce_oi > 1.5 * max(50.0, pe_oi))
+            is_standing_wall = (ce_oi >= min_wall_lots) and (
+                (ce_conc >= 0.20 and ce_oi >= 1.0 * pe_oi) or
+                (ce_oi >= 1.6 * max(50.0, pe_oi)) or
+                (ce_oi >= 1.25 * max(1.0, atm_info['ce_oi']) and ce_oi > 1.35 * max(50.0, pe_oi))
+            )
             is_building_wall = (ce_chg > 0 and ce_chg > 1.5 * max(20.0, pe_chg)) and (ce_oi > 1.2 * pe_oi)
 
             if is_standing_wall or is_building_wall:
@@ -282,8 +286,8 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
         return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
 
     else:
-        target_barrier = min(float(target_price), spot - 2.5 * strike_step) if target_price else (spot - max(2.5 * strike_step, 60.0 if is_index else 30.0))
-        candidate_wall_strikes = [s for s in sorted_strikes if (target_barrier - strike_step * 0.2 <= s <= atm_strike + strike_step * 0.1)]
+        target_barrier = float(target_price) if target_price else (spot - max(2.0 * strike_step, 60.0 if is_index else 25.0))
+        candidate_wall_strikes = [s for s in sorted_strikes if (target_barrier - strike_step * 0.15 <= s <= atm_strike + strike_step * 0.1)]
 
         # 1. Lower OTM Put Ambush
         tot_lower_pe_vol = sum(strike_data[s]['pe_vol'] for s in lower_4)
@@ -310,7 +314,11 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
                 continue
 
             pe_conc = pe_oi / max(1.0, tot_window_pe_oi)
-            is_standing_wall = (pe_conc >= 0.20 or pe_oi >= 1.25 * max(1.0, atm_info['pe_oi'])) and (pe_oi > 1.5 * max(50.0, ce_oi))
+            is_standing_wall = (pe_oi >= min_wall_lots) and (
+                (pe_conc >= 0.20 and pe_oi >= 1.0 * ce_oi) or
+                (pe_oi >= 1.6 * max(50.0, ce_oi)) or
+                (pe_oi >= 1.25 * max(1.0, atm_info['pe_oi']) and pe_oi > 1.35 * max(50.0, ce_oi))
+            )
             is_building_wall = (pe_chg > 0 and pe_chg > 1.5 * max(20.0, ce_chg)) and (pe_oi > 1.2 * ce_oi)
 
             if is_standing_wall or is_building_wall:
@@ -655,7 +663,7 @@ if __name__ == "__main__":
                 
                 sig = evaluate_common_5pillar_bar_slice(isym, slice_df, idx_atr, regime, is_index=True)
                 if sig:
-                    t_price = (sig['entry_price'] + max(120.0, 1.0 * idx_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(120.0, 1.0 * idx_atr))
+                    t_price = (sig['entry_price'] + max(100.0, 0.75 * idx_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(100.0, 0.75 * idx_atr))
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
                     if oi_res['confluent']:
                         sig['oi_confluent'] = True
@@ -682,7 +690,7 @@ if __name__ == "__main__":
 
                     sig = evaluate_common_5pillar_bar_slice(ssym, slice_df, stock_atr, regime, is_index=False)
                     if sig:
-                        t_price = (sig['entry_price'] + max(25.0, 0.85 * stock_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(25.0, 0.85 * stock_atr))
+                        t_price = (sig['entry_price'] + max(15.0, 0.75 * stock_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(15.0, 0.75 * stock_atr))
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
                         if oi_res['confluent']:
                             sig['oi_confluent'] = True

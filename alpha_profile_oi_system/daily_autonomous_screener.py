@@ -656,7 +656,7 @@ class DailyAutonomousScreener:
             spot = cand['spot_price']
             direction = cand['direction']
             stock_atr = float(cand.get('stock_atr') or 120.0)
-            target_price = (spot + max(120.0, 1.0 * stock_atr)) if direction == 'CALL' else (spot - max(120.0, 1.0 * stock_atr))
+            target_price = (spot + max(100.0, 0.75 * stock_atr)) if direction == 'CALL' else (spot - max(100.0, 0.75 * stock_atr))
             opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym, target_price=target_price, is_index=True)
             if not opt or not opt.get('is_liquid', False):
                 stage2_rejections[sym] = f"OPTION_PRICING_FAIL_CLOSED: {opt.get('rejected_reason') if opt else 'CHAIN_UNAVAILABLE'}"
@@ -685,7 +685,7 @@ class DailyAutonomousScreener:
             spot = cand['spot_price']
             direction = cand['direction']
             stock_atr = float(cand.get('stock_atr') or 30.0)
-            target_price = (spot + max(25.0, 0.85 * stock_atr)) if direction == 'CALL' else (spot - max(25.0, 0.85 * stock_atr))
+            target_price = (spot + max(15.0, 0.75 * stock_atr)) if direction == 'CALL' else (spot - max(15.0, 0.75 * stock_atr))
             opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym, target_price=target_price, is_index=False)
             if not opt or not opt.get('is_liquid', False):
                 stage2_rejections[sym] = f"OPTION_PRICING_FAIL_CLOSED: {opt.get('rejected_reason') if opt else 'CHAIN_UNAVAILABLE'}"
