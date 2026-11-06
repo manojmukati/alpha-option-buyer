@@ -185,19 +185,19 @@ def evaluate_common_5pillar_bar_slice(
 ) -> Optional[Dict[str, Any]]:
     """
     Unified 5-Pillar Breakout Evaluation Function shared across Screener & Backtest.
-    Strictly requires len(df_slice) >= 10:
-    - 8 completed base bars: comp_bars = df_slice.iloc[:-2].tail(8)
+    Requires len(df_slice) >= 7 (minimum 5 compression bars from 09:15 to 09:27):
+    - 5 to 8 completed base bars: comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
     - 1 completed breakout bar: eval_bar = df_slice.iloc[-2]
     - 1 live holding bar: live_bar = df_slice.iloc[-1]
-    Never evaluates breakout RVOL on the unclosed forming bar iloc[-1]!
+    Unlocks prime morning 09:33-10:00 AM entries without wasting early breakouts!
     """
-    if df_slice is None or len(df_slice) < 10:
+    if df_slice is None or len(df_slice) < 7:
         return None
 
     sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
     is_idx = is_index or (sym_clean in INDEX_NAMES)
     
-    comp_bars = df_slice.iloc[:-2].tail(8)
+    comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
     eval_bar = df_slice.iloc[-2]
     live_bar = df_slice.iloc[-1]
 
@@ -337,43 +337,46 @@ def evaluate_common_5pillar_bar_slice(
     if live_spot < MIN_STOCK_PRICE or atr < MIN_STOCK_ATR:
         return None
 
-    # Pre-Filter: Day Move Limits (0.35% to 3.00%)
-    if abs(pct_change) < 0.35 or abs(pct_change) > 3.00:
+    # Pre-Filter: Day Move Limits (0.35% to 3.50%)
+    if abs(pct_change) < 0.35 or abs(pct_change) > 3.50:
         return None
 
     # Determine Direction & Gate 2 (CLV Rejection Wick Veto)
     if eval_close > eval_open:
         direction = 'CALL'
-        if clv < 0.58:  # Hard Veto on opposing rejection wick
+        if clv < 0.50:  # Buyers must be in control (close in upper half)
             return None
     elif eval_close < eval_open:
         direction = 'PUT'
-        if clv > 0.42:  # Hard Veto on opposing rejection wick
+        if clv > 0.50:  # Sellers must be in control (close in lower half)
             return None
     else:
         return None
 
-    # Gate 1: Decoupled Market Regime
-    if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-        return None
-    if direction == 'PUT':
-        if not nifty_regime.get('allow_stock_put', False):
-            return None
-        n_pct = float(nifty_regime.get('nifty_pct', 0.0))
-        rel_strength = round(pct_change - n_pct, 2)
-        if pct_change > -0.75 or rel_strength > -0.35:
-            return None
+    # Gate 1: Decoupled Relative Market Regime
+    n_pct = float(nifty_regime.get('nifty_pct', 0.0))
+    rel_strength = round(pct_change - n_pct, 2)
+    if direction == 'CALL':
+        if not nifty_regime.get('allow_stock_call', True):
+            # Counter-trend CALL in bearish market requires genuine decoupled strength
+            if rel_strength < 1.25 or pct_change < 1.25:
+                return None
+    elif direction == 'PUT':
+        if not nifty_regime.get('allow_stock_put', True):
+            # Counter-trend PUT in bullish market requires genuine decoupled weakness
+            if rel_strength > -1.25 or pct_change > -1.25:
+                return None
 
-    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 2.5 Cr & RVOL >= 1.80x
+    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 0.75 Cr & RVOL >= 1.25x
     turnover_cr = (eval_close * eval_vol) / 1e7
-    if turnover_cr < 2.5:
+    if turnover_cr < 0.75:
         return None
 
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.80:
+    if real_rvol < 1.25:
         return None
 
     # Pillar 2 (25 pts + Hard Veto): Order Flow BVC Delta & CVD Divergence Check
@@ -383,14 +386,14 @@ def evaluate_common_5pillar_bar_slice(
         return None
     rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
     if direction == 'CALL':
-        if rec_cvd < 0.05 or last_delta < 0.10:
+        if last_delta < 0.0 or rec_cvd <= -0.05:
             return None
     elif direction == 'PUT':
-        if rec_cvd > -0.05 or last_delta > -0.10:
+        if last_delta > 0.0 or rec_cvd >= 0.05:
             return None
 
-    # Pillar 3 (20 pts + Hard Veto): Compression <= 0.62 * ATR + Breakout + VWAP Alignment
-    if comp_width > 0.62 * atr:
+    # Pillar 3 (20 pts + Hard Veto): Compression <= 0.68 * ATR + Breakout + VWAP Alignment
+    if comp_width > 0.68 * atr:
         return None
 
     spot_buffer = atr * 0.05
@@ -405,17 +408,17 @@ def evaluate_common_5pillar_bar_slice(
         if live_spot > comp_low + spot_buffer:
             return None
 
-    # Pillar 5 (10 pts + Hard Veto): Remaining ATR Fuel <= 90%
+    # Pillar 5 (10 pts + Hard Veto): Remaining ATR Fuel <= 92%
     fuel_spent = day_high - day_low
     atr_used_ratio = fuel_spent / max(1.0, atr)
-    if atr_used_ratio > 0.90 or abs(pct_change) > 3.00:
+    if atr_used_ratio > 0.92:
         return None
 
-    # Pro-Trader 100-Point Composite Scoring
-    p1_score = 25.0
-    p2_score = 25.0 if (abs(rec_cvd) >= 0.20 and abs(last_delta) >= 0.30) else 18.0
-    p3_score = 20.0 if comp_width <= 0.45 * atr else 15.0
-    p5_score = 10.0 if atr_used_ratio <= 0.70 else 5.0
+    # Pro-Trader 100-Point Dynamic Institutional Scoring
+    p1_score = min(25.0, 12.0 + max(0.0, (real_rvol - 1.25) * 8.0) + min(5.0, turnover_cr * 1.5))
+    p2_score = min(25.0, 12.0 + (abs(last_delta) * 15.0) + (abs(rec_cvd) * 10.0))
+    p3_score = 20.0 if comp_width <= 0.45 * atr else (15.0 if comp_width <= 0.58 * atr else 10.0)
+    p5_score = 10.0 if atr_used_ratio <= 0.60 else (7.0 if atr_used_ratio <= 0.75 else 4.0)
     base_score = p1_score + p2_score + p3_score + p5_score
 
     return {
@@ -541,18 +544,18 @@ class DailyAutonomousScreener:
         move_pts = cur_close - day_open
         n_pct = round((move_pts / max(1.0, day_open)) * 100.0, 2)
 
-        is_nifty_bullish = (cur_close >= tp_vwap and cur_close >= ema21) or (move_pts >= 12.0)
-        is_nifty_bearish = (cur_close < tp_vwap and cur_close < ema9 and cur_close < ema21 and move_pts <= -35.0)
+        is_nifty_bullish = (cur_close >= tp_vwap and move_pts >= 10.0)
+        is_nifty_bearish = (cur_close <= tp_vwap and move_pts <= -10.0)
 
-        allow_stock_put = is_nifty_bearish
         allow_stock_call = not is_nifty_bearish
+        allow_stock_put = is_nifty_bearish
         allow_index_put = is_nifty_bearish
         allow_index_call = is_nifty_bullish and (cur_close >= ema9)
 
         regime_desc = "NEUTRAL"
-        if allow_index_call:
+        if allow_index_call and not is_nifty_bearish:
             regime_desc = "NIFTY_UPTREND"
-        elif allow_index_put:
+        elif allow_index_put and not is_nifty_bullish:
             regime_desc = "NIFTY_DOWNTREND"
         else:
             regime_desc = "NIFTY_SIDEWAYS_CHOP"
@@ -574,7 +577,7 @@ class DailyAutonomousScreener:
     def evaluate_index_engine(self, symbol: str, live_q: Optional[Dict[str, Any]] = None, is_afternoon: bool = False) -> Dict[str, Any]:
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         df = self.data_feed.get_live_intraday_bars(sym_clean)
-        if df is None or len(df) < 10:
+        if df is None or len(df) < 7:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INSUFFICIENT_3M_BARS', 'is_index': True}
 
         atr = self.get_stock_atr(sym_clean, live_q)
@@ -593,7 +596,7 @@ class DailyAutonomousScreener:
     def evaluate_stock_engine(self, symbol: str, live_q: Optional[Dict[str, Any]] = None, is_afternoon: bool = False, nifty_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         df = self.data_feed.get_live_intraday_bars(sym_clean)
-        if df is None or len(df) < 10:
+        if df is None or len(df) < 7:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INSUFFICIENT_3M_BARS', 'is_index': False}
 
         atr = self.get_stock_atr(sym_clean, live_q)
@@ -685,7 +688,7 @@ class DailyAutonomousScreener:
                 continue
 
             cand['verified_opt'] = opt
-            cand['score'] = min(100.0, cand.get('score', 75.0) + 20.0)
+            cand['score'] = cand.get('score', 75.0) + 10.0
             verified_super_trades.append(cand)
             active_slab_index += 1
 
@@ -714,7 +717,7 @@ class DailyAutonomousScreener:
                 continue
 
             cand['verified_opt'] = opt
-            cand['score'] = min(100.0, cand.get('score', 75.0) + 20.0)
+            cand['score'] = cand.get('score', 75.0) + 10.0
             verified_super_trades.append(cand)
             active_slab_stock += 1
 

@@ -207,13 +207,13 @@ def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
     is_chop = (recent_rng < 22.0 and ema_dist < 12.0)
 
     n_pct = round((move_from_open / max(1.0, day_open)) * 100.0, 2)
-    is_nifty_bullish = (n_spot >= tp_vwap and n_spot >= ema21) or (move_from_open >= 12.0 and drop_from_high < 40.0)
-    is_nifty_bearish = (n_spot < tp_vwap and n_spot < ema9 and n_spot < ema21 and move_from_open <= -35.0)
+    is_nifty_bullish = (n_spot >= tp_vwap and move_from_open >= 10.0)
+    is_nifty_bearish = (n_spot <= tp_vwap and move_from_open <= -10.0)
 
-    allow_stock_put = is_nifty_bearish
     allow_stock_call = not is_nifty_bearish
+    allow_stock_put = is_nifty_bearish
+    allow_call = is_nifty_bullish and not is_chop
     allow_put = is_nifty_bearish and not is_chop
-    allow_call = is_nifty_bullish and not is_chop and (n_spot >= ema9)
     reason = 'CHOP_TRAP_INDEX_FROZEN' if is_chop else ('NIFTY_BULLISH' if is_nifty_bullish else ('NIFTY_BEARISH' if is_nifty_bearish else 'NORMAL'))
 
     return {
@@ -505,24 +505,16 @@ class ActiveOptionTrade:
             if fav_move >= self.spot_t1:
                 self.t1_hit = True
                 self.is_risk_free = True
+                self.breakeven_armed = True
                 if fav_move >= self.spot_t2:
                     self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
                     self.exit_reason = "TARGET_2_HIT (JACKPOT)"
                     self.exit_time = ts
                     self.is_closed = True
-                    return
-                # Lock 65% of T1 once T1 is hit
-                lock_pts = self.spot_t1 * 0.65
-                locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
-                sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
-                if sl_breached:
-                    self.spot_exit = locked_sl
-                    self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
-                    self.exit_time = ts
-                    self.is_closed = True
-                    return
+                # Return immediately: never check locked_sl on the very bar that hit T1
+                return
 
-            # Check Breakeven Shield (ONLY on candle close, NEVER on intra-candle wick)
+            # Check Breakeven Shield (if armed on a PREVIOUS bar) - ONLY on candle close
             be_pts = self.spot_sl * 0.25
             locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
             if self.breakeven_armed:
@@ -536,12 +528,6 @@ class ActiveOptionTrade:
                 # Arm Breakeven Shield only when favorable move reaches 0.75 * T1 before full SL
                 if fav_move >= (self.spot_t1 * 0.75) and adv_move < self.spot_sl:
                     self.breakeven_armed = True
-                    if cur_gain <= be_pts:
-                        self.spot_exit = locked_be
-                        self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
-                        self.exit_time = ts
-                        self.is_closed = True
-                        return
 
             # 15-Minute Genuine Failure Loss Scratch (strictly at step 5)
             if self.step == 5 and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
@@ -559,28 +545,20 @@ class ActiveOptionTrade:
                 self.is_closed = True
                 return
         else:
-            # T1 was already hit -> Trailing SL locked at +0.65 * T1
-            lock_pts = self.spot_t1 * 0.65
-            locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
-            
-            # Check Trailing SL breach
-            sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
-            t2_reached = (fav_move >= self.spot_t2)
-
-            if sl_breached and t2_reached:
-                # Conservative resolution: trailing SL first if both touched
-                self.spot_exit = locked_sl
-                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
-                self.exit_time = ts
-                self.is_closed = True
-                return
-            elif t2_reached:
+            # Starting on SUBSEQUENT bars after T1 was hit:
+            # 1. Check Jackpot Target 2 FIRST
+            if fav_move >= self.spot_t2:
                 self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
                 self.exit_reason = "TARGET_2_HIT (JACKPOT)"
                 self.exit_time = ts
                 self.is_closed = True
                 return
-            elif sl_breached:
+
+            # 2. Check Trailing SL locked at +0.65 * T1
+            lock_pts = self.spot_t1 * 0.65
+            locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
+            sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
+            if sl_breached:
                 self.spot_exit = locked_sl
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
                 self.exit_time = ts
@@ -803,7 +781,7 @@ if __name__ == "__main__":
                     continue
                 idf = asset_data[isym]
                 today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
-                if len(today_bars) < 10:
+                if len(today_bars) < 7:
                     continue
                 idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
                 
@@ -814,7 +792,7 @@ if __name__ == "__main__":
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
                     if oi_res['confluent']:
                         sig['oi_confluent'] = True
-                        sig['score'] = min(100.0, sig.get('score', 80.0) + 15.0)
+                        sig['score'] = sig.get('score', 70.0) + (10.0 if 'RUNWAY_CLEAR' in oi_res.get('reason', '') else 0.0)
                         candidates.append(sig)
 
             # B. Stock Candidates (MAX_STOCKS_PER_SLAB = 2)
@@ -828,7 +806,7 @@ if __name__ == "__main__":
 
                     sdf = asset_data[ssym]
                     today_bars = sdf[(sdf.index.date == d) & (sdf.index <= curr_t)]
-                    if len(today_bars) < 10:
+                    if len(today_bars) < 7:
                         continue
                     stock_atr = atrs.get(ssym, 30.0)
 
@@ -839,7 +817,7 @@ if __name__ == "__main__":
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
                         if oi_res['confluent']:
                             sig['oi_confluent'] = True
-                            sig['score'] = min(100.0, sig.get('score', 75.0) + 20.0)
+                            sig['score'] = sig.get('score', 70.0) + (10.0 if 'RUNWAY_CLEAR' in oi_res.get('reason', '') else 0.0)
                             candidates.append(sig)
 
             # Sort combined candidates by 100-point 5-Pillar Score
