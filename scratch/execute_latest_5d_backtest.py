@@ -57,18 +57,88 @@ def load_resampled_3m_data() -> Dict[str, pd.DataFrame]:
         sym = os.path.basename(f).replace(".parquet", "").replace("^", "").strip()
         try:
             df = pd.read_parquet(f)
+            df.columns = [c.lower() for c in df.columns]
             df.index = pd.to_datetime(df.index)
             if not isinstance(df.index, pd.DatetimeIndex):
                 continue
-            df_3m = df.resample('3min', label='left', closed='left').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
-            if len(df_3m) > 10:
-                asset_dict[sym] = df_3m
+            
+            # Ensure timezone is localized/converted to Asia/Kolkata
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert('Asia/Kolkata')
+            else:
+                ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+                df.index = df.index.tz_localize(ist_tz)
+                
+            is_spot_index = sym in INDEX_NAMES or sym in ['NSEI', 'NSEBANK']
+
+            # Group by date BEFORE resampling to 3m bars (Session Isolation)
+            resampled_days = []
+            for d_val, df_day in df.groupby(df.index.date):
+                if len(df_day) == 0:
+                    continue
+                df_3m_day = df_day.resample('3min', label='left', closed='left').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna(subset=['open', 'high', 'low', 'close'])
+                
+                # Filter strictly for NSE market hours (09:15 to 15:30)
+                df_3m_day = df_3m_day[(df_3m_day.index.time >= datetime.time(9, 15)) & (df_3m_day.index.time <= datetime.time(15, 30))]
+                if len(df_3m_day) < 2:
+                    continue
+
+                # Precompute intraday indicators per day session
+                rng = np.maximum(0.01, df_3m_day['high'] - df_3m_day['low'])
+                clv = (2.0 * df_3m_day['close'] - (df_3m_day['high'] + df_3m_day['low'])) / rng
+                df_3m_day['bar_delta_ratio'] = clv.round(4)
+                if is_spot_index:
+                    df_3m_day['bvc_est_delta'] = (rng * clv).round(2)
+                else:
+                    df_3m_day['bvc_est_delta'] = (df_3m_day['volume'] * clv).round(2)
+                df_3m_day['delta'] = df_3m_day['bvc_est_delta']
+                df_3m_day['cvd'] = df_3m_day['bvc_est_delta'].cumsum().round(2)
+
+                # EMA9 and EMA21
+                df_3m_day['ema9'] = df_3m_day['close'].ewm(span=9, adjust=False).mean()
+                df_3m_day['ema21'] = df_3m_day['close'].ewm(span=21, adjust=False).mean()
+
+                # Session VWAP
+                tp = (df_3m_day['high'] + df_3m_day['low'] + df_3m_day['close']) / 3.0
+                cum_v = df_3m_day['volume'].cumsum()
+                cum_pv = (tp * df_3m_day['volume']).cumsum()
+                df_3m_day['vwap'] = (cum_pv / np.maximum(1.0, cum_v)).round(2) if not is_spot_index else tp.expanding().mean().round(2)
+
+                resampled_days.append(df_3m_day)
+
+            if not resampled_days:
+                continue
+
+            # Concatenate all sessions for this symbol
+            df_full = pd.concat(resampled_days).sort_index()
+
+            # Pre-compute prior-session same-slot median hist_slot_vol
+            all_dates = sorted(list(set(df_full.index.date)))
+            df_full['time_slot'] = df_full.index.strftime('%H:%M')
+            df_full['hist_slot_vol'] = 0.0
+
+            for cur_d in all_dates:
+                cur_mask = (df_full.index.date == cur_d)
+                prior_df = df_full[df_full.index.date < cur_d]
+                if not prior_df.empty and prior_df['volume'].sum() > 0:
+                    slot_map = prior_df.groupby('time_slot')['volume'].median().to_dict()
+                    overall_med = float(prior_df['volume'].median())
+                    slot_vols = df_full.loc[cur_mask, 'time_slot'].map(slot_map).fillna(overall_med).clip(lower=100.0)
+                else:
+                    cur_vols = df_full.loc[cur_mask, 'volume']
+                    cur_med = float(cur_vols.median()) if len(cur_vols) > 0 and cur_vols.median() > 0 else 1000.0
+                    slot_vols = pd.Series(max(100.0, cur_med), index=df_full.loc[cur_mask].index)
+                
+                df_full.loc[cur_mask, 'hist_slot_vol'] = slot_vols
+
+            if len(df_full) > 10:
+                asset_dict[sym] = df_full
         except Exception:
             continue
     return asset_dict
@@ -360,9 +430,9 @@ class ActiveOptionTrade:
             self.spot_t2 = 250.0 if self.is_bank else (120.0 if is_mid else 150.0)
             self.spot_sl = 60.0 if self.is_bank else (30.0 if is_mid else 40.0)
         else:
-            self.spot_t1 = max(6.0, round(self.atr * 0.35, 1))
+            self.spot_sl = max(4.0, round(self.atr * 0.28, 2))
+            self.spot_t1 = max(5.5, round(self.atr * 0.32, 2))
             self.spot_t2 = max(14.0, round(self.atr * 0.75, 1))
-            self.spot_sl = max(3.0, round(self.atr * 0.18, 1))
 
         step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
@@ -396,8 +466,14 @@ class ActiveOptionTrade:
         tot_m = ts.hour * 60 + ts.minute
         # Force EOD Exit at 15:20 IST
         if tot_m >= 920:
-            self.spot_exit = b_close
-            self.exit_reason = "EOD_EXIT"
+            if self.t1_hit:
+                lock_pts = self.spot_t1 * 0.50
+                locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
+                self.spot_exit = max(locked_sl, b_close) if self.direction == 'CALL' else min(locked_sl, b_close)
+                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+            else:
+                self.spot_exit = b_close
+                self.exit_reason = "EOD_EXIT"
             self.exit_time = ts
             self.is_closed = True
             return
@@ -414,17 +490,33 @@ class ActiveOptionTrade:
             if fav_move >= self.spot_t1:
                 self.t1_hit = True
                 self.is_risk_free = True
+                if fav_move >= self.spot_t2:
+                    self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
+                    self.exit_reason = "TARGET_2_HIT (JACKPOT)"
+                    self.exit_time = ts
+                    self.is_closed = True
+                    return
+                # Check locked floor immediately if price retraced below floor on same candle
+                lock_pts = self.spot_t1 * 0.50
+                locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
+                sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
+                if sl_breached:
+                    self.spot_exit = locked_sl
+                    self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+                    self.exit_time = ts
+                    self.is_closed = True
+                    return
 
-            # 15-Minute Epoch Stagnation Loss Scratch (5 completed 3m bars)
-            if self.step >= 5 and cur_gain <= 0.0:
+            # 15-Minute Epoch Stagnation Loss Scratch (strictly at step 5)
+            if self.step == 5 and (self.max_fav_pts < self.spot_t1 * 0.45) and (cur_gain < -(self.spot_sl * 0.15)):
                 self.spot_exit = b_close
                 self.exit_reason = "15M_TIME_SL_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
         else:
-            # T1 was already hit -> Trailing SL locked at +0.40 * T1
-            lock_pts = self.spot_t1 * 0.40
+            # T1 was already hit -> Trailing SL locked at +0.50 * T1
+            lock_pts = self.spot_t1 * 0.50
             locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             
             # Check Trailing SL breach
@@ -453,8 +545,14 @@ class ActiveOptionTrade:
 
     def close_eod(self, final_close: float, ts):
         if not self.is_closed:
-            self.spot_exit = final_close
-            self.exit_reason = "EOD_EXIT"
+            if self.t1_hit:
+                lock_pts = self.spot_t1 * 0.50
+                locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
+                self.spot_exit = max(locked_sl, final_close) if self.direction == 'CALL' else min(locked_sl, final_close)
+                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+            else:
+                self.spot_exit = final_close
+                self.exit_reason = "EOD_EXIT"
             self.exit_time = ts
             self.is_closed = True
 
@@ -653,16 +751,14 @@ if __name__ == "__main__":
                 if isym in daily_traded_symbols or isym not in asset_data:
                     continue
                 idf = asset_data[isym]
-                slice_df = idf.loc[:curr_t]
-                if len(slice_df) < 10:
-                    continue
-                today_bars = slice_df[slice_df.index.date == d]
-                if len(today_bars) < 2:
+                today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
+                if len(today_bars) < 10:
                     continue
                 idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
                 
-                sig = evaluate_common_5pillar_bar_slice(isym, slice_df, idx_atr, regime, is_index=True)
+                sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
                 if sig:
+                    sig['entry_price'] = float(today_bars.iloc[-2]['close'])
                     t_price = (sig['entry_price'] + max(100.0, 0.75 * idx_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(100.0, 0.75 * idx_atr))
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
                     if oi_res['confluent']:
@@ -680,16 +776,14 @@ if __name__ == "__main__":
                         continue  # Reject symbol with unknown/invalid lot size
 
                     sdf = asset_data[ssym]
-                    slice_df = sdf.loc[:curr_t]
-                    if len(slice_df) < 10:
-                        continue
-                    today_bars = slice_df[slice_df.index.date == d]
-                    if len(today_bars) < 2:
+                    today_bars = sdf[(sdf.index.date == d) & (sdf.index <= curr_t)]
+                    if len(today_bars) < 10:
                         continue
                     stock_atr = atrs.get(ssym, 30.0)
 
-                    sig = evaluate_common_5pillar_bar_slice(ssym, slice_df, stock_atr, regime, is_index=False)
+                    sig = evaluate_common_5pillar_bar_slice(ssym, today_bars, stock_atr, regime, is_index=False)
                     if sig:
+                        sig['entry_price'] = float(today_bars.iloc[-2]['close'])
                         t_price = (sig['entry_price'] + max(15.0, 0.75 * stock_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(15.0, 0.75 * stock_atr))
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
                         if oi_res['confluent']:
