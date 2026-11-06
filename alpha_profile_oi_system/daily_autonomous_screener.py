@@ -466,19 +466,24 @@ class DailyAutonomousScreener:
         }
 
     def _load_fno_universe(self) -> List[Dict[str, Any]]:
-        """Loads all active NSE F&O universe assets."""
-        fno_cfg = os.path.join(CURRENT_DIR, 'config', 'fno_universe.json')
-        if os.path.exists(fno_cfg):
-            try:
-                with open(fno_cfg, 'r', encoding='utf-8') as f:
-                    u = json.load(f)
-                    if isinstance(u, list) and len(u) > 0:
-                        return u
-            except Exception as e:
-                self.logger.warning(f"Error loading fno_universe.json: {e}")
+        """Loads all active NSE F&O universe assets (220+ symbols)."""
+        possible_paths = [
+            os.path.join(CURRENT_DIR, 'modules', 'fno_universe_cache.json'),
+            os.path.join(CURRENT_DIR, 'config', 'fno_universe.json'),
+            os.path.join(CURRENT_DIR, 'fno_universe_cache.json')
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                try:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        u = json.load(f)
+                        if isinstance(u, list) and len(u) > 10:
+                            return u
+                except Exception as e:
+                    self.logger.warning(f"Error loading {p}: {e}")
 
         bulk = fetch_bulk_nse_snapshot()
-        if bulk:
+        if bulk and len(bulk) > 10:
             return [{'symbol': s} for s in bulk.keys()]
 
         return [{'symbol': idx} for idx in INDEX_NAMES]
