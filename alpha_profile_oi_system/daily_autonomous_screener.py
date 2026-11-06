@@ -81,15 +81,15 @@ STOCK_SECTOR_MAP = {
 
 def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     """
-    Checks if current IST time falls strictly within designated trading slabs:
-    - Slab 1 (Morning):   09:30 AM to 10:15 AM IST (570 to 615 mins)
-    - Slab 2 (Afternoon): 01:15 PM to 02:15 PM IST (795 to 855 mins)
+    Checks if current IST time falls strictly within designated prime trading slabs:
+    - Prime Morning:   09:30 AM to 10:00 AM IST (570 to 600 mins) — blocks 600 < tot_m <= 615
+    - Prime Afternoon: 01:12 PM to 01:57 PM IST (792 to 837 mins) — blocks 837 < tot_m <= 855
     """
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 615)
-    slab2 = (795 <= tot_mins <= 855)
+    slab1 = (570 <= tot_mins <= 600)
+    slab2 = (792 <= tot_mins <= 837)
     return slab1 or slab2
 
 
@@ -237,6 +237,14 @@ def evaluate_common_5pillar_bar_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
+    # Check prime trading slab window
+    if hasattr(eval_bar, 'name') and hasattr(eval_bar.name, 'hour'):
+        tot_m = eval_bar.name.hour * 60 + eval_bar.name.minute
+        is_m = (570 <= tot_m <= 600)   # 09:30 AM to 10:00 AM IST (block 600 < tot_m <= 615)
+        is_a = (792 <= tot_m <= 837)   # 01:12 PM to 01:57 PM IST (block 837 < tot_m <= 855)
+        if not (is_m or is_a):
+            return None
+
     # Dynamic VWAP if not pre-computed
     if 'vwap' in eval_bar and pd.notna(eval_bar['vwap']) and float(eval_bar['vwap']) > 0:
         vwap = float(eval_bar['vwap'])
@@ -277,8 +285,11 @@ def evaluate_common_5pillar_bar_slice(
         # Gate 1: Macro Regime Alignment
         if direction == 'CALL' and not nifty_regime.get('allow_call', True):
             return None
-        if direction == 'PUT' and not nifty_regime.get('allow_put', True):
-            return None
+        if direction == 'PUT':
+            if not nifty_regime.get('allow_put', True):
+                return None
+            if not nifty_regime.get('allow_stock_put', False) or pct_change > -0.15:
+                return None
 
         # Range RVOL
         rng = eval_high - eval_low
@@ -345,8 +356,13 @@ def evaluate_common_5pillar_bar_slice(
     # Gate 1: Decoupled Market Regime
     if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
         return None
-    if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-        return None
+    if direction == 'PUT':
+        if not nifty_regime.get('allow_stock_put', False):
+            return None
+        n_pct = float(nifty_regime.get('nifty_pct', 0.0))
+        rel_strength = round(pct_change - n_pct, 2)
+        if pct_change > -0.75 or rel_strength > -0.35:
+            return None
 
     # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 2.5 Cr & RVOL >= 1.80x
     turnover_cr = (eval_close * eval_vol) / 1e7
@@ -518,15 +534,20 @@ class DailyAutonomousScreener:
         cur_close = float(df_nifty['close'].iloc[-1])
         day_open = float(df_nifty['open'].iloc[0])
         ema9 = float(df_nifty['close'].ewm(span=9, adjust=False).mean().iloc[-1])
-        vwap = float(df_nifty.get('vwap', df_nifty['close'].mean()).iloc[-1])
+        ema21 = float(df_nifty['close'].ewm(span=21, adjust=False).mean().iloc[-1])
+        tp = (df_nifty['high'] + df_nifty['low'] + df_nifty['close']) / 3.0
+        tp_vwap = float(tp.mean())
 
         move_pts = cur_close - day_open
+        n_pct = round((move_pts / max(1.0, day_open)) * 100.0, 2)
 
-        allow_index_call = (cur_close > ema9 and cur_close > vwap and move_pts > 15.0)
-        allow_index_put = (cur_close < ema9 and cur_close < vwap and move_pts < -15.0)
+        is_nifty_bullish = (cur_close >= tp_vwap and cur_close >= ema21) or (move_pts >= 12.0)
+        is_nifty_bearish = (cur_close < tp_vwap and cur_close < ema9 and cur_close < ema21 and move_pts <= -35.0)
 
-        allow_stock_call = move_pts >= -40.0
-        allow_stock_put = move_pts <= 40.0
+        allow_stock_put = is_nifty_bearish
+        allow_stock_call = not is_nifty_bearish
+        allow_index_put = is_nifty_bearish
+        allow_index_call = is_nifty_bullish and (cur_close >= ema9)
 
         regime_desc = "NEUTRAL"
         if allow_index_call:
@@ -542,6 +563,7 @@ class DailyAutonomousScreener:
             'allow_call': allow_index_call,
             'allow_put': allow_index_put,
             'move_pts': move_pts,
+            'nifty_pct': n_pct,
             'nifty_spot': cur_close,
             'reason': regime_desc,
             'timestamp': now
@@ -858,12 +880,20 @@ class DailyAutonomousScreener:
                     est_opt_price = round(max(0.5, opt_entry + (spot_gain * delta)), 2)
                     current_bid = est_opt_price
 
-                t1_locked_floor = round(opt_entry + (opt_t1 - opt_entry) * 0.40, 2)
+                t1_locked_floor = round(opt_entry + (opt_t1 - opt_entry) * 0.65, 2)
+                be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.25, 2)
+                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.75
+
                 if est_opt_price >= opt_t1 and trail_sl < t1_locked_floor:
                     df.at[idx, 'Trailing_SL_INR'] = t1_locked_floor
                     trail_sl = t1_locked_floor
                     updated_any = True
-                    print(f"[POSITION MANAGER]: {sym} reached Target 1! Trailing SL locked at Rs. {t1_locked_floor:.2f}")
+                    print(f"[POSITION MANAGER]: {sym} reached Target 1! Trailing SL locked at 65%: Rs. {t1_locked_floor:.2f}")
+                elif est_opt_price >= opt_arm_trigger and trail_sl < be_shield_floor:
+                    df.at[idx, 'Trailing_SL_INR'] = be_shield_floor
+                    trail_sl = be_shield_floor
+                    updated_any = True
+                    print(f"[POSITION MANAGER]: {sym} reached 75% of T1! Breakeven Shield armed at +0.25R: Rs. {be_shield_floor:.2f}")
 
                 exit_price = 0.0
                 outcome = ""
@@ -873,7 +903,7 @@ class DailyAutonomousScreener:
                     outcome = "TARGET_2_HIT (JACKPOT)"
                 elif trail_sl > opt_entry and est_opt_price <= trail_sl:
                     exit_price = trail_sl
-                    outcome = "T1_PROFIT_LOCKED"
+                    outcome = "T1_PROFIT_LOCKED" if trail_sl >= t1_locked_floor else "BREAKEVEN_SHIELD_EXIT"
                 elif est_opt_price <= opt_sl:
                     exit_price = opt_sl
                     outcome = "SL_HIT"
@@ -884,9 +914,15 @@ class DailyAutonomousScreener:
                     entry_ts = pd.to_numeric(row.get('Signal_Timestamp_Epoch'), errors='coerce')
                     if pd.notna(entry_ts) and entry_ts > 0:
                         elapsed_mins = (now_ts - float(entry_ts)) / 60.0
-                        if elapsed_mins >= 15.0 and est_opt_price <= opt_entry:
+                        opt_risk = opt_entry - opt_sl
+                        # Step 5 / 15-Minute Genuine Failure Exit (lost >= 55% of SL)
+                        if elapsed_mins >= 15.0 and elapsed_mins < 30.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.55):
                             exit_price = current_bid if current_bid > 0 else est_opt_price
                             outcome = "15M_TIME_SL_EXIT"
+                        # Step 10 / 30-Minute Stagnant Exit (lost >= 20% of SL without hitting T1)
+                        elif elapsed_mins >= 30.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.20):
+                            exit_price = current_bid if current_bid > 0 else est_opt_price
+                            outcome = "30M_STAGNANT_EXIT"
 
                 if outcome:
                     pts_cap = round(exit_price - opt_entry, 2)
