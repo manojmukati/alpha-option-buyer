@@ -25,6 +25,7 @@ import os
 import sys
 import glob
 import json
+import datetime
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Optional
@@ -149,22 +150,34 @@ def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
         'move': move_from_open
     }
 
+def parse_bhav_date(fpath: str) -> datetime.date:
+    import re
+    m = re.search(r'(\d{2})-(\d{2})-(\d{4})', os.path.basename(fpath))
+    if m:
+        return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    return datetime.date(2000, 1, 1)
+
+_BHAV_CACHE = {}
+
 def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: str, target_price: Optional[float] = None, is_index: bool = False) -> Dict[str, Any]:
     bhav_files = glob.glob(os.path.join(REPO_ROOT, 'alpha_profile_oi_system', 'bhavcopy_cache', '*.parquet'))
     if not bhav_files:
         return {'confluent': True, 'reason': 'BHAVCOPY_CACHE_MISSING_PASSED', 'atm_strike': spot}
 
-    bhav_match = None
-    d_str = date_obj.strftime('%Y%m%d') if hasattr(date_obj, 'strftime') else str(date_obj).replace('-', '')
-    for f in bhav_files:
-        if d_str in os.path.basename(f):
-            bhav_match = f
-            break
+    # Authoritative Market-Open Bhavcopy Matching:
+    # Intraday trades on date `d` at 09:15-15:30 only have access to closing bhavcopy from prior trading day (date < d)
+    d = date_obj if isinstance(date_obj, datetime.date) else (date_obj.date() if hasattr(date_obj, 'date') else pd.to_datetime(date_obj).date())
+    candidates = [f for f in bhav_files if parse_bhav_date(f) < d]
+    if not candidates:
+        candidates = [f for f in bhav_files if parse_bhav_date(f) <= d]
+    bhav_match = max(candidates, key=parse_bhav_date) if candidates else None
     if not bhav_match:
-        bhav_match = sorted(bhav_files)[-1]
+        return {'confluent': True, 'reason': 'NO_BHAVCOPY_FOUND_PASSED', 'atm_strike': spot}
 
     try:
-        df_bhav = pd.read_parquet(bhav_match)
+        if bhav_match not in _BHAV_CACHE:
+            _BHAV_CACHE[bhav_match] = pd.read_parquet(bhav_match)
+        df_bhav = _BHAV_CACHE[bhav_match]
     except Exception:
         return {'confluent': True, 'reason': 'BHAVCOPY_READ_ERROR_PASSED', 'atm_strike': spot}
 
@@ -178,7 +191,12 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
 
     strike_data = {}
     for _, row in exp_df.iterrows():
-        stk = float(row['StrkPric'])
+        try:
+            stk = float(row['StrkPric'])
+            if np.isnan(stk) or stk <= 0:
+                continue
+        except Exception:
+            continue
         opt_tp = str(row['OptnTp']).upper().strip()
         oi = float(row['OpnIntrst']) / lot_size
         chg_oi = float(row['ChngInOpnIntrst']) / lot_size
@@ -196,7 +214,7 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
             strike_data[stk]['pe_chg_oi'] += chg_oi
             strike_data[stk]['pe_vol'] += vol
 
-    sorted_strikes = sorted(strike_data.keys())
+    sorted_strikes = sorted([s for s in strike_data.keys() if pd.notna(s) and s > 0])
     if len(sorted_strikes) < 9:
         return {'confluent': True, 'reason': 'INSUFFICIENT_BHAVCOPY_STRIKES', 'atm_strike': spot}
 
@@ -209,39 +227,33 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
     atm_info = strike_data[atm_strike]
     tot_upper_ce_oi = sum(strike_data[s]['ce_oi'] for s in upper_4)
     tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
-    tot_upper_ce_vol = sum(strike_data[s]['ce_vol'] for s in upper_4)
-
     tot_lower_pe_oi = sum(strike_data[s]['pe_oi'] for s in lower_4)
     tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
-    tot_lower_pe_vol = sum(strike_data[s]['pe_vol'] for s in lower_4)
 
     tot_window_ce_oi = sum(strike_data[s]['ce_oi'] for s in lower_4 + [atm_strike] + upper_4)
     tot_window_pe_oi = sum(strike_data[s]['pe_oi'] for s in lower_4 + [atm_strike] + upper_4)
 
-    support_pe_chg = atm_info['pe_chg_oi'] + tot_lower_pe_chg
-    resistance_ce_chg = atm_info['ce_chg_oi'] + tot_upper_ce_chg
-
-    min_wall_oi = 25000.0 if is_index else 400.0
-    monster_standing_oi = 50000.0 if is_index else 600.0
-    ambush_wall_min = 15000.0 if is_index else 250.0
+    min_wall_lots = 2000.0 if is_index else 250.0
+    ambush_min_lots = 1000.0 if is_index else 150.0
     strike_step = sorted_strikes[1] - sorted_strikes[0] if len(sorted_strikes) > 1 else 50.0
 
     if direction == 'CALL':
-        target_barrier = float(target_price) if target_price else (spot + (120.0 if is_index else 50.0))
+        target_barrier = max(float(target_price), spot + 2.5 * strike_step) if target_price else (spot + max(2.5 * strike_step, 60.0 if is_index else 30.0))
         candidate_wall_strikes = [s for s in sorted_strikes if (s >= (atm_strike - strike_step * 0.1) and s <= target_barrier + strike_step * 0.2)]
 
-        is_otm_ce_ambush = (tot_upper_ce_chg >= ambush_wall_min) and (tot_upper_ce_chg > 2.0 * max(100.0, support_pe_chg)) and (atm_info['ce_chg_oi'] >= 0)
-        gamma_squeeze_call = (tot_upper_ce_vol >= 6.0 * max(1.0, tot_upper_ce_oi))
+        # 1. Upper OTM Call Ambush
+        tot_upper_ce_vol = sum(strike_data[s]['ce_vol'] for s in upper_4)
+        is_buying_squeeze = (tot_upper_ce_vol >= 2.0 * max(1.0, tot_upper_ce_chg))
+        if not is_buying_squeeze and tot_upper_ce_chg >= ambush_min_lots and tot_upper_ce_chg > 1.8 * max(50.0, tot_lower_pe_chg) and atm_info['ce_chg_oi'] >= 0:
+            return {'confluent': False, 'reason': f'UPPER_OTM_CALL_WRITING_AMBUSH (+{int(tot_upper_ce_chg)} CE vs +{int(tot_lower_pe_chg)} PE)', 'atm_strike': atm_strike}
 
-        if is_otm_ce_ambush and not gamma_squeeze_call:
-            return {'confluent': False, 'reason': f'UPPER_OTM_CALL_WRITING_AMBUSH (+{int(tot_upper_ce_chg)} CE vs +{int(support_pe_chg)} PE)'}
+        # 2. ATM Call Writer Dominance
+        if atm_info['ce_chg_oi'] > 1.5 * max(50.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0 and (atm_info['ce_vol'] < 2.0 * max(1.0, atm_info['ce_chg_oi'])):
+            atm_chg_lbl = int(atm_info["ce_chg_oi"]) if pd.notna(atm_info["ce_chg_oi"]) else 0
+            atm_stk_lbl = int(atm_strike) if pd.notna(atm_strike) else 0
+            return {'confluent': False, 'reason': f'ATM_CALL_WRITERS_DOMINANCE (+{atm_chg_lbl} CE at {atm_stk_lbl})', 'atm_strike': atm_strike}
 
-        atm_ce_chg = atm_info['ce_chg_oi']
-        atm_pe_chg = atm_info['pe_chg_oi']
-        atm_blocked = (atm_ce_chg > 0) and (atm_ce_chg > max(50.0, atm_pe_chg * 1.25))
-        if atm_blocked:
-            return {'confluent': False, 'reason': f'ATM_CALL_WRITERS_FIGHTING (+{int(atm_ce_chg)} CE vs +{int(atm_pe_chg)} PE at {int(atm_strike)})'}
-
+        # 3. Intermediate Resistance Walls between spot and target
         res_wall_strike = None
         for up_s in candidate_wall_strikes:
             st_d = strike_data[up_s]
@@ -250,43 +262,42 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
             ce_chg = st_d['ce_chg_oi']
             pe_chg = st_d['pe_chg_oi']
 
-            if ce_chg < 0 or pe_chg >= ce_chg:
-                continue
-
-            if ce_oi < min_wall_oi:
+            if ce_oi < min_wall_lots:
                 continue
 
             ce_conc = ce_oi / max(1.0, tot_window_ce_oi)
-            is_concentrated = (ce_conc >= 0.22) or (ce_oi >= 1.35 * max(1.0, atm_info['ce_oi']))
-            is_standing_wall = (ce_oi >= monster_standing_oi)
-            is_ratio_heavy = (ce_oi > 1.6 * max(100.0, pe_oi)) or (is_standing_wall and ce_oi > 1.25 * max(50.0, pe_oi))
+            is_standing_wall = (ce_conc >= 0.20 or ce_oi >= 1.25 * max(1.0, atm_info['ce_oi'])) and (ce_oi > 1.5 * max(50.0, pe_oi))
+            is_building_wall = (ce_chg > 0 and ce_chg > 1.5 * max(20.0, pe_chg)) and (ce_oi > 1.2 * pe_oi)
 
-            if (is_concentrated or is_standing_wall) and is_ratio_heavy:
-                if st_d['ce_vol'] >= 6.0 * ce_oi:
-                    continue
+            if is_standing_wall or is_building_wall:
+                if st_d['ce_vol'] >= 2.5 * ce_oi:
+                    continue  # Squeeze exception
                 res_wall_strike = up_s
                 break
 
         confluent = (res_wall_strike is None)
-        reason = f'CALL_RUNWAY_CLEAR_ATM_{int(atm_strike)}' if confluent else f'CALL_BLOCKED_BY_WALL_AT_{int(res_wall_strike)}'
+        atm_lbl = int(atm_strike) if (atm_strike is not None and pd.notna(atm_strike)) else 0
+        wall_lbl = int(res_wall_strike) if (res_wall_strike is not None and pd.notna(res_wall_strike)) else 0
+        reason = f'CALL_RUNWAY_CLEAR_ATM_{atm_lbl}' if confluent else f'CALL_BLOCKED_BY_WALL_AT_{wall_lbl}'
         return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
 
     else:
-        target_barrier = float(target_price) if target_price else (spot - (120.0 if is_index else 50.0))
+        target_barrier = min(float(target_price), spot - 2.5 * strike_step) if target_price else (spot - max(2.5 * strike_step, 60.0 if is_index else 30.0))
         candidate_wall_strikes = [s for s in sorted_strikes if (target_barrier - strike_step * 0.2 <= s <= atm_strike + strike_step * 0.1)]
 
-        is_otm_pe_ambush = (tot_lower_pe_chg >= ambush_wall_min) and (tot_lower_pe_chg > 2.0 * max(100.0, resistance_ce_chg)) and (atm_info['pe_chg_oi'] >= 0)
-        gamma_squeeze_put = (tot_lower_pe_vol >= 6.0 * max(1.0, tot_lower_pe_oi))
+        # 1. Lower OTM Put Ambush
+        tot_lower_pe_vol = sum(strike_data[s]['pe_vol'] for s in lower_4)
+        is_buying_squeeze = (tot_lower_pe_vol >= 2.0 * max(1.0, tot_lower_pe_chg))
+        if not is_buying_squeeze and tot_lower_pe_chg >= ambush_min_lots and tot_lower_pe_chg > 1.8 * max(50.0, tot_upper_ce_chg) and atm_info['pe_chg_oi'] >= 0:
+            return {'confluent': False, 'reason': f'LOWER_OTM_PUT_WRITING_AMBUSH (+{int(tot_lower_pe_chg)} PE vs +{int(tot_upper_ce_chg)} CE)', 'atm_strike': atm_strike}
 
-        if is_otm_pe_ambush and not gamma_squeeze_put:
-            return {'confluent': False, 'reason': f'LOWER_OTM_PUT_WRITING_AMBUSH (+{int(tot_lower_pe_chg)} PE vs +{int(resistance_ce_chg)} CE)'}
+        # 2. ATM Put Writer Dominance
+        if atm_info['pe_chg_oi'] > 1.5 * max(50.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0 and (atm_info['pe_vol'] < 2.0 * max(1.0, atm_info['pe_chg_oi'])):
+            atm_chg_lbl = int(atm_info["pe_chg_oi"]) if pd.notna(atm_info["pe_chg_oi"]) else 0
+            atm_stk_lbl = int(atm_strike) if pd.notna(atm_strike) else 0
+            return {'confluent': False, 'reason': f'ATM_PUT_WRITERS_DOMINANCE (+{atm_chg_lbl} PE at {atm_stk_lbl})', 'atm_strike': atm_strike}
 
-        atm_pe_chg = atm_info['pe_chg_oi']
-        atm_ce_chg = atm_info['ce_chg_oi']
-        atm_blocked = (atm_pe_chg > 0) and (atm_pe_chg > max(50.0, atm_ce_chg * 1.25))
-        if atm_blocked:
-            return {'confluent': False, 'reason': f'ATM_PUT_WRITERS_FIGHTING (+{int(atm_pe_chg)} PE vs +{int(atm_ce_chg)} CE at {int(atm_strike)})'}
-
+        # 3. Intermediate Support Walls between spot and downside target
         sup_wall_strike = None
         for dn_s in sorted(candidate_wall_strikes, reverse=True):
             st_d = strike_data[dn_s]
@@ -295,25 +306,23 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
             pe_chg = st_d['pe_chg_oi']
             ce_chg = st_d['ce_chg_oi']
 
-            if pe_chg < 0 or ce_chg >= pe_chg:
-                continue
-
-            if pe_oi < min_wall_oi:
+            if pe_oi < min_wall_lots:
                 continue
 
             pe_conc = pe_oi / max(1.0, tot_window_pe_oi)
-            is_concentrated = (pe_conc >= 0.22) or (pe_oi >= 1.35 * max(1.0, atm_info['pe_oi']))
-            is_standing_wall = (pe_oi >= monster_standing_oi)
-            is_ratio_heavy = (pe_oi > 1.6 * max(100.0, ce_oi)) or (is_standing_wall and pe_oi > 1.25 * max(50.0, ce_oi))
+            is_standing_wall = (pe_conc >= 0.20 or pe_oi >= 1.25 * max(1.0, atm_info['pe_oi'])) and (pe_oi > 1.5 * max(50.0, ce_oi))
+            is_building_wall = (pe_chg > 0 and pe_chg > 1.5 * max(20.0, ce_chg)) and (pe_oi > 1.2 * ce_oi)
 
-            if (is_concentrated or is_standing_wall) and is_ratio_heavy:
-                if st_d['pe_vol'] >= 6.0 * pe_oi:
+            if is_standing_wall or is_building_wall:
+                if st_d['pe_vol'] >= 2.5 * pe_oi:
                     continue
                 sup_wall_strike = dn_s
                 break
 
         confluent = (sup_wall_strike is None)
-        reason = f'PUT_RUNWAY_CLEAR_ATM_{int(atm_strike)}' if confluent else f'PUT_BLOCKED_BY_WALL_AT_{int(sup_wall_strike)}'
+        atm_lbl = int(atm_strike) if (atm_strike is not None and pd.notna(atm_strike)) else 0
+        wall_lbl = int(sup_wall_strike) if (sup_wall_strike is not None and pd.notna(sup_wall_strike)) else 0
+        reason = f'PUT_RUNWAY_CLEAR_ATM_{atm_lbl}' if confluent else f'PUT_BLOCKED_BY_WALL_AT_{wall_lbl}'
         return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
 
 
@@ -646,7 +655,7 @@ if __name__ == "__main__":
                 
                 sig = evaluate_common_5pillar_bar_slice(isym, slice_df, idx_atr, regime, is_index=True)
                 if sig:
-                    t_price = (sig['entry_price'] + 120.0) if sig['direction'] == 'CALL' else (sig['entry_price'] - 120.0)
+                    t_price = (sig['entry_price'] + max(120.0, 1.0 * idx_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(120.0, 1.0 * idx_atr))
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
                     if oi_res['confluent']:
                         sig['oi_confluent'] = True
@@ -673,7 +682,7 @@ if __name__ == "__main__":
 
                     sig = evaluate_common_5pillar_bar_slice(ssym, slice_df, stock_atr, regime, is_index=False)
                     if sig:
-                        t_price = (sig['entry_price'] + 50.0) if sig['direction'] == 'CALL' else (sig['entry_price'] - 50.0)
+                        t_price = (sig['entry_price'] + max(25.0, 0.85 * stock_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(25.0, 0.85 * stock_atr))
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
                         if oi_res['confluent']:
                             sig['oi_confluent'] = True

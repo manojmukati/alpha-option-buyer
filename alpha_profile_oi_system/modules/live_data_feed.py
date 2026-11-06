@@ -588,23 +588,39 @@ class LiveMarketDataFeed:
 
         min_wall_oi = 2000000.0 if is_index else 25000.0
         ambush_min_chg = 1000000.0 if is_index else 15000.0
+        strike_step = sorted_strikes[1] - sorted_strikes[0] if len(sorted_strikes) > 1 else 50.0
 
         if direction.upper() == 'CALL':
             # Check 1: Upper OTM Call Ambush
-            if tot_upper_ce_chg >= ambush_min_chg and tot_upper_ce_chg > 2.0 * max(1000.0, tot_lower_pe_chg):
+            tot_upper_ce_vol = sum(strike_data[s].get('ce_vol', 0) for s in upper_4)
+            is_buying_squeeze = (tot_upper_ce_vol >= 2.0 * max(1.0, tot_upper_ce_chg))
+            if not is_buying_squeeze and tot_upper_ce_chg >= ambush_min_chg and tot_upper_ce_chg > 2.0 * max(1000.0, tot_lower_pe_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
             # Check 2: Immediate Call Resistance Wall (+1 to Target)
             call_wall_detected = False
-            for s in upper_4[:2]:
-                if strike_data[s]['ce_oi'] >= min_wall_oi and strike_data[s]['ce_oi'] > 2.5 * avg_pe_oi and strike_data[s]['ce_chg_oi'] > 0:
-                    call_wall_detected = True
-                    break
+            wall_strike_hit = None
+            target_barrier = max(float(target_price), spot_price + 2.5 * strike_step) if target_price else (spot_price + 2.5 * strike_step)
+            for s in upper_4:
+                if s > target_barrier + 0.25 * strike_step:
+                    continue
+                s_ce = strike_data[s]['ce_oi']
+                s_pe = strike_data[s]['pe_oi']
+                s_ce_chg = strike_data[s]['ce_chg_oi']
+                s_pe_chg = strike_data[s]['pe_chg_oi']
+                s_ce_vol = strike_data[s].get('ce_vol', 0)
+                if s_ce >= min_wall_oi:
+                    if (s_ce > 1.6 * max(500.0, s_pe)) or (s_ce_chg > 0 and s_ce_chg > 1.5 * max(200.0, s_pe_chg)):
+                        if s_ce_vol >= 2.5 * s_ce:
+                            continue  # Squeeze exception
+                        call_wall_detected = True
+                        wall_strike_hit = s
+                        break
             if call_wall_detected:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'IMMEDIATE_CALL_RESISTANCE_WALL'}
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_CALL_RESISTANCE_WALL_AT_{int(wall_strike_hit)}'}
 
             # Check 3: ATM Call Writer Dominance
-            if atm_info['ce_chg_oi'] > 1.8 * max(500.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
+            if atm_info['ce_chg_oi'] > 1.5 * max(500.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
             score = 16.0
@@ -624,20 +640,35 @@ class LiveMarketDataFeed:
 
         else:  # PUT
             # Check 1: Lower OTM Put Ambush
-            if tot_lower_pe_chg >= ambush_min_chg and tot_lower_pe_chg > 2.0 * max(1000.0, tot_upper_ce_chg):
+            tot_lower_pe_vol = sum(strike_data[s].get('pe_vol', 0) for s in lower_4)
+            is_buying_squeeze = (tot_lower_pe_vol >= 2.0 * max(1.0, tot_lower_pe_chg))
+            if not is_buying_squeeze and tot_lower_pe_chg >= ambush_min_chg and tot_lower_pe_chg > 2.0 * max(1000.0, tot_upper_ce_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
             # Check 2: Immediate Put Support Wall (-1 to Target)
             put_wall_detected = False
-            for s in lower_4[-2:]:
-                if strike_data[s]['pe_oi'] >= min_wall_oi and strike_data[s]['pe_oi'] > 2.5 * avg_ce_oi and strike_data[s]['pe_chg_oi'] > 0:
-                    put_wall_detected = True
-                    break
+            wall_strike_hit = None
+            target_barrier = min(float(target_price), spot_price - 2.5 * strike_step) if target_price else (spot_price - 2.5 * strike_step)
+            for s in lower_4:
+                if s < target_barrier - 0.25 * strike_step:
+                    continue
+                s_pe = strike_data[s]['pe_oi']
+                s_ce = strike_data[s]['ce_oi']
+                s_pe_chg = strike_data[s]['pe_chg_oi']
+                s_ce_chg = strike_data[s]['ce_chg_oi']
+                s_pe_vol = strike_data[s].get('pe_vol', 0)
+                if s_pe >= min_wall_oi:
+                    if (s_pe > 1.6 * max(500.0, s_ce)) or (s_pe_chg > 0 and s_pe_chg > 1.5 * max(200.0, s_ce_chg)):
+                        if s_pe_vol >= 2.5 * s_pe:
+                            continue  # Squeeze exception
+                        put_wall_detected = True
+                        wall_strike_hit = s
+                        break
             if put_wall_detected:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'IMMEDIATE_PUT_SUPPORT_WALL'}
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_PUT_SUPPORT_WALL_AT_{int(wall_strike_hit)}'}
 
             # Check 3: ATM Put Writer Dominance
-            if atm_info['pe_chg_oi'] > 1.8 * max(500.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
+            if atm_info['pe_chg_oi'] > 1.5 * max(500.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
             score = 16.0
