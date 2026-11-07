@@ -464,7 +464,7 @@ class ActiveOptionTrade:
             # Calibrated Decoupled Targets for Stocks
             self.spot_sl = max(8.0, round(self.atr * 0.25, 2))
             self.spot_t1 = max(20.0, round(self.atr * 0.52, 2))
-            self.spot_t2 = max(48.0, round(self.atr * 1.15, 2))
+            self.spot_t2 = max(50.0, round(self.atr * 1.15, 2))
 
         step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
@@ -561,8 +561,15 @@ class ActiveOptionTrade:
                 return
 
             # 30-Minute Non-Performer Exit (at step >= 10)
-            # Only if cur_gain <= -(self.spot_sl * 0.35) (broken below base by >35% of SL)
-            if self.step >= 10 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.35)):
+            if self.step >= 10 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.25)):
+                self.spot_exit = b_close
+                self.exit_reason = "30M_STAGNANT_SCRATCH"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+
+            # 42-Minute Non-Performer Exit (at step >= 14)
+            if self.step >= 14 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= 0.0):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
                 self.exit_time = ts
@@ -603,10 +610,6 @@ class ActiveOptionTrade:
             else:
                 self.spot_exit = final_close
                 self.exit_reason = "EOD_EXIT"
-            self.exit_time = ts
-            self.is_closed = True
-            self.exit_time = ts
-            self.is_closed = True
             self.exit_time = ts
             self.is_closed = True
 
