@@ -52,13 +52,28 @@ MAX_ACTIVE_BANK_INDEX = 1    # BANKNIFTY
 
 def load_resampled_3m_data() -> Dict[str, pd.DataFrame]:
     files = glob.glob(os.path.join(CACHE_DIR, "*.parquet"))
+    is_csv_source = False
+    if not files:
+        csv_dir = os.path.join(REPO_ROOT, "alpha_profile_oi_system", "data")
+        files = glob.glob(os.path.join(csv_dir, "*_1m.csv"))
+        is_csv_source = True
     asset_dict = {}
     for f in files:
-        sym = os.path.basename(f).replace(".parquet", "").replace("^", "").strip()
+        if is_csv_source:
+            sym = os.path.basename(f).replace("_1m.csv", "").replace("^", "").strip().upper()
+        else:
+            sym = os.path.basename(f).replace(".parquet", "").replace("^", "").strip().upper()
         try:
-            df = pd.read_parquet(f)
-            df.columns = [c.lower() for c in df.columns]
-            df.index = pd.to_datetime(df.index)
+            if is_csv_source:
+                df = pd.read_csv(f)
+                df.columns = [c.lower() for c in df.columns]
+                ts_col = 'date' if 'date' in df.columns else ('datetime' if 'datetime' in df.columns else df.columns[0])
+                df['datetime'] = pd.to_datetime(df[ts_col])
+                df.set_index('datetime', inplace=True)
+            else:
+                df = pd.read_parquet(f)
+                df.columns = [c.lower() for c in df.columns]
+                df.index = pd.to_datetime(df.index)
             if not isinstance(df.index, pd.DatetimeIndex):
                 continue
             
@@ -149,13 +164,7 @@ def load_verified_atrs() -> Dict[str, float]:
         try:
             with open(cfg_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                res = {}
-                for k, v in data.items():
-                    if isinstance(v, dict):
-                        res[k] = float(v.get('atr_wilder_14', 30.0))
-                    else:
-                        res[k] = float(v)
-                return res
+                return {k.upper(): float(v.get('atr_wilder_14', 30.0) if isinstance(v, dict) else v) for k, v in data.items()}
         except Exception:
             return {}
     return {}
@@ -867,7 +876,9 @@ if __name__ == "__main__":
                 if len(today_asset) > 0:
                     final_close = float(today_asset.iloc[-1]['close'])
                     tr.close_eod(final_close, today_asset.index[-1])
-                    all_closed_trades.append(tr)
+                else:
+                    tr.close_eod(tr.spot_entry, curr_t)
+                all_closed_trades.append(tr)
 
     summaries = [tr.get_summary(str(tr.cand['eval_time'].date())) for tr in all_closed_trades]
     df_res = pd.DataFrame(summaries)

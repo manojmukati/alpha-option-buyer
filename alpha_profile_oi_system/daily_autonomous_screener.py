@@ -224,8 +224,9 @@ def evaluate_common_5pillar_bar_slice(
     comp_width = comp_high - comp_low
 
     # Check trading slab window
-    if hasattr(eval_bar, 'name') and hasattr(eval_bar.name, 'hour'):
-        tot_m = eval_bar.name.hour * 60 + eval_bar.name.minute
+    target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
+    if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
+        tot_m = target_bar.name.hour * 60 + target_bar.name.minute
         is_m = (570 <= tot_m <= 615)   # 09:30 AM to 10:15 AM IST
         is_a = (792 <= tot_m <= 855)   # 01:12 PM to 02:15 PM IST
         if not (is_m or is_a):

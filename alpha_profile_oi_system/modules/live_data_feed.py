@@ -286,10 +286,15 @@ class LiveMarketDataFeed:
         if os.path.exists(ATR_CACHE_FILE):
             try:
                 with open(ATR_CACHE_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    return {k.upper(): float(v.get('atr_wilder_14', 30.0) if isinstance(v, dict) else v) for k, v in data.items()}
             except Exception:
                 return {}
         return {}
+
+    def fetch_bulk_nse_snapshot(self, force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+        """Method wrapper for top-level fetch_bulk_nse_snapshot function."""
+        return fetch_bulk_nse_snapshot(force_refresh=force_refresh)
 
     def get_wilder_daily_atr(self, symbol: str) -> float:
         """
@@ -867,16 +872,21 @@ class LiveMarketDataFeed:
                 target_side = m_after.group(1).upper()
                 target_strike = float(m_after.group(2))
 
+            if target_strike is None:
+                m_nums = re.findall(r'(\d+(?:\.\d+)?)', c_str)
+                if m_nums:
+                    target_strike = float(m_nums[-1])
+
+        if target_strike is None:
+            return None
+
         for item in oc_data['records']['data']:
             side_dict = item.get(target_side)
             if not side_dict:
                 continue
 
             match = False
-            if target_strike is not None:
-                if abs(float(side_dict.get('strikePrice', 0.0)) - target_strike) < 0.1:
-                    match = True
-            else:
+            if abs(float(side_dict.get('strikePrice', 0.0)) - target_strike) < 0.1:
                 match = True
 
             if match:
