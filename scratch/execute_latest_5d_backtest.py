@@ -488,7 +488,7 @@ class ActiveOptionTrade:
             # Calibrated Decoupled Targets for Stocks
             self.spot_sl = max(7.0, round(self.atr * 0.25, 2))
             self.spot_t1 = max(18.0, round(self.atr * 0.50, 2))
-            self.spot_t2 = max(45.0, round(self.atr * 1.10, 2))
+            self.spot_t2 = max(45.0, round(self.atr * 1.15, 2))
 
         step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
@@ -500,12 +500,6 @@ class ActiveOptionTrade:
         self.opt_sl_pts = round(max(1.5, self.spot_sl * 0.50), 2)
 
     def update(self, b_high: float, b_low: float, b_close: float, ts):
-        """
-        Conservative Intrabar Evaluation:
-        - Checks intrabar high and low (never close only!).
-        - Conservative SL-first resolution if both SL and Target touch on the same bar.
-        - Force EOD closure at 15:20 IST.
-        """
         if self.is_closed:
             return
         self.step += 1
@@ -520,27 +514,11 @@ class ActiveOptionTrade:
             self.max_adv_pts = adv_move
 
         tot_m = ts.hour * 60 + ts.minute
-        # Force EOD Exit at 15:20 IST
         if tot_m >= 920:
-            if self.t1_hit:
-                lock_pts = round(max(self.spot_t1 * 0.68, self.max_fav_pts * 0.70), 2)
-                locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
-                self.spot_exit = max(locked_sl, b_close) if self.direction == 'CALL' else min(locked_sl, b_close)
-                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
-            elif self.breakeven_armed:
-                be_sl = (self.spot_entry + 0.35 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.35 * self.spot_sl)
-                self.spot_exit = max(be_sl, b_close) if self.direction == 'CALL' else min(be_sl, b_close)
-                self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
-            else:
-                self.spot_exit = b_close
-                self.exit_reason = "EOD_EXIT"
-            self.exit_time = ts
-            self.is_closed = True
+            self.close_eod(b_close, ts)
             return
 
-        # Check Intrabar SL and Trailing Logic
         if not self.t1_hit:
-            # Check Initial SL Breach (only if Breakeven Shield not yet armed)
             if not self.breakeven_armed:
                 if adv_move >= self.spot_sl:
                     self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
@@ -549,7 +527,6 @@ class ActiveOptionTrade:
                     self.is_closed = True
                     return
 
-            # Check Target 1 and Target 2 (Jackpot) FIRST
             if fav_move >= self.spot_t1:
                 self.t1_hit = True
                 self.is_risk_free = True
@@ -559,10 +536,9 @@ class ActiveOptionTrade:
                     self.exit_reason = "TARGET_2_HIT (JACKPOT)"
                     self.exit_time = ts
                     self.is_closed = True
-                # Return immediately: never check locked_sl on the very bar that hit T1
                 return
 
-            # Stage 1: Arm Breakeven Shield at +1.0R (fav_move >= self.spot_sl)
+            # Check Breakeven Shield ONLY if it was already armed on a PRIOR bar
             if self.breakeven_armed:
                 be_pts = round(self.spot_sl * 0.35, 2)
                 locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
@@ -573,28 +549,24 @@ class ActiveOptionTrade:
                     self.is_closed = True
                     return
             elif fav_move >= self.spot_sl and adv_move < self.spot_sl:
+                # Arm Breakeven as soon as trade reaches +1.0R (spot_sl) in favor
                 self.breakeven_armed = True
 
-            # Failed-Auction Structural Scratch (at step >= 3 = 9+ mins)
-            # If price closes back inside failed base by cur_gain <= -(self.spot_sl * 0.55)
-            if self.step >= 3 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
+            # Structural Failed-Auction Scratch (only for trades that NEVER armed Breakeven)
+            if self.step >= 4 and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
                 self.spot_exit = b_close
-                self.exit_reason = "FAILED_AUCTION_SCRATCH"
+                self.exit_reason = "15M_TIME_SL_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
 
-            # Stagnant Scratch (at step >= 8 = 24+ mins)
-            # Only if cur_gain <= -(self.spot_sl * 0.25)
-            if self.step >= 8 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.25)):
+            if self.step >= 9 and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.25)):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
         else:
-            # Starting on SUBSEQUENT bars after T1 was hit:
-            # 1. Check Jackpot Target 2 FIRST
             if fav_move >= self.spot_t2:
                 self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
                 self.exit_reason = "TARGET_2_HIT (JACKPOT)"
@@ -602,7 +574,7 @@ class ActiveOptionTrade:
                 self.is_closed = True
                 return
 
-            # 2. Dynamic 70% Peak Ratchet After T1: Lock 70% of highest peak move
+            # Dynamic 70% Peak Ratchet: locks 70% of max_fav_pts as runner climbs to +30..+275 pts!
             lock_pts = round(max(self.spot_t1 * 0.68, self.max_fav_pts * 0.70), 2)
             locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
@@ -798,8 +770,8 @@ if __name__ == "__main__":
         for b_idx in range(len(time_index)):
             curr_t = time_index[b_idx]
             tot_m = curr_t.hour * 60 + curr_t.minute
-            is_m = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
-            is_a = (792 <= tot_m <= 855)   # 01:12 to 02:15 PM IST
+            is_m = (570 <= tot_m <= 612)   # 09:30 to 10:12 AM IST
+            is_a = (792 <= tot_m <= 849)   # 01:12 to 02:09 PM IST
 
             # 1. Update Open Active Trades Concurrently
             for tr in active_trades:
