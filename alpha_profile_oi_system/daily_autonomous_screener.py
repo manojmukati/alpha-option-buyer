@@ -54,8 +54,8 @@ CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
-MIN_STOCK_PRICE = 1200.0
-MIN_STOCK_ATR = 42.0
+MIN_STOCK_PRICE = 650.0
+MIN_STOCK_ATR = 25.0
 
 MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
@@ -361,21 +361,25 @@ def evaluate_common_5pillar_bar_slice(
         if is_a:
             return None
 
-    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 0.75 Cr & RVOL >= 1.25x
+    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 2.0 Cr & RVOL >= 1.65x
     turnover_cr = (eval_close * eval_vol) / 1e7
-    if turnover_cr < 0.75:
+    if turnover_cr < 2.0:
         return None
 
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.25:
+    if real_rvol < 1.65:
         return None
 
     completed_bars = df_slice.iloc[:-1]
     cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
     rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0) if cvd_res.get('valid', False) else 0.0
+
+    # EMA Trend Stack on completed bars
+    ema9 = float(completed_bars['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+    ema21 = float(completed_bars['close'].ewm(span=21, adjust=False).mean().iloc[-1])
 
     # Pillar 2 (25 pts + Hard Veto): Order Flow Base Accumulation / Distribution over last 5 bars (df_slice.iloc[-6:-1])
     bars_5 = df_slice.iloc[-6:-1]
@@ -392,6 +396,8 @@ def evaluate_common_5pillar_bar_slice(
     if direction == 'CALL':
         if clv < 0.58 or last_delta < 0.20 or rec_cvd < 0.10:
             return None
+        if cum_delta_ratio < 0.12 or eval_close <= ema9 or ema9 < ema21 or rel_strength < 0.20:
+            return None
         if not (eval_close > comp_high and eval_close > vwap):
             return None
         if live_spot < comp_high - spot_buffer:
@@ -401,6 +407,8 @@ def evaluate_common_5pillar_bar_slice(
             return None
     elif direction == 'PUT':
         if clv > 0.42 or last_delta > -0.20 or rec_cvd > -0.10:
+            return None
+        if cum_delta_ratio > -0.12 or eval_close >= ema9 or ema9 > ema21 or rel_strength > -0.35:
             return None
         if not (eval_close < comp_low and eval_close < vwap):
             return None
@@ -418,10 +426,10 @@ def evaluate_common_5pillar_bar_slice(
     if comp_width > 0.68 * atr:
         return None
 
-    # Pillar 5 (10 pts + Hard Veto): Remaining Intraday ATR Runway >= 30.0 pts & ATR Used Ratio <= 92%
+    # Pillar 5 (10 pts + Hard Veto): Remaining Intraday ATR Runway >= max(18.0, 0.45 * atr) & ATR Used Ratio <= 92%
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
-    if remaining_atr < 30.0:
+    if remaining_atr < max(18.0, 0.45 * atr):
         return None
 
     atr_used_ratio = fuel_spent / max(1.0, atr)
@@ -936,20 +944,21 @@ class DailyAutonomousScreener:
                     est_opt_price = round(max(0.5, opt_entry + (spot_gain * delta)), 2)
                     current_bid = est_opt_price
 
-                t1_locked_floor = round(opt_entry + (opt_t1 - opt_entry) * 0.70, 2)
-                be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.35, 2)
-                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.80
+                t1_locked_floor = round(opt_entry + max((opt_t1 - opt_entry) * 0.65, (est_opt_price - opt_entry) * 0.70), 2)
+                be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.30, 2)
+                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.50
 
-                if est_opt_price >= opt_t1 and trail_sl < t1_locked_floor:
-                    df.at[idx, 'Trailing_SL_INR'] = t1_locked_floor
-                    trail_sl = t1_locked_floor
-                    updated_any = True
-                    print(f"[POSITION MANAGER]: {sym} reached Target 1! Trailing SL locked at 70%: Rs. {t1_locked_floor:.2f}")
+                if est_opt_price >= opt_t1:
+                    if trail_sl < t1_locked_floor:
+                        df.at[idx, 'Trailing_SL_INR'] = t1_locked_floor
+                        trail_sl = t1_locked_floor
+                        updated_any = True
+                        print(f"[POSITION MANAGER]: {sym} reached Target 1! Dynamic trailing SL ratcheted at 70%: Rs. {t1_locked_floor:.2f}")
                 elif est_opt_price >= opt_arm_trigger and trail_sl < be_shield_floor:
                     df.at[idx, 'Trailing_SL_INR'] = be_shield_floor
                     trail_sl = be_shield_floor
                     updated_any = True
-                    print(f"[POSITION MANAGER]: {sym} reached 80% of T1! Breakeven Shield armed at +0.35R: Rs. {be_shield_floor:.2f}")
+                    print(f"[POSITION MANAGER]: {sym} reached 50% of T1! Breakeven Shield armed at +0.30R: Rs. {be_shield_floor:.2f}")
 
                 exit_price = 0.0
                 outcome = ""
