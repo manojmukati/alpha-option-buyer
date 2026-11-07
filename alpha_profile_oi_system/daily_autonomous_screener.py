@@ -68,14 +68,14 @@ MAX_STOCKS_PER_SLAB = 2
 def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     """
     Checks if current IST time falls strictly within designated trading slabs:
-    - Morning:   09:30 AM to 10:00 AM IST (570 to 600 mins)
-    - Afternoon: 01:12 PM to 01:57 PM IST (792 to 837 mins)
+    - Morning:   09:30 AM to 10:15 AM IST (570 to 615 mins)
+    - Afternoon: 01:12 PM to 02:15 PM IST (792 to 855 mins)
     """
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 600)
-    slab2 = (792 <= tot_mins <= 837)
+    slab1 = (570 <= tot_mins <= 615)
+    slab2 = (792 <= tot_mins <= 855)
     return slab1 or slab2
 
 
@@ -226,8 +226,8 @@ def evaluate_common_5pillar_bar_slice(
     # Check trading slab window
     if hasattr(eval_bar, 'name') and hasattr(eval_bar.name, 'hour'):
         tot_m = eval_bar.name.hour * 60 + eval_bar.name.minute
-        is_m = (570 <= tot_m <= 600)   # 09:30 AM to 10:00 AM IST
-        is_a = (792 <= tot_m <= 837)   # 01:12 PM to 01:57 PM IST
+        is_m = (570 <= tot_m <= 615)   # 09:30 AM to 10:15 AM IST
+        is_a = (792 <= tot_m <= 855)   # 01:12 PM to 02:15 PM IST
         if not (is_m or is_a):
             return None
 
@@ -360,16 +360,16 @@ def evaluate_common_5pillar_bar_slice(
         if is_a:
             return None
 
-    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 2.0 Cr & RVOL >= 1.65x
+    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 0.75 Cr & RVOL >= 1.25x
     turnover_cr = (eval_close * eval_vol) / 1e7
-    if turnover_cr < 2.0:
+    if turnover_cr < 0.75:
         return None
 
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.65:
+    if real_rvol < 1.25:
         return None
 
     completed_bars = df_slice.iloc[:-1]
