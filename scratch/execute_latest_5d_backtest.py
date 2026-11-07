@@ -446,7 +446,7 @@ class ActiveOptionTrade:
         if self.is_idx:
             if self.sym == 'BANKNIFTY':
                 self.spot_sl = 60.0
-                self.spot_t1 = 110.0
+                self.spot_t1 = 115.0
                 self.spot_t2 = 240.0
             elif self.sym in ['NIFTY', 'FINNIFTY']:
                 self.spot_sl = 38.0
@@ -454,7 +454,7 @@ class ActiveOptionTrade:
                 self.spot_t2 = 150.0
             elif self.sym == 'MIDCPNIFTY':
                 self.spot_sl = 28.0
-                self.spot_t1 = 55.0
+                self.spot_t1 = 58.0
                 self.spot_t2 = 130.0
             else:
                 self.spot_sl = 35.0
@@ -462,9 +462,9 @@ class ActiveOptionTrade:
                 self.spot_t2 = 140.0
         else:
             # Calibrated Decoupled Targets for Stocks
-            self.spot_sl = max(6.0, round(self.atr * 0.25, 2))
-            self.spot_t1 = max(18.0, round(self.atr * 0.50, 2))
-            self.spot_t2 = max(45.0, round(self.atr * 1.15, 2))
+            self.spot_sl = max(8.0, round(self.atr * 0.25, 2))
+            self.spot_t1 = max(20.0, round(self.atr * 0.52, 2))
+            self.spot_t2 = max(48.0, round(self.atr * 1.15, 2))
 
         step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
@@ -499,12 +499,12 @@ class ActiveOptionTrade:
         # Force EOD Exit at 15:20 IST
         if tot_m >= 920:
             if self.t1_hit:
-                lock_pts = round(max(self.spot_t1 * 0.65, self.max_fav_pts * 0.70), 2)
+                lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, b_close) if self.direction == 'CALL' else min(locked_sl, b_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
             elif self.breakeven_armed:
-                be_sl = (self.spot_entry + 0.30 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.30 * self.spot_sl)
+                be_sl = (self.spot_entry + 0.35 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.35 * self.spot_sl)
                 self.spot_exit = max(be_sl, b_close) if self.direction == 'CALL' else min(be_sl, b_close)
                 self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
             else:
@@ -538,13 +538,9 @@ class ActiveOptionTrade:
                 # Return immediately: never check locked_sl on the very bar that hit T1
                 return
 
-            # Arm Breakeven Shield at 0.50 * T1 (or 0.85 * SL)
-            if (not self.breakeven_armed) and (fav_move >= self.spot_t1 * 0.50) and (adv_move < self.spot_sl):
-                self.breakeven_armed = True
-
-            # Check Breakeven Shield (if armed) - ONLY on candle close
+            # Stage 1: Arm Breakeven Shield at +1.0R (fav_move >= self.spot_sl)
             if self.breakeven_armed:
-                be_pts = round(self.spot_sl * 0.30, 2)
+                be_pts = round(self.spot_sl * 0.35, 2)
                 locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
                 if cur_gain <= be_pts:
                     self.spot_exit = locked_be
@@ -552,6 +548,8 @@ class ActiveOptionTrade:
                     self.exit_time = ts
                     self.is_closed = True
                     return
+            elif fav_move >= self.spot_sl and adv_move < self.spot_sl:
+                self.breakeven_armed = True
 
             # 15-Minute Genuine Failure Loss Scratch (at step >= 5)
             # Only if cur_gain <= -(self.spot_sl * 0.60) (deep failed breakout back inside base)
@@ -581,7 +579,7 @@ class ActiveOptionTrade:
                 return
 
             # 2. Dynamic Peak Ratchet After T1: Lock 70% of highest peak move
-            lock_pts = round(max(self.spot_t1 * 0.65, self.max_fav_pts * 0.70), 2)
+            lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
             locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
             if sl_breached:
@@ -594,17 +592,19 @@ class ActiveOptionTrade:
     def close_eod(self, final_close: float, ts):
         if not self.is_closed:
             if self.t1_hit:
-                lock_pts = round(max(self.spot_t1 * 0.65, self.max_fav_pts * 0.70), 2)
+                lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, final_close) if self.direction == 'CALL' else min(locked_sl, final_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
             elif self.breakeven_armed:
-                be_sl = (self.spot_entry + 0.30 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.30 * self.spot_sl)
+                be_sl = (self.spot_entry + 0.35 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.35 * self.spot_sl)
                 self.spot_exit = max(be_sl, final_close) if self.direction == 'CALL' else min(be_sl, final_close)
                 self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
             else:
                 self.spot_exit = final_close
                 self.exit_reason = "EOD_EXIT"
+            self.exit_time = ts
+            self.is_closed = True
             self.exit_time = ts
             self.is_closed = True
             self.exit_time = ts
@@ -683,7 +683,7 @@ def print_institutional_tearsheet(df_res: pd.DataFrame, csv_path: str):
 
     wins = df_res[df_res['opt_pts'] > 0]
     losses = df_res[df_res['opt_pts'] <= 0]
-    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL|BREAKEVEN', na=False)]
+    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL', na=False)]
     full_sl = df_res[df_res['exit_reason'] == 'SL_HIT']
 
     gross_win_pnl = wins['net_pnl'].sum() if not wins.empty else 0.0

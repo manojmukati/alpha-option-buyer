@@ -944,9 +944,9 @@ class DailyAutonomousScreener:
                     est_opt_price = round(max(0.5, opt_entry + (spot_gain * delta)), 2)
                     current_bid = est_opt_price
 
-                t1_locked_floor = round(opt_entry + max((opt_t1 - opt_entry) * 0.65, (est_opt_price - opt_entry) * 0.70), 2)
-                be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.30, 2)
-                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.50
+                t1_locked_floor = round(opt_entry + max((opt_t1 - opt_entry) * 0.70, (est_opt_price - opt_entry) * 0.70), 2)
+                be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.35, 2)
+                opt_arm_trigger = opt_entry + (opt_entry - opt_sl) * 1.0
 
                 if est_opt_price >= opt_t1:
                     if trail_sl < t1_locked_floor:
@@ -958,7 +958,7 @@ class DailyAutonomousScreener:
                     df.at[idx, 'Trailing_SL_INR'] = be_shield_floor
                     trail_sl = be_shield_floor
                     updated_any = True
-                    print(f"[POSITION MANAGER]: {sym} reached 50% of T1! Breakeven Shield armed at +0.30R: Rs. {be_shield_floor:.2f}")
+                    print(f"[POSITION MANAGER]: {sym} reached +1.0R move! Breakeven Shield armed at +0.35R: Rs. {be_shield_floor:.2f}")
 
                 exit_price = 0.0
                 outcome = ""
