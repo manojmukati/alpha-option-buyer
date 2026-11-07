@@ -68,14 +68,14 @@ MAX_STOCKS_PER_SLAB = 2
 def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     """
     Checks if current IST time falls strictly within designated trading slabs:
-    - Morning:   09:30 AM to 10:15 AM IST (570 to 615 mins)
-    - Afternoon: 01:12 PM to 02:15 PM IST (792 to 855 mins)
+    - Morning Prime:   09:30 AM to 10:00 AM IST (570 to 600 mins)
+    - Afternoon Prime: 01:12 PM to 01:57 PM IST (792 to 837 mins)
     """
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 615)
-    slab2 = (792 <= tot_mins <= 855)
+    slab1 = (570 <= tot_mins <= 600)
+    slab2 = (792 <= tot_mins <= 837)
     return slab1 or slab2
 
 
@@ -223,12 +223,12 @@ def evaluate_common_5pillar_bar_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # Check trading slab window
+    # Check trading slab window using live_bar.name (curr_t)
     target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
     if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
         tot_m = target_bar.name.hour * 60 + target_bar.name.minute
-        is_m = (570 <= tot_m <= 615)   # 09:30 AM to 10:15 AM IST
-        is_a = (792 <= tot_m <= 855)   # 01:12 PM to 02:15 PM IST
+        is_m = (570 <= tot_m <= 600)   # 09:30 AM to 10:00 AM IST (Prime Morning Cutoff)
+        is_a = (792 <= tot_m <= 837)   # 01:12 PM to 01:57 PM IST (Prime Afternoon Cutoff)
         if not (is_m or is_a):
             return None
 
@@ -661,6 +661,14 @@ class DailyAutonomousScreener:
             return self.evaluate_index_engine(sym_clean, live_q=live_q)
         else:
             return self.evaluate_stock_engine(sym_clean, live_q=live_q, nifty_context=nifty_context)
+
+    def scan_and_dispatch(self, ignore_window: bool = False):
+        """
+        Executes full autonomous 5-pillar screening, qualifies super trades,
+        appends each trade to Live_Paper_Trading_Journal.csv (Status='SIGNAL_GENERATED_OPEN'),
+        and broadcasts Telegram trade alert.
+        """
+        return self.run_screener(ignore_window=ignore_window)
 
     def run_screener(self, ignore_window: bool = False):
         ist_now = get_ist_time()

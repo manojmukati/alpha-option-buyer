@@ -769,8 +769,8 @@ if __name__ == "__main__":
         for b_idx in range(len(time_index)):
             curr_t = time_index[b_idx]
             tot_m = curr_t.hour * 60 + curr_t.minute
-            is_m = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
-            is_a = (792 <= tot_m <= 855)   # 01:12 to 02:15 PM IST
+            is_m = (570 <= tot_m <= 600)   # 09:30 to 10:00 AM IST (Prime Morning Cutoff)
+            is_a = (792 <= tot_m <= 837)   # 01:12 to 01:57 PM IST (Prime Afternoon Cutoff)
 
             # 1. Update Open Active Trades Concurrently
             for tr in active_trades:
