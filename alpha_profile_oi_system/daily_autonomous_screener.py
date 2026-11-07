@@ -362,10 +362,12 @@ def evaluate_common_5pillar_bar_slice(
             if rel_strength < 1.25 or pct_change < 1.25:
                 return None
     elif direction == 'PUT':
-        if not nifty_regime.get('allow_stock_put', True):
-            # Counter-trend PUT in bullish market requires genuine decoupled weakness
-            if rel_strength > -1.25 or pct_change > -1.25:
-                return None
+        # Institutional Rule: Strictly NO PUT trades unless NIFTY itself is confirmed BEARISH!
+        if not nifty_regime.get('allow_stock_put', False):
+            return None
+        # Block afternoon PUT entries: Short-covering & rapid intraday theta decay crush late PUT buyers
+        if is_a:
+            return None
 
     # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 0.75 Cr & RVOL >= 1.25x
     turnover_cr = (eval_close * eval_vol) / 1e7
