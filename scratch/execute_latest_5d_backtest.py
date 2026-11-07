@@ -675,7 +675,7 @@ def print_institutional_tearsheet(df_res: pd.DataFrame, csv_path: str):
 
     wins = df_res[df_res['opt_pts'] > 0]
     losses = df_res[df_res['opt_pts'] <= 0]
-    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL|FAILED_AUCTION', na=False)]
+    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL', na=False)]
     full_sl = df_res[df_res['exit_reason'] == 'SL_HIT']
 
     gross_win_pnl = wins['net_pnl'].sum() if not wins.empty else 0.0
