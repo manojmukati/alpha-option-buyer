@@ -207,8 +207,8 @@ def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
     is_chop = (recent_rng < 22.0 and ema_dist < 12.0)
 
     n_pct = round((move_from_open / max(1.0, day_open)) * 100.0, 2)
-    is_nifty_bullish = (n_spot >= tp_vwap and move_from_open >= 10.0)
-    is_nifty_bearish = (n_spot <= tp_vwap and move_from_open <= -10.0)
+    is_nifty_bullish = (n_spot >= tp_vwap and n_spot >= ema9 and n_spot >= ema21 and move_from_open >= 10.0)
+    is_nifty_bearish = (n_spot < tp_vwap and n_spot < ema9 and n_spot < ema21 and move_from_open <= -35.0)
 
     allow_stock_call = not is_nifty_bearish
     allow_stock_put = is_nifty_bearish
@@ -527,20 +527,28 @@ class ActiveOptionTrade:
                     self.is_closed = True
                     return
             else:
-                # Arm Breakeven Shield only when favorable move reaches 0.75 * T1 before full SL
-                if fav_move >= (self.spot_t1 * 0.75) and adv_move < self.spot_sl:
+                # Arm Breakeven Shield only when favorable move reaches 0.60 * T1 before full SL
+                if fav_move >= (self.spot_t1 * 0.60) and adv_move < self.spot_sl:
                     self.breakeven_armed = True
 
-            # 15-Minute Genuine Failure Loss Scratch (strictly at step 5)
-            if self.step == 5 and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
+            # 15-Minute Genuine Failure Loss Scratch (at step >= 5)
+            if self.step >= 5 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
                 self.spot_exit = b_close
                 self.exit_reason = "15M_TIME_SL_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
 
-            # 30-Minute Non-Performer Exit (strictly at step 10)
-            if self.step == 10 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.20)):
+            # 24-Minute Non-Performer Exit (at step >= 8)
+            if self.step >= 8 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.20)):
+                self.spot_exit = b_close
+                self.exit_reason = "30M_STAGNANT_SCRATCH"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+
+            # 36-Minute Flat Non-Performer Exit (at step >= 12)
+            if self.step >= 12 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= 0.0):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
                 self.exit_time = ts
@@ -752,8 +760,8 @@ if __name__ == "__main__":
         for b_idx in range(len(time_index)):
             curr_t = time_index[b_idx]
             tot_m = curr_t.hour * 60 + curr_t.minute
-            is_m = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
-            is_a = (792 <= tot_m <= 855)   # 01:12 to 02:15 PM IST
+            is_m = (570 <= tot_m <= 600)   # 09:30 to 10:00 AM IST
+            is_a = (792 <= tot_m <= 837)   # 01:12 to 01:57 PM IST
 
             # 1. Update Open Active Trades Concurrently
             for tr in active_trades:

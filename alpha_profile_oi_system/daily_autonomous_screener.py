@@ -68,14 +68,14 @@ MAX_STOCKS_PER_SLAB = 2
 def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     """
     Checks if current IST time falls strictly within designated trading slabs:
-    - Morning:   09:30 AM to 10:15 AM IST (570 to 615 mins)
-    - Afternoon: 01:12 PM to 02:15 PM IST (792 to 855 mins)
+    - Morning:   09:30 AM to 10:00 AM IST (570 to 600 mins)
+    - Afternoon: 01:12 PM to 01:57 PM IST (792 to 837 mins)
     """
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 615)
-    slab2 = (792 <= tot_mins <= 855)
+    slab1 = (570 <= tot_mins <= 600)
+    slab2 = (792 <= tot_mins <= 837)
     return slab1 or slab2
 
 
@@ -226,8 +226,8 @@ def evaluate_common_5pillar_bar_slice(
     # Check trading slab window
     if hasattr(eval_bar, 'name') and hasattr(eval_bar.name, 'hour'):
         tot_m = eval_bar.name.hour * 60 + eval_bar.name.minute
-        is_m = (570 <= tot_m <= 615)   # 09:30 AM to 10:15 AM IST
-        is_a = (792 <= tot_m <= 855)   # 01:12 PM to 02:15 PM IST
+        is_m = (570 <= tot_m <= 600)   # 09:30 AM to 10:00 AM IST
+        is_a = (792 <= tot_m <= 837)   # 01:12 PM to 01:57 PM IST
         if not (is_m or is_a):
             return None
 
@@ -360,17 +360,21 @@ def evaluate_common_5pillar_bar_slice(
         if is_a:
             return None
 
-    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 0.75 Cr & RVOL >= 1.25x
+    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 2.0 Cr & RVOL >= 1.65x
     turnover_cr = (eval_close * eval_vol) / 1e7
-    if turnover_cr < 0.75:
+    if turnover_cr < 2.0:
         return None
 
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.25:
+    if real_rvol < 1.65:
         return None
+
+    completed_bars = df_slice.iloc[:-1]
+    cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
+    rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0) if cvd_res.get('valid', False) else 0.0
 
     # Pillar 2 (25 pts + Hard Veto): Order Flow Base Accumulation / Distribution over last 5 bars (df_slice.iloc[-6:-1])
     bars_5 = df_slice.iloc[-6:-1]
@@ -383,42 +387,35 @@ def evaluate_common_5pillar_bar_slice(
     cum_delta_ratio = float(np.sum(v_5 * bar_clv_5) / np.maximum(1.0, np.sum(v_5)))
     base_accum_ratio = abs(cum_delta_ratio)
 
-    if direction == 'CALL':
-        if cum_delta_ratio < 0.15 or last_delta < 0.25:
-            return None
-        # Anti-Climax: Cap over-extended breakout spikes
-        if (eval_close - comp_high) > (0.14 * atr):
-            return None
-    elif direction == 'PUT':
-        if cum_delta_ratio > -0.15 or last_delta > -0.25:
-            return None
-        # Anti-Climax: Cap over-extended breakdown spikes
-        if (comp_low - eval_close) > (0.14 * atr):
-            return None
-
-    # Exhausted climax spike bar height cap
-    if (eval_high - eval_low) > (0.32 * atr):
-        return None
-
-    completed_bars = df_slice.iloc[:-1]
-    cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
-    rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0) if cvd_res.get('valid', False) else 0.0
-
-    # Pillar 3 (20 pts + Hard Veto): Compression <= 0.68 * ATR + Breakout + VWAP Alignment
-    if comp_width > 0.68 * atr:
-        return None
-
     spot_buffer = atr * 0.05
     if direction == 'CALL':
+        if clv < 0.58 or last_delta < 0.20 or rec_cvd < 0.10:
+            return None
         if not (eval_close > comp_high and eval_close > vwap):
             return None
         if live_spot < comp_high - spot_buffer:
             return None
+        # Root-of-breakout cap:
+        if (eval_close - comp_high) > (0.18 * atr):
+            return None
     elif direction == 'PUT':
+        if clv > 0.42 or last_delta > -0.20 or rec_cvd > -0.10:
+            return None
         if not (eval_close < comp_low and eval_close < vwap):
             return None
         if live_spot > comp_low + spot_buffer:
             return None
+        # Root-of-breakout cap:
+        if (comp_low - eval_close) > (0.18 * atr):
+            return None
+
+    # Exhausted climax spike bar height cap
+    if (eval_high - eval_low) > (0.35 * atr):
+        return None
+
+    # Pillar 3 (20 pts + Hard Veto): Compression <= 0.68 * ATR + Breakout + VWAP Alignment
+    if comp_width > 0.68 * atr:
+        return None
 
     # Pillar 5 (10 pts + Hard Veto): Remaining ATR Fuel <= 92%
     fuel_spent = day_high - day_low
@@ -583,8 +580,8 @@ class DailyAutonomousScreener:
         ema_dist = abs(cur_close - ema9)
         is_chop = (recent_rng < 22.0 and ema_dist < 12.0)
 
-        is_nifty_bullish = (cur_close >= tp_vwap and move_pts >= 10.0)
-        is_nifty_bearish = (cur_close <= tp_vwap and move_pts <= -10.0)
+        is_nifty_bullish = (cur_close >= tp_vwap and cur_close >= ema9 and cur_close >= ema21 and move_pts >= 10.0)
+        is_nifty_bearish = (cur_close < tp_vwap and cur_close < ema9 and cur_close < ema21 and move_pts <= -35.0)
 
         allow_stock_call = not is_nifty_bearish
         allow_stock_put = is_nifty_bearish
@@ -926,7 +923,7 @@ class DailyAutonomousScreener:
 
                 t1_locked_floor = round(opt_entry + (opt_t1 - opt_entry) * 0.65, 2)
                 be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.25, 2)
-                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.75
+                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.60
 
                 if est_opt_price >= opt_t1 and trail_sl < t1_locked_floor:
                     df.at[idx, 'Trailing_SL_INR'] = t1_locked_floor
@@ -937,7 +934,7 @@ class DailyAutonomousScreener:
                     df.at[idx, 'Trailing_SL_INR'] = be_shield_floor
                     trail_sl = be_shield_floor
                     updated_any = True
-                    print(f"[POSITION MANAGER]: {sym} reached 75% of T1! Breakeven Shield armed at +0.25R: Rs. {be_shield_floor:.2f}")
+                    print(f"[POSITION MANAGER]: {sym} reached 60% of T1! Breakeven Shield armed at +0.25R: Rs. {be_shield_floor:.2f}")
 
                 exit_price = 0.0
                 outcome = ""
@@ -959,12 +956,16 @@ class DailyAutonomousScreener:
                     if pd.notna(entry_ts) and entry_ts > 0:
                         elapsed_mins = (now_ts - float(entry_ts)) / 60.0
                         opt_risk = opt_entry - opt_sl
-                        # Step 5 / 15-Minute Genuine Failure Exit (lost >= 55% of SL)
-                        if elapsed_mins >= 15.0 and elapsed_mins < 30.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.55):
+                        # Step >= 5 / 15-Minute Genuine Failure Exit (lost >= 55% of SL)
+                        if elapsed_mins >= 15.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.55):
                             exit_price = current_bid if current_bid > 0 else est_opt_price
                             outcome = "15M_TIME_SL_EXIT"
-                        # Step 10 / 30-Minute Stagnant Exit (lost >= 20% of SL without hitting T1)
-                        elif elapsed_mins >= 30.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.20):
+                        # Step >= 8 / 24-Minute Stagnant Exit (lost >= 20% of SL without hitting T1)
+                        elif elapsed_mins >= 24.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.20):
+                            exit_price = current_bid if current_bid > 0 else est_opt_price
+                            outcome = "30M_STAGNANT_EXIT"
+                        # Step >= 12 / 36-Minute Flat Stagnant Exit (<= 0.0 gain)
+                        elif elapsed_mins >= 36.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= opt_entry:
                             exit_price = current_bid if current_bid > 0 else est_opt_price
                             outcome = "30M_STAGNANT_EXIT"
 

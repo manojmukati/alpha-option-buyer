@@ -225,6 +225,52 @@ def fetch_bulk_nse_snapshot(force_refresh: bool = False) -> Dict[str, Dict[str, 
     return _BULK_CACHE if _BULK_CACHE is not None else {}
 
 
+def _get_bhavcopy_oi_fallback(sym_clean: str, is_index: bool = False) -> Optional[Dict[str, Any]]:
+    """Reads official NSE Bhavcopy parquet cache as a resilient fallback if live NSE API is blocked/offline."""
+    bhav_dir = os.path.join(SYSTEM_ROOT, "bhavcopy_cache")
+    bhav_files = glob.glob(os.path.join(bhav_dir, "*.parquet"))
+    if not bhav_files:
+        return None
+    latest_bhav = sorted(bhav_files)[-1]
+    try:
+        df_bhav = pd.read_parquet(latest_bhav)
+        sub = df_bhav[df_bhav['TckrSymb'] == sym_clean]
+        if sub.empty:
+            return None
+        cur_exp = sub['XpryDt'].min()
+        exp_df = sub[sub['XpryDt'] == cur_exp]
+        lot_size = float(exp_df['NewBrdLotQty'].iloc[0]) if ('NewBrdLotQty' in exp_df.columns and float(exp_df['NewBrdLotQty'].iloc[0]) > 0) else (25.0 if is_index else 250.0)
+        strike_data = {}
+        for _, row in exp_df.iterrows():
+            stk = float(row.get('StrkPric', 0.0) or 0.0)
+            if stk <= 0:
+                continue
+            opt_tp = str(row.get('OptnTp', '')).upper().strip()
+            oi = float(row.get('OpnIntrst', 0.0) or 0.0) / lot_size
+            chg_oi = float(row.get('ChngInOpnIntrst', 0.0) or 0.0) / lot_size
+            vol = float(row.get('TtlTradgVol', 0.0) or 0.0) / lot_size
+            ltp = float(row.get('SttlmPric', row.get('ClsPric', 0.0)) or 0.0)
+            if stk not in strike_data:
+                strike_data[stk] = {'strike': stk, 'ce_oi': 0.0, 'ce_chg_oi': 0.0, 'ce_vol': 0.0, 'ce_ltp': 0.0, 'ce_bid': 0.0, 'ce_ask': 0.0, 'ce_iv': 0.0, 'pe_oi': 0.0, 'pe_chg_oi': 0.0, 'pe_vol': 0.0, 'pe_ltp': 0.0, 'pe_bid': 0.0, 'pe_ask': 0.0, 'pe_iv': 0.0}
+            if opt_tp == 'CE':
+                strike_data[stk]['ce_oi'] += oi
+                strike_data[stk]['ce_chg_oi'] += chg_oi
+                strike_data[stk]['ce_vol'] += vol
+                strike_data[stk]['ce_ltp'] = ltp
+                strike_data[stk]['ce_bid'] = round(ltp * 0.99, 2)
+                strike_data[stk]['ce_ask'] = round(ltp * 1.01, 2)
+            elif opt_tp == 'PE':
+                strike_data[stk]['pe_oi'] += oi
+                strike_data[stk]['pe_chg_oi'] += chg_oi
+                strike_data[stk]['pe_vol'] += vol
+                strike_data[stk]['pe_ltp'] = ltp
+                strike_data[stk]['pe_bid'] = round(ltp * 0.99, 2)
+                strike_data[stk]['pe_ask'] = round(ltp * 1.01, 2)
+        return {'strike_data': strike_data, 'active_expiry': str(cur_exp), 'lot_size': lot_size}
+    except Exception:
+        return None
+
+
 class LiveMarketDataFeed:
     """Institutional Market Data Feed Engine with Dual NSE & Thread-Safe yfinance."""
 
@@ -506,52 +552,6 @@ class LiveMarketDataFeed:
 
         return None
 
-def _get_bhavcopy_oi_fallback(sym_clean: str, is_index: bool = False) -> Optional[Dict[str, Any]]:
-    """Reads official NSE Bhavcopy parquet cache as a resilient fallback if live NSE API is blocked/offline."""
-    bhav_dir = os.path.join(SYSTEM_ROOT, "bhavcopy_cache")
-    bhav_files = glob.glob(os.path.join(bhav_dir, "*.parquet"))
-    if not bhav_files:
-        return None
-    latest_bhav = sorted(bhav_files)[-1]
-    try:
-        df_bhav = pd.read_parquet(latest_bhav)
-        sub = df_bhav[df_bhav['TckrSymb'] == sym_clean]
-        if sub.empty:
-            return None
-        cur_exp = sub['XpryDt'].min()
-        exp_df = sub[sub['XpryDt'] == cur_exp]
-        lot_size = float(exp_df['NewBrdLotQty'].iloc[0]) if ('NewBrdLotQty' in exp_df.columns and float(exp_df['NewBrdLotQty'].iloc[0]) > 0) else (25.0 if is_index else 250.0)
-        strike_data = {}
-        for _, row in exp_df.iterrows():
-            stk = float(row.get('StrkPric', 0.0) or 0.0)
-            if stk <= 0:
-                continue
-            opt_tp = str(row.get('OptnTp', '')).upper().strip()
-            oi = float(row.get('OpnIntrst', 0.0) or 0.0) / lot_size
-            chg_oi = float(row.get('ChngInOpnIntrst', 0.0) or 0.0) / lot_size
-            vol = float(row.get('TtlTradgVol', 0.0) or 0.0) / lot_size
-            ltp = float(row.get('SttlmPric', row.get('ClsPric', 0.0)) or 0.0)
-            if stk not in strike_data:
-                strike_data[stk] = {'strike': stk, 'ce_oi': 0.0, 'ce_chg_oi': 0.0, 'ce_vol': 0.0, 'ce_ltp': 0.0, 'ce_bid': 0.0, 'ce_ask': 0.0, 'ce_iv': 0.0, 'pe_oi': 0.0, 'pe_chg_oi': 0.0, 'pe_vol': 0.0, 'pe_ltp': 0.0, 'pe_bid': 0.0, 'pe_ask': 0.0, 'pe_iv': 0.0}
-            if opt_tp == 'CE':
-                strike_data[stk]['ce_oi'] += oi
-                strike_data[stk]['ce_chg_oi'] += chg_oi
-                strike_data[stk]['ce_vol'] += vol
-                strike_data[stk]['ce_ltp'] = ltp
-                strike_data[stk]['ce_bid'] = round(ltp * 0.99, 2)
-                strike_data[stk]['ce_ask'] = round(ltp * 1.01, 2)
-            elif opt_tp == 'PE':
-                strike_data[stk]['pe_oi'] += oi
-                strike_data[stk]['pe_chg_oi'] += chg_oi
-                strike_data[stk]['pe_vol'] += vol
-                strike_data[stk]['pe_ltp'] = ltp
-                strike_data[stk]['pe_bid'] = round(ltp * 0.99, 2)
-                strike_data[stk]['pe_ask'] = round(ltp * 1.01, 2)
-        return {'strike_data': strike_data, 'active_expiry': str(cur_exp), 'lot_size': lot_size}
-    except Exception:
-        return None
-
-
     def get_live_dual_oi_confluence(self, symbol: str, cur_spot_or_strike: float, direction: str = 'CALL', target_price: Optional[float] = None, is_index: bool = False) -> Dict[str, Any]:
         """
         Pillar 4: Expiry-Filtered Symmetric -4 to +4 OI Engine.
@@ -654,7 +654,7 @@ def _get_bhavcopy_oi_fallback(sym_clean: str, is_index: bool = False) -> Optiona
             # Check 2: Immediate Call Resistance Wall (+1 to Target)
             call_wall_detected = False
             wall_strike_hit = None
-            target_barrier = max(float(target_price), spot_price + 2.5 * strike_step) if target_price else (spot_price + 2.5 * strike_step)
+            target_barrier = max(float(target_price), ref_spot + 2.5 * strike_step) if target_price else (ref_spot + 2.5 * strike_step)
             for s in upper_4:
                 if s > target_barrier + 0.25 * strike_step:
                     continue
@@ -702,7 +702,7 @@ def _get_bhavcopy_oi_fallback(sym_clean: str, is_index: bool = False) -> Optiona
             # Check 2: Immediate Put Support Wall (-1 to Target)
             put_wall_detected = False
             wall_strike_hit = None
-            target_barrier = min(float(target_price), spot_price - 2.5 * strike_step) if target_price else (spot_price - 2.5 * strike_step)
+            target_barrier = min(float(target_price), ref_spot - 2.5 * strike_step) if target_price else (ref_spot - 2.5 * strike_step)
             for s in lower_4:
                 if s < target_barrier - 0.25 * strike_step:
                     continue
