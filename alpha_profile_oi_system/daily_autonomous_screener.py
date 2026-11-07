@@ -54,8 +54,8 @@ CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
-MIN_STOCK_PRICE = 650.0
-MIN_STOCK_ATR = 25.0
+MIN_STOCK_PRICE = 500.0
+MIN_STOCK_ATR = 18.0
 
 MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
@@ -68,14 +68,14 @@ MAX_STOCKS_PER_SLAB = 2
 def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     """
     Checks if current IST time falls strictly within designated trading slabs:
-    - Morning Prime:   09:30 AM to 10:00 AM IST (570 to 600 mins)
-    - Afternoon Prime: 01:12 PM to 01:57 PM IST (792 to 837 mins)
+    - Morning Prime:   09:30 AM to 10:15 AM IST (570 to 615 mins)
+    - Afternoon Prime: 01:12 PM to 02:15 PM IST (792 to 855 mins)
     """
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 600)
-    slab2 = (792 <= tot_mins <= 837)
+    slab1 = (570 <= tot_mins <= 615)
+    slab2 = (792 <= tot_mins <= 855)
     return slab1 or slab2
 
 
@@ -171,21 +171,19 @@ def evaluate_common_5pillar_bar_slice(
 ) -> Optional[Dict[str, Any]]:
     """
     Unified 5-Pillar Breakout Evaluation Function shared across Screener & Backtest.
-    Requires len(df_slice) >= 7 (minimum 5 compression bars from 09:15 to 09:27):
-    - 5 to 8 completed base bars: comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
-    - 1 completed breakout bar: eval_bar = df_slice.iloc[-2]
-    - 1 live holding bar: live_bar = df_slice.iloc[-1]
-    Unlocks prime morning 09:33-10:00 AM entries without wasting early breakouts!
+    Requires len(df_slice) >= 6:
+    - 5 to 8 completed base bars: comp_bars = df_slice.iloc[:-1].tail(min(8, len(df_slice) - 1))
+    - 1 completed breakout bar: eval_bar = df_slice.iloc[-1]
+    Eliminates the 1-bar (3m) delayed entry lag! Enters immediately at eval_bar['close'].
     """
-    if df_slice is None or len(df_slice) < 7:
+    if df_slice is None or len(df_slice) < 6:
         return None
 
     sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
     is_idx = is_index or (sym_clean in INDEX_NAMES)
     
-    comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
-    eval_bar = df_slice.iloc[-2]
-    live_bar = df_slice.iloc[-1]
+    comp_bars = df_slice.iloc[:-1].tail(min(8, len(df_slice) - 1))
+    eval_bar = df_slice.iloc[-1]
 
     eval_close = float(eval_bar['close'])
     eval_open = float(eval_bar['open'])
@@ -193,7 +191,7 @@ def evaluate_common_5pillar_bar_slice(
     eval_low = float(eval_bar['low'])
     eval_vol = float(eval_bar.get('volume', 0.0))
 
-    live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
+    live_spot = float(live_spot_override) if live_spot_override is not None else eval_close
 
     # Determine session open/high/low strictly for today's session
     if hasattr(df_slice.index, 'date'):
@@ -223,16 +221,18 @@ def evaluate_common_5pillar_bar_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # Check trading slab window using live_bar.name (curr_t)
-    target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
-    if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
-        tot_m = target_bar.name.hour * 60 + target_bar.name.minute
-        is_m = (570 <= tot_m <= 600)   # 09:30 AM to 10:00 AM IST (Prime Morning Cutoff)
-        is_a = (792 <= tot_m <= 837)   # 01:12 PM to 01:57 PM IST (Prime Afternoon Cutoff)
+    # Check trading slab window (09:30-10:15 AM and 13:12-14:15 PM)
+    if hasattr(eval_bar, 'name') and hasattr(eval_bar.name, 'hour'):
+        tot_m = eval_bar.name.hour * 60 + eval_bar.name.minute
+        is_m = (570 <= tot_m <= 615)   # 09:30 AM to 10:15 AM IST
+        is_a = (792 <= tot_m <= 855)   # 01:12 PM to 02:15 PM IST
         if not (is_m or is_a):
             return None
+    else:
+        is_m = True
+        is_a = False
 
-    # Dynamic VWAP if not pre-computed
+    # Dynamic VWAP & Market Profile (VAH, VAL, developing POC)
     if 'vwap' in eval_bar and pd.notna(eval_bar['vwap']) and float(eval_bar['vwap']) > 0:
         vwap = float(eval_bar['vwap'])
     else:
@@ -240,12 +240,31 @@ def evaluate_common_5pillar_bar_slice(
         cum_v = df_slice['volume'].cumsum()
         cum_pv = (tp * df_slice['volume']).cumsum()
         vwap_series = cum_pv / np.maximum(1.0, cum_v) if not is_idx else tp.expanding().mean()
-        vwap = float(vwap_series.iloc[-2])
+        vwap = float(vwap_series.iloc[-1])
+
+    if 'poc' in eval_bar and pd.notna(eval_bar['poc']) and float(eval_bar['poc']) > 0:
+        poc = float(eval_bar['poc'])
+    else:
+        poc = vwap
+
+    if 'vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0:
+        vah = float(eval_bar['vah'])
+        val = float(eval_bar['val'])
+    else:
+        vah = round(vwap + 0.35 * atr, 2)
+        val = round(vwap - 0.35 * atr, 2)
+
+    # EMA9 and EMA21
+    if 'ema9' in eval_bar and pd.notna(eval_bar['ema9']):
+        ema9 = float(eval_bar['ema9'])
+        ema21 = float(eval_bar['ema21'])
+    else:
+        ema9 = float(df_slice['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+        ema21 = float(df_slice['close'].ewm(span=21, adjust=False).mean().iloc[-1])
 
     bar_rng = max(0.05, eval_high - eval_low)
     clv = (eval_close - eval_low) / bar_rng
 
-    # Dynamic last_delta if not pre-computed
     if 'bar_delta_ratio' in eval_bar and pd.notna(eval_bar['bar_delta_ratio']):
         last_delta = float(eval_bar['bar_delta_ratio'])
     else:
@@ -256,18 +275,36 @@ def evaluate_common_5pillar_bar_slice(
     # ==========================================
     if is_idx:
         max_allowed_base = 350.0 if sym_clean == 'BANKNIFTY' else 150.0
-        if comp_width > max_allowed_base:
-            return None
-
         idx_dist = 90.0 if sym_clean == 'BANKNIFTY' else 40.0
+
+        # Trigger A: Wyckoff Box Breakout
+        box_call = (comp_width <= max_allowed_base) and (eval_close >= comp_high) and (eval_close <= comp_high + idx_dist) and (eval_close > eval_open)
+        box_put = (comp_width <= max_allowed_base) and (eval_close <= comp_low) and (eval_close >= comp_low - idx_dist) and (eval_close < eval_open)
+
+        # Trigger B: Flag / Trend Continuation
+        flag_bars = df_slice.iloc[-4:-1] if len(df_slice) >= 4 else comp_bars
+        flag_high = float(flag_bars['high'].max())
+        flag_low = float(flag_bars['low'].min())
+        flag_width = flag_high - flag_low
+        flag_call = (flag_width <= max_allowed_base * 0.40) and (ema9 > ema21) and (eval_close > vwap) and (eval_close > flag_high) and (eval_close >= day_high * 0.999) and (eval_close > eval_open)
+        flag_put = (flag_width <= max_allowed_base * 0.40) and (ema9 < ema21) and (eval_close < vwap) and (eval_close < flag_low) and (eval_close <= day_low * 1.001) and (eval_close < eval_open)
+
         direction = None
-        if eval_close >= comp_high and eval_close <= comp_high + idx_dist and live_spot >= comp_high - 10.0 and eval_close > eval_open:
+        if box_call or flag_call:
             direction = 'CALL'
-        elif eval_close <= comp_low and eval_close >= comp_low - idx_dist and live_spot <= comp_low + 10.0 and eval_close < eval_open:
+        elif box_put or flag_put:
             direction = 'PUT'
 
         if not direction:
             return None
+
+        # Value Area Acceptance for Index
+        if direction == 'CALL':
+            if not (eval_close > vwap and eval_close >= poc and eval_close > ema9 and ema9 >= ema21):
+                return None
+        elif direction == 'PUT':
+            if not (eval_close < vwap and eval_close <= poc and eval_close < ema9 and ema9 <= ema21):
+                return None
 
         # Gate 1: Macro Regime Alignment
         if direction == 'CALL' and not nifty_regime.get('allow_call', True):
@@ -287,23 +324,24 @@ def evaluate_common_5pillar_bar_slice(
             return None
 
         # BVC Delta Proxy
-        completed_bars = df_slice.iloc[:-1]
+        completed_bars = df_slice
         cvd_res = compute_bar_delta_proxy(completed_bars, is_index=True)
         rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
-        cvd_pass = (rec_cvd >= 0.12) if direction == 'CALL' else (rec_cvd <= -0.12)
+        cvd_pass = (rec_cvd >= 0.10) if direction == 'CALL' else (rec_cvd <= -0.10)
         if not cvd_pass:
             return None
 
         # Anti-exhaustion move
         idx_pct_move = ((live_spot - day_open) / max(1.0, day_open)) * 100.0
-        if abs(idx_pct_move) > 1.25:
+        if abs(idx_pct_move) > 1.35:
             return None
 
         idx_p1 = min(20.0, max(0.0, (idx_rvol - 1.0) * 15.0))
         idx_p2 = 15.0 if abs(rec_cvd) >= 0.25 else 8.0
         idx_p3 = 20.0 if comp_width <= (max_allowed_base * 0.5) else 12.0
         idx_p5 = 10.0 if abs(idx_pct_move) <= 0.70 else 5.0
-        idx_score = round(35.0 + idx_p1 + idx_p2 + idx_p3 + idx_p5, 2)
+        va_bonus = 6.0 if ((direction == 'CALL' and eval_close >= vah) or (direction == 'PUT' and eval_close <= val)) else 0.0
+        idx_score = round(35.0 + idx_p1 + idx_p2 + idx_p3 + idx_p5 + va_bonus, 2)
 
         return {
             'symbol': sym_clean,
@@ -361,28 +399,24 @@ def evaluate_common_5pillar_bar_slice(
         if is_a:
             return None
 
-    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 2.0 Cr & RVOL >= 1.65x
+    # Pillar 1 (25 pts + Hard Veto): Turnover >= Rs 1.50 Cr & RVOL >= 1.50x
     turnover_cr = (eval_close * eval_vol) / 1e7
-    if turnover_cr < 2.0:
+    if turnover_cr < 1.50:
         return None
 
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.65:
+    if real_rvol < 1.50:
         return None
 
-    completed_bars = df_slice.iloc[:-1]
+    completed_bars = df_slice
     cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
     rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0) if cvd_res.get('valid', False) else 0.0
 
-    # EMA Trend Stack on completed bars
-    ema9 = float(completed_bars['close'].ewm(span=9, adjust=False).mean().iloc[-1])
-    ema21 = float(completed_bars['close'].ewm(span=21, adjust=False).mean().iloc[-1])
-
-    # Pillar 2 (25 pts + Hard Veto): Order Flow Base Accumulation / Distribution over last 5 bars (df_slice.iloc[-6:-1])
-    bars_5 = df_slice.iloc[-6:-1]
+    # Pillar 2: Order Flow Base Accumulation / Distribution over last 5 bars (df_slice.iloc[-5:])
+    bars_5 = df_slice.iloc[-5:]
     h_5 = bars_5['high'].values.astype(float)
     l_5 = bars_5['low'].values.astype(float)
     c_5 = bars_5['close'].values.astype(float)
@@ -392,56 +426,69 @@ def evaluate_common_5pillar_bar_slice(
     cum_delta_ratio = float(np.sum(v_5 * bar_clv_5) / np.maximum(1.0, np.sum(v_5)))
     base_accum_ratio = abs(cum_delta_ratio)
 
-    spot_buffer = atr * 0.05
+    # Market Profile Value Acceptance & Order Flow Confirmation:
     if direction == 'CALL':
-        if clv < 0.58 or last_delta < 0.20 or rec_cvd < 0.10:
+        if clv < 0.58 or last_delta < 0.20 or rec_cvd < 0.10 or cum_delta_ratio < 0.10:
             return None
-        if cum_delta_ratio < 0.12 or eval_close <= ema9 or ema9 < ema21 or rel_strength < 0.20:
+        if not (eval_close > vwap and eval_close >= poc and eval_close > ema9 and ema9 >= ema21):
             return None
-        if not (eval_close > comp_high and eval_close > vwap):
-            return None
-        if live_spot < comp_high - spot_buffer:
-            return None
-        # Root-of-breakout cap:
-        if (eval_close - comp_high) > (0.18 * atr):
+        if rel_strength < 0.20:
             return None
     elif direction == 'PUT':
-        if clv > 0.42 or last_delta > -0.20 or rec_cvd > -0.10:
+        if clv > 0.42 or last_delta > -0.20 or rec_cvd > -0.10 or cum_delta_ratio > -0.10:
             return None
-        if cum_delta_ratio > -0.12 or eval_close >= ema9 or ema9 > ema21 or rel_strength > -0.35:
+        if not (eval_close < vwap and eval_close <= poc and eval_close < ema9 and ema9 <= ema21):
             return None
-        if not (eval_close < comp_low and eval_close < vwap):
-            return None
-        if live_spot > comp_low + spot_buffer:
-            return None
-        # Root-of-breakout cap:
-        if (comp_low - eval_close) > (0.18 * atr):
+        if rel_strength > -0.35:
             return None
 
     # Exhausted climax spike bar height cap
     if (eval_high - eval_low) > (0.35 * atr):
         return None
 
-    # Pillar 3 (20 pts + Hard Veto): Compression <= 0.68 * ATR + Breakout + VWAP Alignment
-    if comp_width > 0.68 * atr:
+    # Pillar 3: Dual-Trigger Engine (Trigger A: Wyckoff Box Breakout OR Trigger B: Flag Trend Continuation)
+    # Trigger A: Wyckoff Box Breakout
+    box_breakout = False
+    if comp_width <= 0.65 * atr:
+        if direction == 'CALL' and eval_close > comp_high and (eval_close - comp_high) <= (0.22 * atr):
+            box_breakout = True
+        elif direction == 'PUT' and eval_close < comp_low and (comp_low - eval_close) <= (0.22 * atr):
+            box_breakout = True
+
+    # Trigger B: Micro-Pullback Flag Continuation
+    flag_breakout = False
+    flag_bars = df_slice.iloc[-4:-1] if len(df_slice) >= 4 else comp_bars
+    flag_high = float(flag_bars['high'].max())
+    flag_low = float(flag_bars['low'].min())
+    flag_width = flag_high - flag_low
+    if flag_width <= 0.38 * atr:
+        if direction == 'CALL' and (eval_close > flag_high) and ((eval_close - flag_high) <= 0.22 * atr) and (eval_close >= day_high * 0.999):
+            flag_breakout = True
+        elif direction == 'PUT' and (eval_close < flag_low) and ((flag_low - eval_close) <= 0.22 * atr) and (eval_close <= day_low * 1.001):
+            flag_breakout = True
+
+    if not (box_breakout or flag_breakout):
         return None
 
-    # Pillar 5 (10 pts + Hard Veto): Remaining Intraday ATR Runway >= max(18.0, 0.45 * atr) & ATR Used Ratio <= 92%
+    # Pillar 5: Remaining Intraday ATR Runway >= max(14.0, 0.35 * atr) & ATR Used Ratio <= 92%
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
-    if remaining_atr < max(18.0, 0.45 * atr):
+    if remaining_atr < max(14.0, 0.35 * atr):
         return None
 
     atr_used_ratio = fuel_spent / max(1.0, atr)
     if atr_used_ratio > 0.92:
         return None
 
+    # Value Area Breakout Bonus (+6 points)
+    va_bonus = 6.0 if ((direction == 'CALL' and eval_close >= vah) or (direction == 'PUT' and eval_close <= val)) else 0.0
+
     # REAL 100-Point Institutional Score
     p1_score = min(15.0, max(0.0, (real_rvol - 1.0) * 8.0)) + min(10.0, turnover_cr * 1.5)
     p2_score = min(25.0, abs(last_delta) * 15.0 + min(10.0, base_accum_ratio * 5.0))
-    p3_score = min(20.0, max(5.0, (0.62 - (comp_width / atr)) * 30.0) + 6.0)
+    p3_score = min(20.0, max(5.0, (0.65 - (comp_width / atr)) * 30.0) + 6.0)
     p5_score = max(3.0, round((0.85 - atr_used_ratio) * 12.0, 2))
-    prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+    prelim_score = round(p1_score + p2_score + p3_score + p5_score + va_bonus, 2)
 
     return {
         'symbol': sym_clean,
@@ -460,9 +507,13 @@ def evaluate_common_5pillar_bar_slice(
         'cum_delta_ratio': round(cum_delta_ratio, 3),
         'last_delta': last_delta,
         'vwap': vwap,
+        'poc': poc,
+        'vah': vah,
+        'val': val,
         'score': prelim_score,
         'stock_atr': atr,
         'pct_change': pct_change,
+        'trigger_type': 'BOX_BREAKOUT' if box_breakout else 'FLAG_CONTINUATION',
         'atr_used_ratio': round(atr_used_ratio, 2),
         'day_open': day_open,
         'eval_time': eval_bar.name if hasattr(eval_bar, 'name') else None
@@ -629,7 +680,7 @@ class DailyAutonomousScreener:
     def evaluate_index_engine(self, symbol: str, live_q: Optional[Dict[str, Any]] = None, is_afternoon: bool = False) -> Dict[str, Any]:
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         df = self.data_feed.get_live_intraday_bars(sym_clean)
-        if df is None or len(df) < 7:
+        if df is None or len(df) < 6:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INSUFFICIENT_3M_BARS', 'is_index': True}
 
         atr = self.get_stock_atr(sym_clean, live_q)
@@ -648,7 +699,7 @@ class DailyAutonomousScreener:
     def evaluate_stock_engine(self, symbol: str, live_q: Optional[Dict[str, Any]] = None, is_afternoon: bool = False, nifty_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         df = self.data_feed.get_live_intraday_bars(sym_clean)
-        if df is None or len(df) < 7:
+        if df is None or len(df) < 6:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'INSUFFICIENT_3M_BARS', 'is_index': False}
 
         atr = self.get_stock_atr(sym_clean, live_q)
@@ -944,7 +995,7 @@ class DailyAutonomousScreener:
                     est_opt_price = round(max(0.5, opt_entry + (spot_gain * delta)), 2)
                     current_bid = est_opt_price
 
-                t1_locked_floor = round(opt_entry + max((opt_t1 - opt_entry) * 0.70, (est_opt_price - opt_entry) * 0.70), 2)
+                t1_locked_floor = round(opt_entry + max((opt_t1 - opt_entry) * 0.68, (est_opt_price - opt_entry) * 0.70), 2)
                 be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.35, 2)
                 opt_arm_trigger = opt_entry + (opt_entry - opt_sl) * 1.0
 
@@ -980,12 +1031,12 @@ class DailyAutonomousScreener:
                     if pd.notna(entry_ts) and entry_ts > 0:
                         elapsed_mins = (now_ts - float(entry_ts)) / 60.0
                         opt_risk = opt_entry - opt_sl
-                        # Step >= 5 / 15-Minute Genuine Failure Exit (lost >= 60% of SL)
-                        if elapsed_mins >= 15.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.60):
+                        # Step >= 3 / 9+ mins Failed-Auction Structural Scratch (lost >= 55% of SL)
+                        if elapsed_mins >= 9.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.55):
                             exit_price = current_bid if current_bid > 0 else est_opt_price
-                            outcome = "15M_TIME_SL_EXIT"
-                        # Step >= 10 / 30-Minute Stagnant Exit (lost >= 35% of SL without hitting T1)
-                        elif elapsed_mins >= 30.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.35):
+                            outcome = "FAILED_AUCTION_SCRATCH"
+                        # Step >= 8 / 24+ mins Stagnant Exit (lost >= 25% of SL without hitting T1)
+                        elif elapsed_mins >= 24.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.25):
                             exit_price = current_bid if current_bid > 0 else est_opt_price
                             outcome = "30M_STAGNANT_EXIT"
 

@@ -42,8 +42,8 @@ CACHE_DIR = os.path.join(REPORT_DIR, "data_cache_latest_5d_1m")
 CONFIG_DIR = os.path.join(REPO_ROOT, "alpha_profile_oi_system", "config")
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-MIN_STOCK_PRICE = 650.0
-MIN_STOCK_ATR = 25.0
+MIN_STOCK_PRICE = 500.0
+MIN_STOCK_ATR = 18.0
 
 # Active position caps strictly matching daily_autonomous_screener.py
 MAX_ACTIVE_STOCKS = 2
@@ -119,11 +119,35 @@ def load_resampled_3m_data() -> Dict[str, pd.DataFrame]:
                 df_3m_day['ema9'] = df_3m_day['close'].ewm(span=9, adjust=False).mean()
                 df_3m_day['ema21'] = df_3m_day['close'].ewm(span=21, adjust=False).mean()
 
-                # Session VWAP
+                # Session VWAP and Market Profile (VAH, VAL, developing POC)
                 tp = (df_3m_day['high'] + df_3m_day['low'] + df_3m_day['close']) / 3.0
                 cum_v = df_3m_day['volume'].cumsum()
                 cum_pv = (tp * df_3m_day['volume']).cumsum()
-                df_3m_day['vwap'] = (cum_pv / np.maximum(1.0, cum_v)).round(2) if not is_spot_index else tp.expanding().mean().round(2)
+                vwap = (cum_pv / np.maximum(1.0, cum_v)).round(2) if not is_spot_index else tp.expanding().mean().round(2)
+                df_3m_day['vwap'] = vwap
+
+                cum_pv2 = ((tp ** 2) * df_3m_day['volume']).cumsum()
+                variance = np.maximum(0.0, (cum_pv2 / np.maximum(1.0, cum_v)) - (vwap ** 2))
+                std_dev = np.sqrt(variance) if not is_spot_index else df_3m_day['close'].expanding().std().fillna(1.0)
+                df_3m_day['vah'] = (vwap + 1.28 * std_dev).round(2)
+                df_3m_day['val'] = (vwap - 1.28 * std_dev).round(2)
+
+                # Developing Histogram POC
+                avg_p = float(df_3m_day['close'].mean())
+                bin_sz = max(0.10, round(avg_p * 0.001, 2))
+                binned = (tp / bin_sz).round() * bin_sz
+                poc_list = []
+                vol_bins = {}
+                max_vol = -1.0
+                curr_poc = avg_p
+                for p_bin, vol in zip(binned, df_3m_day['volume']):
+                    v_weight = vol if not is_spot_index else 1.0
+                    vol_bins[p_bin] = vol_bins.get(p_bin, 0.0) + v_weight
+                    if vol_bins[p_bin] > max_vol:
+                        max_vol = vol_bins[p_bin]
+                        curr_poc = p_bin
+                    poc_list.append(curr_poc)
+                df_3m_day['poc'] = poc_list
 
                 resampled_days.append(df_3m_day)
 
@@ -446,25 +470,25 @@ class ActiveOptionTrade:
         if self.is_idx:
             if self.sym == 'BANKNIFTY':
                 self.spot_sl = 60.0
-                self.spot_t1 = 115.0
-                self.spot_t2 = 240.0
+                self.spot_t1 = 110.0
+                self.spot_t2 = 220.0
             elif self.sym in ['NIFTY', 'FINNIFTY']:
                 self.spot_sl = 38.0
-                self.spot_t1 = 80.0
+                self.spot_t1 = 75.0
                 self.spot_t2 = 150.0
             elif self.sym == 'MIDCPNIFTY':
                 self.spot_sl = 28.0
-                self.spot_t1 = 58.0
-                self.spot_t2 = 130.0
+                self.spot_t1 = 55.0
+                self.spot_t2 = 125.0
             else:
                 self.spot_sl = 35.0
-                self.spot_t1 = 75.0
+                self.spot_t1 = 70.0
                 self.spot_t2 = 140.0
         else:
             # Calibrated Decoupled Targets for Stocks
-            self.spot_sl = max(8.0, round(self.atr * 0.25, 2))
-            self.spot_t1 = max(20.0, round(self.atr * 0.52, 2))
-            self.spot_t2 = max(50.0, round(self.atr * 1.15, 2))
+            self.spot_sl = max(7.0, round(self.atr * 0.25, 2))
+            self.spot_t1 = max(18.0, round(self.atr * 0.50, 2))
+            self.spot_t2 = max(45.0, round(self.atr * 1.10, 2))
 
         step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
@@ -499,7 +523,7 @@ class ActiveOptionTrade:
         # Force EOD Exit at 15:20 IST
         if tot_m >= 920:
             if self.t1_hit:
-                lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
+                lock_pts = round(max(self.spot_t1 * 0.68, self.max_fav_pts * 0.70), 2)
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, b_close) if self.direction == 'CALL' else min(locked_sl, b_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
@@ -551,25 +575,18 @@ class ActiveOptionTrade:
             elif fav_move >= self.spot_sl and adv_move < self.spot_sl:
                 self.breakeven_armed = True
 
-            # 15-Minute Genuine Failure Loss Scratch (at step >= 5)
-            # Only if cur_gain <= -(self.spot_sl * 0.60) (deep failed breakout back inside base)
-            if self.step >= 5 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.60)):
+            # Failed-Auction Structural Scratch (at step >= 3 = 9+ mins)
+            # If price closes back inside failed base by cur_gain <= -(self.spot_sl * 0.55)
+            if self.step >= 3 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
                 self.spot_exit = b_close
-                self.exit_reason = "15M_TIME_SL_SCRATCH"
+                self.exit_reason = "FAILED_AUCTION_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
 
-            # 30-Minute Non-Performer Exit (at step >= 10)
-            if self.step >= 10 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.25)):
-                self.spot_exit = b_close
-                self.exit_reason = "30M_STAGNANT_SCRATCH"
-                self.exit_time = ts
-                self.is_closed = True
-                return
-
-            # 42-Minute Non-Performer Exit (at step >= 14)
-            if self.step >= 14 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= 0.0):
+            # Stagnant Scratch (at step >= 8 = 24+ mins)
+            # Only if cur_gain <= -(self.spot_sl * 0.25)
+            if self.step >= 8 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.25)):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
                 self.exit_time = ts
@@ -585,8 +602,8 @@ class ActiveOptionTrade:
                 self.is_closed = True
                 return
 
-            # 2. Dynamic Peak Ratchet After T1: Lock 70% of highest peak move
-            lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
+            # 2. Dynamic 70% Peak Ratchet After T1: Lock 70% of highest peak move
+            lock_pts = round(max(self.spot_t1 * 0.68, self.max_fav_pts * 0.70), 2)
             locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
             if sl_breached:
@@ -599,7 +616,7 @@ class ActiveOptionTrade:
     def close_eod(self, final_close: float, ts):
         if not self.is_closed:
             if self.t1_hit:
-                lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
+                lock_pts = round(max(self.spot_t1 * 0.68, self.max_fav_pts * 0.70), 2)
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, final_close) if self.direction == 'CALL' else min(locked_sl, final_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
@@ -621,7 +638,7 @@ class ActiveOptionTrade:
             eff_delta = 0.58
         elif "BREAKEVEN" in self.exit_reason:
             eff_delta = 0.50
-        elif "SCRATCH" in self.exit_reason or "TIME_SL" in self.exit_reason:
+        elif "SCRATCH" in self.exit_reason or "TIME_SL" in self.exit_reason or "FAILED_AUCTION" in self.exit_reason:
             eff_delta = 0.45
         elif "SL" in self.exit_reason:
             eff_delta = 0.50
@@ -686,7 +703,7 @@ def print_institutional_tearsheet(df_res: pd.DataFrame, csv_path: str):
 
     wins = df_res[df_res['opt_pts'] > 0]
     losses = df_res[df_res['opt_pts'] <= 0]
-    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL', na=False)]
+    scratches = df_res[df_res['exit_reason'].str.contains('SCRATCH|TIME_SL|FAILED_AUCTION', na=False)]
     full_sl = df_res[df_res['exit_reason'] == 'SL_HIT']
 
     gross_win_pnl = wins['net_pnl'].sum() if not wins.empty else 0.0
@@ -781,8 +798,8 @@ if __name__ == "__main__":
         for b_idx in range(len(time_index)):
             curr_t = time_index[b_idx]
             tot_m = curr_t.hour * 60 + curr_t.minute
-            is_m = (570 <= tot_m <= 600)   # 09:30 to 10:00 AM IST (Prime Morning Cutoff)
-            is_a = (792 <= tot_m <= 837)   # 01:12 to 01:57 PM IST (Prime Afternoon Cutoff)
+            is_m = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
+            is_a = (792 <= tot_m <= 855)   # 01:12 to 02:15 PM IST
 
             # 1. Update Open Active Trades Concurrently
             for tr in active_trades:
@@ -812,13 +829,13 @@ if __name__ == "__main__":
                     continue
                 idf = asset_data[isym]
                 today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
-                if len(today_bars) < 7:
+                if len(today_bars) < 6:
                     continue
                 idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
                 
                 sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
                 if sig:
-                    sig['entry_price'] = float(today_bars.iloc[-2]['close'])
+                    sig['entry_price'] = float(today_bars.iloc[-1]['close'])
                     target_dist = 220.0 if isym == 'BANKNIFTY' else 140.0
                     t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
@@ -839,13 +856,13 @@ if __name__ == "__main__":
 
                     sdf = asset_data[ssym]
                     today_bars = sdf[(sdf.index.date == d) & (sdf.index <= curr_t)]
-                    if len(today_bars) < 7:
+                    if len(today_bars) < 6:
                         continue
                     stock_atr = atrs.get(ssym, 30.0)
 
                     sig = evaluate_common_5pillar_bar_slice(ssym, today_bars, stock_atr, regime, is_index=False)
                     if sig:
-                        sig['entry_price'] = float(today_bars.iloc[-2]['close'])
+                        sig['entry_price'] = float(today_bars.iloc[-1]['close'])
                         target_dist = max(40.0, min(65.0, 0.85 * stock_atr))
                         t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
