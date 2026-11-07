@@ -43,7 +43,7 @@ CONFIG_DIR = os.path.join(REPO_ROOT, "alpha_profile_oi_system", "config")
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 MIN_STOCK_PRICE = 500.0
-MIN_STOCK_ATR = 18.0
+MIN_STOCK_ATR = 20.0
 
 # Active position caps strictly matching daily_autonomous_screener.py
 MAX_ACTIVE_STOCKS = 2
@@ -394,7 +394,12 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
         atm_lbl = int(atm_strike) if (atm_strike is not None and pd.notna(atm_strike)) else 0
         wall_lbl = int(res_wall_strike) if (res_wall_strike is not None and pd.notna(res_wall_strike)) else 0
         reason = f'CALL_RUNWAY_CLEAR_ATM_{atm_lbl}' if confluent else f'CALL_BLOCKED_BY_WALL_AT_{wall_lbl}'
-        return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
+        oi_score = 12.0
+        if tot_lower_pe_chg > 0:
+            oi_score += 4.0
+        if atm_info.get('ce_chg_oi', 0.0) < 0 or tot_upper_ce_chg < 0:
+            oi_score += 4.0
+        return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike, 'score': oi_score if confluent else 0.0}
 
     else:
         target_barrier = float(target_price) if target_price else (spot - max(2.0 * strike_step, 60.0 if is_index else 25.0))
@@ -442,7 +447,12 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
         atm_lbl = int(atm_strike) if (atm_strike is not None and pd.notna(atm_strike)) else 0
         wall_lbl = int(sup_wall_strike) if (sup_wall_strike is not None and pd.notna(sup_wall_strike)) else 0
         reason = f'PUT_RUNWAY_CLEAR_ATM_{atm_lbl}' if confluent else f'PUT_BLOCKED_BY_WALL_AT_{wall_lbl}'
-        return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike}
+        oi_score = 12.0
+        if tot_upper_ce_chg > 0:
+            oi_score += 4.0
+        if atm_info.get('pe_chg_oi', 0.0) < 0 or tot_lower_pe_chg < 0:
+            oi_score += 4.0
+        return {'confluent': confluent, 'reason': reason, 'atm_strike': atm_strike, 'score': oi_score if confluent else 0.0}
 
 
 class ActiveOptionTrade:
@@ -462,7 +472,6 @@ class ActiveOptionTrade:
         self.exit_reason = None
         self.exit_time = curr_t
         self.t1_hit = False
-        self.is_risk_free = False
         self.breakeven_armed = False
         self.max_fav_pts = 0.0
         self.max_adv_pts = 0.0
@@ -470,27 +479,26 @@ class ActiveOptionTrade:
         if self.is_idx:
             if self.sym == 'BANKNIFTY':
                 self.spot_sl = 60.0
-                self.spot_t1 = 110.0
-                self.spot_t2 = 220.0
+                self.spot_t1 = 120.0
+                self.spot_t2 = 240.0
             elif self.sym in ['NIFTY', 'FINNIFTY']:
-                self.spot_sl = 38.0
-                self.spot_t1 = 75.0
+                self.spot_sl = 40.0
+                self.spot_t1 = 85.0
                 self.spot_t2 = 150.0
             elif self.sym == 'MIDCPNIFTY':
-                self.spot_sl = 28.0
-                self.spot_t1 = 55.0
-                self.spot_t2 = 125.0
+                self.spot_sl = 30.0
+                self.spot_t1 = 65.0
+                self.spot_t2 = 130.0
             else:
                 self.spot_sl = 35.0
                 self.spot_t1 = 70.0
                 self.spot_t2 = 140.0
         else:
-            # Calibrated Decoupled Targets for Stocks
-            self.spot_sl = max(7.0, round(self.atr * 0.25, 2))
-            self.spot_t1 = max(18.0, round(self.atr * 0.50, 2))
-            self.spot_t2 = max(45.0, round(self.atr * 1.15, 2))
+            self.spot_sl = max(8.0, round(self.atr * 0.26, 2))
+            self.spot_t1 = max(22.0, round(self.atr * 0.55, 2))
+            self.spot_t2 = max(50.0, round(self.atr * 1.15, 2))
 
-        step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
+        step = 50.0 if not self.is_idx else (100.0 if self.is_bank else 50.0)
         self.atm_strike = round(self.spot_entry / step) * step
         self.opt_type = 'CE' if self.direction == 'CALL' else 'PE'
         stk_str = f"{int(self.atm_strike)}" if self.atm_strike == int(self.atm_strike) else f"{self.atm_strike:.1f}"
@@ -518,69 +526,66 @@ class ActiveOptionTrade:
             self.close_eod(b_close, ts)
             return
 
-        if not self.t1_hit:
-            if not self.breakeven_armed:
-                if adv_move >= self.spot_sl:
-                    self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
-                    self.exit_reason = "SL_HIT"
-                    self.exit_time = ts
-                    self.is_closed = True
-                    return
-
-            if fav_move >= self.spot_t1:
-                self.t1_hit = True
-                self.is_risk_free = True
-                self.breakeven_armed = True
-                if fav_move >= self.spot_t2:
-                    self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
-                    self.exit_reason = "TARGET_2_HIT (JACKPOT)"
-                    self.exit_time = ts
-                    self.is_closed = True
+        # 1. Full SL Hit (only if trade never reached +1.0R / armed breakeven or hit T1)
+        if not self.t1_hit and not self.breakeven_armed:
+            if adv_move >= self.spot_sl:
+                self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
+                self.exit_reason = "SL_HIT"
+                self.exit_time = ts
+                self.is_closed = True
                 return
 
-            # Check Breakeven Shield ONLY if it was already armed on a PRIOR bar
-            if self.breakeven_armed:
-                be_pts = round(self.spot_sl * 0.35, 2)
-                locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
-                if cur_gain <= be_pts:
-                    self.spot_exit = locked_be
-                    self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
-                    self.exit_time = ts
-                    self.is_closed = True
-                    return
-            elif fav_move >= self.spot_sl and adv_move < self.spot_sl:
-                # Arm Breakeven as soon as trade reaches +1.0R (spot_sl) in favor
-                self.breakeven_armed = True
+        # 2. T1 Hit Check
+        if fav_move >= self.spot_t1:
+            self.t1_hit = True
+            self.breakeven_armed = True
 
-            # Structural Failed-Auction Scratch (only for trades that NEVER armed Breakeven)
-            if self.step >= 4 and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
+        # 3. T2 Jackpot Check
+        if fav_move >= self.spot_t2:
+            self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
+            self.exit_reason = "TARGET_2_HIT (JACKPOT)"
+            self.exit_time = ts
+            self.is_closed = True
+            return
+
+        # 4. Trailing & Breakeven Check (ONLY on trades armed from a PREVIOUS bar)
+        if self.t1_hit:
+            lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
+            locked_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
+            sl_breached = (b_low <= locked_exit) if self.direction == 'CALL' else (b_high >= locked_exit)
+            if sl_breached or cur_gain <= lock_pts:
+                self.spot_exit = locked_exit
+                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+        elif self.breakeven_armed:
+            be_pts = round(self.spot_sl * 0.35, 2)
+            locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
+            be_breached = (b_low <= locked_be) if self.direction == 'CALL' else (b_high >= locked_be)
+            if be_breached or cur_gain <= be_pts:
+                self.spot_exit = locked_be
+                self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+
+        # 5. Arm Breakeven for NEXT bar once +1.0R (spot_sl) move is reached
+        if not self.breakeven_armed and fav_move >= self.spot_sl:
+            self.breakeven_armed = True
+
+        # 6. Time Scratches (ONLY if trade NEVER armed breakeven and NEVER hit T1)
+        if not self.breakeven_armed and not self.t1_hit:
+            if self.step >= 4 and cur_gain <= -(self.spot_sl * 0.55):
                 self.spot_exit = b_close
                 self.exit_reason = "15M_TIME_SL_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
 
-            if self.step >= 9 and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.25)):
+            if self.step >= 9 and cur_gain <= -(self.spot_sl * 0.25):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
-                self.exit_time = ts
-                self.is_closed = True
-                return
-        else:
-            if fav_move >= self.spot_t2:
-                self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
-                self.exit_reason = "TARGET_2_HIT (JACKPOT)"
-                self.exit_time = ts
-                self.is_closed = True
-                return
-
-            # Dynamic 70% Peak Ratchet: locks 70% of max_fav_pts as runner climbs to +30..+275 pts!
-            lock_pts = round(max(self.spot_t1 * 0.68, self.max_fav_pts * 0.70), 2)
-            locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
-            sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
-            if sl_breached:
-                self.spot_exit = locked_sl
-                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
                 self.exit_time = ts
                 self.is_closed = True
                 return
@@ -588,13 +593,12 @@ class ActiveOptionTrade:
     def close_eod(self, final_close: float, ts):
         if not self.is_closed:
             if self.t1_hit:
-                lock_pts = round(max(self.spot_t1 * 0.68, self.max_fav_pts * 0.70), 2)
-                locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
-                self.spot_exit = max(locked_sl, final_close) if self.direction == 'CALL' else min(locked_sl, final_close)
+                lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
+                self.spot_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
             elif self.breakeven_armed:
-                be_sl = (self.spot_entry + 0.35 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.35 * self.spot_sl)
-                self.spot_exit = max(be_sl, final_close) if self.direction == 'CALL' else min(be_sl, final_close)
+                be_pts = round(self.spot_sl * 0.35, 2)
+                self.spot_exit = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
                 self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
             else:
                 self.spot_exit = final_close
@@ -610,7 +614,7 @@ class ActiveOptionTrade:
             eff_delta = 0.58
         elif "BREAKEVEN" in self.exit_reason:
             eff_delta = 0.50
-        elif "SCRATCH" in self.exit_reason or "TIME_SL" in self.exit_reason or "FAILED_AUCTION" in self.exit_reason:
+        elif "SCRATCH" in self.exit_reason or "TIME_SL" in self.exit_reason:
             eff_delta = 0.45
         elif "SL" in self.exit_reason:
             eff_delta = 0.50
@@ -621,7 +625,6 @@ class ActiveOptionTrade:
         opt_exit_premium = max(0.50, round(self.opt_entry_premium + opt_pts, 2))
         gross_pnl = round(opt_pts * self.lot_size, 2)
 
-        # Statutory Indian F&O Taxes & Brokerage
         brokerage = 40.0
         stt = round(opt_exit_premium * self.lot_size * 0.001, 2)
         turnover_fee = round((self.opt_entry_premium + opt_exit_premium) * self.lot_size * 0.0005, 2)
@@ -801,7 +804,7 @@ if __name__ == "__main__":
                     continue
                 idf = asset_data[isym]
                 today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
-                if len(today_bars) < 6:
+                if len(today_bars) < 7:
                     continue
                 idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
                 
@@ -814,7 +817,11 @@ if __name__ == "__main__":
                     if not oi_res.get('confluent', False):
                         continue
                     sig['oi_confluent'] = True
-                    sig['score'] = round(sig.get('score', 60.0) + 18.0, 2)
+                    oi_score = float(oi_res.get('score', 12.0))
+                    total_score = round(sig['prelim_score'] + oi_score, 2)
+                    if total_score < 70.0:
+                        continue
+                    sig['score'] = total_score
                     candidates.append(sig)
 
             # B. Stock Candidates (MAX_STOCKS_PER_SLAB = 2)
@@ -828,7 +835,7 @@ if __name__ == "__main__":
 
                     sdf = asset_data[ssym]
                     today_bars = sdf[(sdf.index.date == d) & (sdf.index <= curr_t)]
-                    if len(today_bars) < 6:
+                    if len(today_bars) < 7:
                         continue
                     stock_atr = atrs.get(ssym, 30.0)
 
@@ -841,7 +848,11 @@ if __name__ == "__main__":
                         if not oi_res.get('confluent', False):
                             continue
                         sig['oi_confluent'] = True
-                        sig['score'] = round(sig.get('score', 60.0) + 18.0, 2)
+                        oi_score = float(oi_res.get('score', 12.0))
+                        total_score = round(sig['prelim_score'] + oi_score, 2)
+                        if total_score < 70.0:
+                            continue
+                        sig['score'] = total_score
                         candidates.append(sig)
 
             # Sort combined candidates by 100-point 5-Pillar Score
