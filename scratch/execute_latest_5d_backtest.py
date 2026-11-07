@@ -42,8 +42,8 @@ CACHE_DIR = os.path.join(REPORT_DIR, "data_cache_latest_5d_1m")
 CONFIG_DIR = os.path.join(REPO_ROOT, "alpha_profile_oi_system", "config")
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-MIN_STOCK_PRICE = 650.0
-MIN_STOCK_ATR = 18.0
+MIN_STOCK_PRICE = 1200.0
+MIN_STOCK_ATR = 42.0
 
 # Active position caps strictly matching daily_autonomous_screener.py
 MAX_ACTIVE_STOCKS = 2
@@ -444,14 +444,27 @@ class ActiveOptionTrade:
         self.max_adv_pts = 0.0
 
         if self.is_idx:
-            is_mid = (self.sym == 'MIDCPNIFTY')
-            self.spot_t1 = 120.0 if self.is_bank else (60.0 if is_mid else 80.0)
-            self.spot_t2 = 250.0 if self.is_bank else (120.0 if is_mid else 150.0)
-            self.spot_sl = 60.0 if self.is_bank else (30.0 if is_mid else 40.0)
+            if self.sym == 'BANKNIFTY':
+                self.spot_sl = 65.0
+                self.spot_t1 = 130.0
+                self.spot_t2 = 240.0
+            elif self.sym in ['NIFTY', 'FINNIFTY']:
+                self.spot_sl = 42.0
+                self.spot_t1 = 95.0
+                self.spot_t2 = 150.0
+            elif self.sym == 'MIDCPNIFTY':
+                self.spot_sl = 32.0
+                self.spot_t1 = 80.0
+                self.spot_t2 = 130.0
+            else:
+                self.spot_sl = 40.0
+                self.spot_t1 = 90.0
+                self.spot_t2 = 150.0
         else:
-            self.spot_sl = max(4.0, round(self.atr * 0.25, 2))
-            self.spot_t1 = max(5.0, round(self.atr * 0.30, 2))
-            self.spot_t2 = max(11.0, round(self.atr * 0.65, 2))
+            # True 30 to 60+ Point Targets for Stocks
+            self.spot_sl = max(12.0, round(self.atr * 0.30, 2))
+            self.spot_t1 = max(30.0, round(self.atr * 0.65, 2))
+            self.spot_t2 = max(60.0, round(self.atr * 1.15, 2))
 
         step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
@@ -486,12 +499,12 @@ class ActiveOptionTrade:
         # Force EOD Exit at 15:20 IST
         if tot_m >= 920:
             if self.t1_hit:
-                lock_pts = self.spot_t1 * 0.65
+                lock_pts = round(self.spot_t1 * 0.70, 2)
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, b_close) if self.direction == 'CALL' else min(locked_sl, b_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
             elif self.breakeven_armed:
-                be_sl = (self.spot_entry + 0.25 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.25 * self.spot_sl)
+                be_sl = (self.spot_entry + 0.35 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.35 * self.spot_sl)
                 self.spot_exit = max(be_sl, b_close) if self.direction == 'CALL' else min(be_sl, b_close)
                 self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
             else:
@@ -525,23 +538,24 @@ class ActiveOptionTrade:
                 # Return immediately: never check locked_sl on the very bar that hit T1
                 return
 
+            # Stop choking winners: do NOT arm breakeven_armed until fav_move >= 0.80 * T1
+            if (not self.breakeven_armed) and (fav_move >= self.spot_t1 * 0.80):
+                self.breakeven_armed = True
+
             # Check Breakeven Shield (if armed on a PREVIOUS bar) - ONLY on candle close
-            be_pts = self.spot_sl * 0.25
-            locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
             if self.breakeven_armed:
+                be_pts = round(self.spot_sl * 0.35, 2)
+                locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
                 if cur_gain <= be_pts:
                     self.spot_exit = locked_be
                     self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
                     self.exit_time = ts
                     self.is_closed = True
                     return
-            else:
-                # Arm Breakeven Shield only when favorable move reaches 0.60 * T1 before full SL
-                if fav_move >= (self.spot_t1 * 0.60) and adv_move < self.spot_sl:
-                    self.breakeven_armed = True
 
             # 15-Minute Genuine Failure Loss Scratch (at step >= 5)
-            if self.step >= 5 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.55)):
+            # Only if cur_gain <= -(self.spot_sl * 0.60) (deep failed breakout back inside base)
+            if self.step >= 5 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.60)):
                 self.spot_exit = b_close
                 self.exit_reason = "15M_TIME_SL_SCRATCH"
                 self.exit_time = ts
@@ -549,15 +563,8 @@ class ActiveOptionTrade:
                 return
 
             # 30-Minute Non-Performer Exit (at step >= 10)
-            if self.step >= 10 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.20)):
-                self.spot_exit = b_close
-                self.exit_reason = "30M_STAGNANT_SCRATCH"
-                self.exit_time = ts
-                self.is_closed = True
-                return
-
-            # 36-Minute Flat Non-Performer Exit (at step >= 12)
-            if self.step >= 12 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= 0.0):
+            # Only if cur_gain <= -(self.spot_sl * 0.35) (broken below base by >35% of SL)
+            if self.step >= 10 and (not self.t1_hit) and (not self.breakeven_armed) and (cur_gain <= -(self.spot_sl * 0.35)):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
                 self.exit_time = ts
@@ -573,8 +580,8 @@ class ActiveOptionTrade:
                 self.is_closed = True
                 return
 
-            # 2. Check Trailing SL locked at +0.65 * T1
-            lock_pts = self.spot_t1 * 0.65
+            # 2. Check Trailing SL locked at +0.70 * T1 (+21 to +35 pts on stocks, +60 to +90 pts on indices)
+            lock_pts = round(self.spot_t1 * 0.70, 2)
             locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             sl_breached = (b_low <= locked_sl) if self.direction == 'CALL' else (b_high >= locked_sl)
             if sl_breached:
@@ -587,12 +594,12 @@ class ActiveOptionTrade:
     def close_eod(self, final_close: float, ts):
         if not self.is_closed:
             if self.t1_hit:
-                lock_pts = self.spot_t1 * 0.65
+                lock_pts = round(self.spot_t1 * 0.70, 2)
                 locked_sl = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.spot_exit = max(locked_sl, final_close) if self.direction == 'CALL' else min(locked_sl, final_close)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
             elif self.breakeven_armed:
-                be_sl = (self.spot_entry + 0.25 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.25 * self.spot_sl)
+                be_sl = (self.spot_entry + 0.35 * self.spot_sl) if self.direction == 'CALL' else (self.spot_entry - 0.35 * self.spot_sl)
                 self.spot_exit = max(be_sl, final_close) if self.direction == 'CALL' else min(be_sl, final_close)
                 self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
             else:
@@ -807,7 +814,8 @@ if __name__ == "__main__":
                 sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
                 if sig:
                     sig['entry_price'] = float(today_bars.iloc[-2]['close'])
-                    t_price = (sig['entry_price'] + max(100.0, 0.75 * idx_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(100.0, 0.75 * idx_atr))
+                    target_dist = 220.0 if isym == 'BANKNIFTY' else 140.0
+                    t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
                     if not oi_res.get('confluent', False):
                         continue
@@ -833,7 +841,8 @@ if __name__ == "__main__":
                     sig = evaluate_common_5pillar_bar_slice(ssym, today_bars, stock_atr, regime, is_index=False)
                     if sig:
                         sig['entry_price'] = float(today_bars.iloc[-2]['close'])
-                        t_price = (sig['entry_price'] + max(15.0, 0.75 * stock_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(15.0, 0.75 * stock_atr))
+                        target_dist = max(40.0, min(65.0, 0.85 * stock_atr))
+                        t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
                         if not oi_res.get('confluent', False):
                             continue

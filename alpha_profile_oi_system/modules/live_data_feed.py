@@ -796,10 +796,32 @@ class LiveMarketDataFeed:
 
         # Executable pricing: Entry at ask, monitoring at bid
         entry_p = ask
-        sl_pts = round(max(2.0, entry_p * 0.20), 2)
+        if is_index:
+            if sym_clean == 'BANKNIFTY':
+                sl_pts = round(max(25.0, 65.0 * 0.50), 2)
+                t1_pts = round(130.0 * 0.55, 2)
+                t2_pts = round(240.0 * 0.65, 2)
+            elif sym_clean in ['NIFTY', 'FINNIFTY']:
+                sl_pts = round(max(18.0, 42.0 * 0.50), 2)
+                t1_pts = round(95.0 * 0.55, 2)
+                t2_pts = round(150.0 * 0.65, 2)
+            else:  # MIDCPNIFTY
+                sl_pts = round(max(14.0, 32.0 * 0.50), 2)
+                t1_pts = round(80.0 * 0.55, 2)
+                t2_pts = round(130.0 * 0.65, 2)
+        else:
+            # Stock Option True 30 to 60+ Point Targets (Delta ~0.50)
+            atr_val = self.get_wilder_daily_atr(sym_clean)
+            spot_sl = max(12.0, round(atr_val * 0.30, 2))
+            spot_t1 = max(30.0, round(atr_val * 0.65, 2))
+            spot_t2 = max(60.0, round(atr_val * 1.15, 2))
+            sl_pts = round(max(5.0, spot_sl * 0.50), 2)
+            t1_pts = round(spot_t1 * 0.55, 2)
+            t2_pts = round(spot_t2 * 0.65, 2)
+
         opt_sl = round(max(0.5, entry_p - sl_pts), 2)
-        opt_t1 = round(entry_p + (sl_pts * 1.5), 2)
-        opt_t2 = round(entry_p + (sl_pts * 3.5), 2)
+        opt_t1 = round(entry_p + t1_pts, 2)
+        opt_t2 = round(entry_p + t2_pts, 2)
 
         return {
             'contract': contract_name,

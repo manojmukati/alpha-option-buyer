@@ -54,8 +54,8 @@ CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
-MIN_STOCK_PRICE = 650.0
-MIN_STOCK_ATR = 18.0
+MIN_STOCK_PRICE = 1200.0
+MIN_STOCK_ATR = 42.0
 
 MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
@@ -418,8 +418,12 @@ def evaluate_common_5pillar_bar_slice(
     if comp_width > 0.68 * atr:
         return None
 
-    # Pillar 5 (10 pts + Hard Veto): Remaining ATR Fuel <= 92%
+    # Pillar 5 (10 pts + Hard Veto): Remaining Intraday ATR Runway >= 30.0 pts & ATR Used Ratio <= 92%
     fuel_spent = day_high - day_low
+    remaining_atr = atr - fuel_spent
+    if remaining_atr < 30.0:
+        return None
+
     atr_used_ratio = fuel_spent / max(1.0, atr)
     if atr_used_ratio > 0.92:
         return None
@@ -729,7 +733,8 @@ class DailyAutonomousScreener:
             spot = cand['spot_price']
             direction = cand['direction']
             stock_atr = float(cand.get('stock_atr') or 120.0)
-            target_price = (spot + max(100.0, 0.75 * stock_atr)) if direction == 'CALL' else (spot - max(100.0, 0.75 * stock_atr))
+            idx_target_dist = 220.0 if sym == 'BANKNIFTY' else 140.0
+            target_price = (spot + idx_target_dist) if direction == 'CALL' else (spot - idx_target_dist)
             opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym, target_price=target_price, is_index=True)
             if not opt or not opt.get('is_liquid', False):
                 stage2_rejections[sym] = f"OPTION_PRICING_FAIL_CLOSED: {opt.get('rejected_reason') if opt else 'CHAIN_UNAVAILABLE'}"
@@ -756,8 +761,9 @@ class DailyAutonomousScreener:
 
             spot = cand['spot_price']
             direction = cand['direction']
-            stock_atr = float(cand.get('stock_atr') or 30.0)
-            target_price = (spot + max(15.0, 0.75 * stock_atr)) if direction == 'CALL' else (spot - max(15.0, 0.75 * stock_atr))
+            stock_atr = float(cand.get('stock_atr') or 45.0)
+            stk_target_dist = max(40.0, min(65.0, 0.85 * stock_atr))
+            target_price = (spot + stk_target_dist) if direction == 'CALL' else (spot - stk_target_dist)
             opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym, target_price=target_price, is_index=False)
             if not opt or not opt.get('is_liquid', False):
                 stage2_rejections[sym] = f"OPTION_PRICING_FAIL_CLOSED: {opt.get('rejected_reason') if opt else 'CHAIN_UNAVAILABLE'}"
@@ -930,20 +936,20 @@ class DailyAutonomousScreener:
                     est_opt_price = round(max(0.5, opt_entry + (spot_gain * delta)), 2)
                     current_bid = est_opt_price
 
-                t1_locked_floor = round(opt_entry + (opt_t1 - opt_entry) * 0.65, 2)
-                be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.25, 2)
-                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.60
+                t1_locked_floor = round(opt_entry + (opt_t1 - opt_entry) * 0.70, 2)
+                be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.35, 2)
+                opt_arm_trigger = opt_entry + (opt_t1 - opt_entry) * 0.80
 
                 if est_opt_price >= opt_t1 and trail_sl < t1_locked_floor:
                     df.at[idx, 'Trailing_SL_INR'] = t1_locked_floor
                     trail_sl = t1_locked_floor
                     updated_any = True
-                    print(f"[POSITION MANAGER]: {sym} reached Target 1! Trailing SL locked at 65%: Rs. {t1_locked_floor:.2f}")
+                    print(f"[POSITION MANAGER]: {sym} reached Target 1! Trailing SL locked at 70%: Rs. {t1_locked_floor:.2f}")
                 elif est_opt_price >= opt_arm_trigger and trail_sl < be_shield_floor:
                     df.at[idx, 'Trailing_SL_INR'] = be_shield_floor
                     trail_sl = be_shield_floor
                     updated_any = True
-                    print(f"[POSITION MANAGER]: {sym} reached 60% of T1! Breakeven Shield armed at +0.25R: Rs. {be_shield_floor:.2f}")
+                    print(f"[POSITION MANAGER]: {sym} reached 80% of T1! Breakeven Shield armed at +0.35R: Rs. {be_shield_floor:.2f}")
 
                 exit_price = 0.0
                 outcome = ""
@@ -965,16 +971,12 @@ class DailyAutonomousScreener:
                     if pd.notna(entry_ts) and entry_ts > 0:
                         elapsed_mins = (now_ts - float(entry_ts)) / 60.0
                         opt_risk = opt_entry - opt_sl
-                        # Step >= 5 / 15-Minute Genuine Failure Exit (lost >= 55% of SL)
-                        if elapsed_mins >= 15.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.55):
+                        # Step >= 5 / 15-Minute Genuine Failure Exit (lost >= 60% of SL)
+                        if elapsed_mins >= 15.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.60):
                             exit_price = current_bid if current_bid > 0 else est_opt_price
                             outcome = "15M_TIME_SL_EXIT"
-                        # Step >= 8 / 24-Minute Stagnant Exit (lost >= 20% of SL without hitting T1)
-                        elif elapsed_mins >= 24.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.20):
-                            exit_price = current_bid if current_bid > 0 else est_opt_price
-                            outcome = "30M_STAGNANT_EXIT"
-                        # Step >= 12 / 36-Minute Flat Stagnant Exit (<= 0.0 gain)
-                        elif elapsed_mins >= 36.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= opt_entry:
+                        # Step >= 10 / 30-Minute Stagnant Exit (lost >= 35% of SL without hitting T1)
+                        elif elapsed_mins >= 30.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.35):
                             exit_price = current_bid if current_bid > 0 else est_opt_price
                             outcome = "30M_STAGNANT_EXIT"
 
