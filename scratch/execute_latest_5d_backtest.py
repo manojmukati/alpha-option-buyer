@@ -792,10 +792,11 @@ if __name__ == "__main__":
                     sig['entry_price'] = float(today_bars.iloc[-2]['close'])
                     t_price = (sig['entry_price'] + max(100.0, 0.75 * idx_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(100.0, 0.75 * idx_atr))
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
-                    if oi_res['confluent']:
-                        sig['oi_confluent'] = True
-                        sig['score'] = sig.get('score', 70.0) + (10.0 if 'RUNWAY_CLEAR' in oi_res.get('reason', '') else 0.0)
-                        candidates.append(sig)
+                    if not oi_res.get('confluent', False):
+                        continue
+                    sig['oi_confluent'] = True
+                    sig['score'] = round(sig.get('score', 60.0) + 18.0, 2)
+                    candidates.append(sig)
 
             # B. Stock Candidates (MAX_STOCKS_PER_SLAB = 2)
             if act_stocks < MAX_ACTIVE_STOCKS:
@@ -817,10 +818,11 @@ if __name__ == "__main__":
                         sig['entry_price'] = float(today_bars.iloc[-2]['close'])
                         t_price = (sig['entry_price'] + max(15.0, 0.75 * stock_atr)) if sig['direction'] == 'CALL' else (sig['entry_price'] - max(15.0, 0.75 * stock_atr))
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
-                        if oi_res['confluent']:
-                            sig['oi_confluent'] = True
-                            sig['score'] = sig.get('score', 70.0) + (10.0 if 'RUNWAY_CLEAR' in oi_res.get('reason', '') else 0.0)
-                            candidates.append(sig)
+                        if not oi_res.get('confluent', False):
+                            continue
+                        sig['oi_confluent'] = True
+                        sig['score'] = round(sig.get('score', 60.0) + 18.0, 2)
+                        candidates.append(sig)
 
             # Sort combined candidates by 100-point 5-Pillar Score
             candidates.sort(key=lambda x: x['score'], reverse=True)

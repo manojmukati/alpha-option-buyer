@@ -61,22 +61,8 @@ MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
 MAX_INDEX_PER_SLAB = 1
 MAX_STOCKS_PER_SLAB = 2
-NIFTY_HEAVYWEIGHTS = {'RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'}
 
-STOCK_SECTOR_MAP = {
-    'ICICIBANK': 'BANK', 'AXISBANK': 'BANK', 'HDFCBANK': 'BANK', 'KOTAKBANK': 'BANK', 'SBIN': 'BANK', 'INDUSINDBK': 'BANK',
-    'INFY': 'IT', 'PERSISTENT': 'IT', 'TCS': 'IT', 'WIPRO': 'IT', 'HCLTECH': 'IT', 'TECHM': 'IT', 'COFORGE': 'IT',
-    'PAYTM': 'FINTECH', 'BAJFINANCE': 'NBFC', 'CHOLAFIN': 'NBFC', 'BAJAJFINSV': 'NBFC', 'MUTHOOTFIN': 'NBFC', 'SHRIRAMFIN': 'NBFC',
-    'HYUNDAI': 'AUTO', 'MARUTI': 'AUTO', 'ATHERENERG': 'AUTO', 'TATAMOTORS': 'AUTO', 'M&M': 'AUTO', 'BAJAJ-AUTO': 'AUTO',
-    'JSWSTEEL': 'METALS', 'APLAPOLLO': 'METALS', 'TATASTEEL': 'METALS', 'HINDALCO': 'METALS', 'VEDL': 'METALS',
-    'LT': 'INFRA', 'POWERINDIA': 'POWER', 'NTPC': 'POWER', 'POWERGRID': 'POWER', 'TATAPOWER': 'POWER',
-    'AMBER': 'EMS', 'DIXON': 'EMS', 'KAYNES': 'EMS',
-    'RELIANCE': 'ENERGY', 'ONGC': 'ENERGY', 'BPCL': 'ENERGY', 'IOC': 'ENERGY',
-    'BSE': 'EXCHANGE', 'MCX': 'EXCHANGE',
-    'ZYDUSLIFE': 'PHARMA', 'SUNPHARMA': 'PHARMA', 'DRREDDY': 'PHARMA', 'CIPLA': 'PHARMA',
-    'TRENT': 'RETAIL', 'DMART': 'RETAIL', 'ADANIPORTS': 'PORTS',
-    'HDFCAMC': 'AMC', 'NAM-INDIA': 'AMC'
-}
+# Pure dynamic asset handling: Zero hardcoded stock names. Only indices are fixed.
 
 
 def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
@@ -312,7 +298,12 @@ def evaluate_common_5pillar_bar_slice(
         if abs(idx_pct_move) > 1.25:
             return None
 
-        score = min(99.0, 65.0 + min(20.0, (idx_rvol - 1.0) * 15.0) + (15.0 if abs(rec_cvd) >= 0.25 else 5.0))
+        idx_p1 = min(20.0, max(0.0, (idx_rvol - 1.0) * 15.0))
+        idx_p2 = 15.0 if abs(rec_cvd) >= 0.25 else 8.0
+        idx_p3 = 20.0 if comp_width <= (max_allowed_base * 0.5) else 12.0
+        idx_p5 = 10.0 if abs(idx_pct_move) <= 0.70 else 5.0
+        idx_score = round(35.0 + idx_p1 + idx_p2 + idx_p3 + idx_p5, 2)
+
         return {
             'symbol': sym_clean,
             'is_index': True,
@@ -324,7 +315,7 @@ def evaluate_common_5pillar_bar_slice(
             'comp_low': comp_low,
             'rvol': idx_rvol,
             'recent_cvd': rec_cvd,
-            'score': round(score, 1),
+            'score': idx_score,
             'stock_atr': atr,
             'pct_change': pct_change,
             'eval_time': eval_bar.name if hasattr(eval_bar, 'name') else None
@@ -381,18 +372,37 @@ def evaluate_common_5pillar_bar_slice(
     if real_rvol < 1.25:
         return None
 
-    # Pillar 2 (25 pts + Hard Veto): Order Flow BVC Delta & CVD Divergence Check
-    completed_bars = df_slice.iloc[:-1]
-    cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
-    if not cvd_res.get('valid', False):
-        return None
-    rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0)
+    # Pillar 2 (25 pts + Hard Veto): Order Flow Base Accumulation / Distribution over last 5 bars (df_slice.iloc[-6:-1])
+    bars_5 = df_slice.iloc[-6:-1]
+    h_5 = bars_5['high'].values.astype(float)
+    l_5 = bars_5['low'].values.astype(float)
+    c_5 = bars_5['close'].values.astype(float)
+    v_5 = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else np.zeros_like(c_5)
+    rng_5 = np.maximum(0.05, h_5 - l_5)
+    bar_clv_5 = (2.0 * c_5 - (h_5 + l_5)) / rng_5
+    cum_delta_ratio = float(np.sum(v_5 * bar_clv_5) / np.maximum(1.0, np.sum(v_5)))
+    base_accum_ratio = abs(cum_delta_ratio)
+
     if direction == 'CALL':
-        if last_delta < 0.0 or rec_cvd <= -0.05:
+        if cum_delta_ratio < 0.15 or last_delta < 0.25:
+            return None
+        # Anti-Climax: Cap over-extended breakout spikes
+        if (eval_close - comp_high) > (0.14 * atr):
             return None
     elif direction == 'PUT':
-        if last_delta > 0.0 or rec_cvd >= 0.05:
+        if cum_delta_ratio > -0.15 or last_delta > -0.25:
             return None
+        # Anti-Climax: Cap over-extended breakdown spikes
+        if (comp_low - eval_close) > (0.14 * atr):
+            return None
+
+    # Exhausted climax spike bar height cap
+    if (eval_high - eval_low) > (0.32 * atr):
+        return None
+
+    completed_bars = df_slice.iloc[:-1]
+    cvd_res = compute_bar_delta_proxy(completed_bars, is_index=False)
+    rec_cvd = cvd_res.get('recent_cvd_ratio', 0.0) if cvd_res.get('valid', False) else 0.0
 
     # Pillar 3 (20 pts + Hard Veto): Compression <= 0.68 * ATR + Breakout + VWAP Alignment
     if comp_width > 0.68 * atr:
@@ -416,12 +426,12 @@ def evaluate_common_5pillar_bar_slice(
     if atr_used_ratio > 0.92:
         return None
 
-    # Pro-Trader 100-Point Dynamic Institutional Scoring
-    p1_score = min(25.0, 12.0 + max(0.0, (real_rvol - 1.25) * 8.0) + min(5.0, turnover_cr * 1.5))
-    p2_score = min(25.0, 12.0 + (abs(last_delta) * 15.0) + (abs(rec_cvd) * 10.0))
-    p3_score = 20.0 if comp_width <= 0.45 * atr else (15.0 if comp_width <= 0.58 * atr else 10.0)
-    p5_score = 10.0 if atr_used_ratio <= 0.60 else (7.0 if atr_used_ratio <= 0.75 else 4.0)
-    base_score = p1_score + p2_score + p3_score + p5_score
+    # REAL 100-Point Institutional Score
+    p1_score = min(15.0, max(0.0, (real_rvol - 1.0) * 8.0)) + min(10.0, turnover_cr * 1.5)
+    p2_score = min(25.0, abs(last_delta) * 15.0 + min(10.0, base_accum_ratio * 5.0))
+    p3_score = min(20.0, max(5.0, (0.62 - (comp_width / atr)) * 30.0) + 6.0)
+    p5_score = max(3.0, round((0.85 - atr_used_ratio) * 12.0, 2))
+    prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
 
     return {
         'symbol': sym_clean,
@@ -437,9 +447,10 @@ def evaluate_common_5pillar_bar_slice(
         'rvol': real_rvol,
         'clv': round(clv, 2),
         'recent_cvd': rec_cvd,
+        'cum_delta_ratio': round(cum_delta_ratio, 3),
         'last_delta': last_delta,
         'vwap': vwap,
-        'score': round(base_score, 1),
+        'score': prelim_score,
         'stock_atr': atr,
         'pct_change': pct_change,
         'atr_used_ratio': round(atr_used_ratio, 2),
@@ -719,7 +730,7 @@ class DailyAutonomousScreener:
                 continue
 
             cand['verified_opt'] = opt
-            cand['score'] = cand.get('score', 75.0) + 10.0
+            cand['score'] = round(cand.get('score', 60.0) + 18.0, 2)
             verified_super_trades.append(cand)
             active_slab_index += 1
 
@@ -732,10 +743,9 @@ class DailyAutonomousScreener:
                 stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
                 continue
 
-            cand_sec = STOCK_SECTOR_MAP.get(sym, sym)
-            dispatched_secs = [STOCK_SECTOR_MAP.get(t['symbol'], t['symbol']) for t in verified_super_trades if not t.get('is_index', False)]
-            if cand_sec in dispatched_secs:
-                stage2_rejections[sym] = f"SECTOR_CONCENTRATION_CAP ({cand_sec})"
+            dispatched_syms = [t['symbol'] for t in verified_super_trades if not t.get('is_index', False)]
+            if sym in dispatched_syms:
+                stage2_rejections[sym] = "DUPLICATE_SYMBOL_SLOT_CAP"
                 continue
 
             spot = cand['spot_price']
@@ -748,7 +758,7 @@ class DailyAutonomousScreener:
                 continue
 
             cand['verified_opt'] = opt
-            cand['score'] = cand.get('score', 75.0) + 10.0
+            cand['score'] = round(cand.get('score', 60.0) + 18.0, 2)
             verified_super_trades.append(cand)
             active_slab_stock += 1
 
