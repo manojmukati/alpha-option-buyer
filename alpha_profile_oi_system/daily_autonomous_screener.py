@@ -60,7 +60,7 @@ MIN_STOCK_ATR = 20.0
 MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
 MAX_INDEX_PER_SLAB = 1
-MAX_STOCKS_PER_SLAB = 2
+MAX_STOCKS_PER_SLAB = 3
 
 # Pure dynamic asset handling: Zero hardcoded stock names. Only indices are fixed.
 
@@ -374,7 +374,7 @@ def evaluate_common_5pillar_bar_slice(
         ema21 = float(df_slice['close'].ewm(span=21, adjust=False).mean().iloc[-2])
 
     # [LINE 25] VALUE ACCEPTANCE RULE:
-    max_allowed_base = 320.0 if sym_clean == 'BANKNIFTY' else 135.0
+    max_allowed_base = 520.0 if sym_clean == 'BANKNIFTY' else 160.0
     if is_idx:
         if comp_width > max_allowed_base:
             return None  # Base agar bohot bada hai toh consolidation tight nahi hai, reject karo.
@@ -588,8 +588,9 @@ class DailyAutonomousScreener:
         is_nifty_bullish = (cur_close >= tp_vwap and cur_close >= ema9 and cur_close >= ema21 and move_pts >= 10.0)
         is_nifty_bearish = (cur_close < tp_vwap and cur_close < ema9 and cur_close < ema21 and move_pts <= -35.0)
 
+        is_runaway_bull = (move_pts >= 40.0)
         allow_stock_call = not is_nifty_bearish
-        allow_stock_put = is_nifty_bearish
+        allow_stock_put = not is_runaway_bull
         allow_index_call = is_nifty_bullish and not is_chop
         allow_index_put = is_nifty_bearish and not is_chop
 
