@@ -480,6 +480,7 @@ class ActiveOptionTrade:
         self.exit_reason = None
         self.exit_time = curr_t
         self.t1_hit = False
+        self.t1_step = -1
         self.breakeven_armed = False
         self.max_fav_pts = 0.0
         self.max_adv_pts = 0.0
@@ -562,9 +563,11 @@ class ActiveOptionTrade:
         # ====================================================================================
         # RULE 2: TARGET 1 HIT CHECK (+0.55 ATR Move in Favor)
         # ====================================================================================
-        # [LINE 9] Jaise hi spot price Target 1 touch kare, T1 hit mark karo aur Breakeven arm karo.
+        # [LINE 9] Jaise hi spot price Target 1 touch kare, T1 hit mark karo aur agle bars ke liye ratchet active karo.
         if fav_move >= self.spot_t1:
-            self.t1_hit = True
+            if not self.t1_hit:
+                self.t1_hit = True
+                self.t1_step = self.step
             self.breakeven_armed = True
 
         # ====================================================================================
@@ -579,11 +582,11 @@ class ActiveOptionTrade:
             return
 
         # ====================================================================================
-        # RULE 4: TRAILING & BREAKEVEN EXIT (Only checked on trades armed from a PREVIOUS bar)
+        # RULE 4: TRAILING & BREAKEVEN EXIT (Subsequent Bars Only)
         # ====================================================================================
-        # [LINE 11] Case A: Agar T1 hit ho chuka hai, toh Dynamic 70% Peak Ratchet lagao:
+        # [LINE 11] Case A: Agar T1 pehle kisi bar par hit ho chuka hai (current bar nahi), toh Dynamic 70% Peak Ratchet lagao:
         # Peak profit ka 70% lock rahega, taaki bada runner kate nahi aur reverse hone par profit safe rahe.
-        if self.t1_hit:
+        if self.t1_hit and self.step > self.t1_step:
             lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
             locked_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             sl_breached = (b_low <= locked_exit) if self.direction == 'CALL' else (b_high >= locked_exit)
@@ -614,25 +617,17 @@ class ActiveOptionTrade:
             self.breakeven_armed = True
 
         # ====================================================================================
-        # RULE 6: TIME SCRATCHES (Sirf un trades ke liye jo KABHI +1.0R nahi gaye aur KABHI T1 nahi lage)
+        # RULE 6: 30-MINUTE STAGNANT SCRATCH (Sirf un trades ke liye jo KABHI +1.0R nahi gaye aur KABHI T1 nahi lage)
         # ====================================================================================
+        # [LINE 14] 30 Minute (10 bars) Stagnant Scratch: 10 bars (30 mins) pure hone ke baad hi check hoga!
+        # 12 minute ya 15 minute ka koi premature exit nahi hai - trade ko full 30 minute room milta hai.
         if not self.breakeven_armed and not self.t1_hit:
-            # [LINE 14] 15-Minute Failed Auction Scratch: 4 bars (12 mins) baad agar trade 55% SL loss me hai -> Cut Loss.
-            if self.step >= 4 and cur_gain <= -(self.spot_sl * 0.55):
-                self.spot_exit = b_close
-                self.exit_reason = "15M_TIME_SL_SCRATCH"
-                self.exit_time = ts
-                self.is_closed = True
-                return
-
-            # [LINE 15] 30-Minute Stagnant Scratch: 9 bars (27 mins) baad agar trade 25% loss me stagnant hai -> Scratch.
-            if self.step >= 9 and cur_gain <= -(self.spot_sl * 0.25):
+            if self.step >= 10 and cur_gain <= -(self.spot_sl * 0.25):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
                 self.exit_time = ts
                 self.is_closed = True
                 return
-
     def close_eod(self, final_close: float, ts):
         """15:20 IST EOD closure logic."""
         if not self.is_closed:

@@ -808,7 +808,7 @@ class DailyAutonomousScreener:
         opt_action = 'BUY CALL (CE)' if direction == 'CALL' else 'BUY PUT (PE)'
 
         buffer_end_time = (ist_now + datetime.timedelta(minutes=4)).strftime('%I:%M:%S %p IST')
-        time_sl_time = (ist_now + datetime.timedelta(minutes=15)).strftime('%I:%M:%S %p IST')
+        time_sl_time = (ist_now + datetime.timedelta(minutes=30)).strftime('%I:%M:%S %p IST')
 
         opt_sl = float(opt['sl_price'])
         opt_tgt1 = float(opt['target_1'])
@@ -824,7 +824,7 @@ class DailyAutonomousScreener:
             f"🛡️ <b>STOP LOSS:</b> <b>Rs. {opt_sl:,.2f}</b>\n"
             f"🎯 <b>TARGET 1 (Lock Profit):</b> <b>Rs. {opt_tgt1:,.2f}</b>\n"
             f"🏆 <b>TARGET 2 (Jackpot):</b> <b>Rs. {opt_tgt2:,.2f}</b>\n"
-            f"⏱️ <b>STAGNANT TIME EXIT:</b> <b>{time_sl_time} (15-Min Kill Switch)</b>\n"
+            f"⏱️ <b>STAGNANT TIME EXIT:</b> <b>{time_sl_time} (30-Min Stagnant Scratch)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏳ <b>4-MIN BUFFER VALID TILL:</b> <b>{buffer_end_time}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -972,12 +972,8 @@ class DailyAutonomousScreener:
                     if pd.notna(entry_ts) and entry_ts > 0:
                         elapsed_mins = (now_ts - float(entry_ts)) / 60.0
                         opt_risk = opt_entry - opt_sl
-                        # Step >= 3 / 9+ mins Failed-Auction Structural Scratch (lost >= 55% of SL)
-                        if elapsed_mins >= 9.0 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.55):
-                            exit_price = current_bid if current_bid > 0 else est_opt_price
-                            outcome = "FAILED_AUCTION_SCRATCH"
-                        # Step >= 8 / 24+ mins Stagnant Exit (lost >= 25% of SL without hitting T1)
-                        elif elapsed_mins >= 24.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.25):
+                        # [LINE 14] 30-Minute Stagnant Scratch: 30+ mins pure hone ke baad hi stagnant exit check hoga (No 9-min/15-min premature cut)
+                        if elapsed_mins >= 30.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.25):
                             exit_price = current_bid if current_bid > 0 else est_opt_price
                             outcome = "30M_STAGNANT_EXIT"
 
