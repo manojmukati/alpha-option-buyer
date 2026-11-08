@@ -48,19 +48,33 @@ NSE_MARKET_STATUS_URL = "https://www.nseindia.com/api/marketStatus"
 NSE_OC_INFO_URL = "https://www.nseindia.com/api/option-chain-contract-info?symbol={symbol}"
 NSE_OC_DATA_URL = "https://www.nseindia.com/api/option-chain-v3?type={type}&symbol={symbol}&expiry={expiry}"
 
-NSE_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': '*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-}
+REALISTIC_USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15'
+]
+_UA_INDEX = 0
+
+def _get_next_headers() -> Dict[str, str]:
+    global _UA_INDEX
+    ua = REALISTIC_USER_AGENTS[_UA_INDEX % len(REALISTIC_USER_AGENTS)]
+    _UA_INDEX += 1
+    return {
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1'
+    }
+
+NSE_HEADERS = _get_next_headers()
 
 _OC_LOCK = threading.Lock()
 _SESSION_LOCK = threading.Lock()
@@ -87,16 +101,31 @@ def clean_num(val, default=0.0):
         return default
 
 def _get_active_session() -> requests.Session:
-    """Thread-safe session builder with automatic cookie renewal."""
+    """
+    Thread-safe session builder with 2-step cookie priming:
+    1. Requests NSE Home Page first (https://www.nseindia.com)
+    2. Requests Option Chain Page (https://www.nseindia.com/option-chain) with Home Page as Referer
+    Rotates realistic desktop User-Agent headers.
+    """
     global _GLOBAL_SESSION, _LAST_COOKIE_TIME
     with _SESSION_LOCK:
         now = time.time()
         if _GLOBAL_SESSION is None or (now - _LAST_COOKIE_TIME > _COOKIE_TTL):
             sess = requests.Session()
-            sess.headers.update(NSE_HEADERS)
+            base_headers = _get_next_headers()
+            sess.headers.update(base_headers)
             try:
-                r = sess.get(NSE_HOME_URL, timeout=8)
-                if r.status_code == 200:
+                # Step 1: Request NSE Home Page
+                r1 = sess.get(NSE_HOME_URL, timeout=10)
+                if r1.status_code == 200:
+                    time.sleep(0.3)
+                    # Step 2: Request Option Chain page with Home Page as Referer
+                    step2_headers = dict(base_headers)
+                    step2_headers['Referer'] = NSE_HOME_URL
+                    sess.get(NSE_OC_PAGE_URL, headers=step2_headers, timeout=10)
+                    _GLOBAL_SESSION = sess
+                    _LAST_COOKIE_TIME = now
+                else:
                     _GLOBAL_SESSION = sess
                     _LAST_COOKIE_TIME = now
             except Exception:
@@ -104,25 +133,38 @@ def _get_active_session() -> requests.Session:
                 _LAST_COOKIE_TIME = now
         return _GLOBAL_SESSION
 
-def _safe_nse_fetch(url: str, origin_url: str = NSE_HOME_URL, max_retries: int = 3) -> Optional[Dict[str, Any]]:
-    """Fetches NSE JSON data with exponential backoff and cookie renewal."""
+def _safe_nse_fetch(url: str, origin_url: str = NSE_OC_PAGE_URL, max_retries: int = 3) -> Optional[Dict[str, Any]]:
+    """
+    Fetches NSE JSON data with exponential backoff and automatic cookie renewal on 401, 403, or 429.
+    """
+    global _LAST_COOKIE_TIME, _GLOBAL_SESSION
     for attempt in range(max_retries):
         session = _get_active_session()
-        headers = dict(NSE_HEADERS)
+        headers = _get_next_headers()
+        headers['Accept'] = 'application/json, text/plain, */*'
         headers['Referer'] = origin_url
+        headers['Sec-Fetch-Dest'] = 'empty'
+        headers['Sec-Fetch-Mode'] = 'cors'
+        headers['Sec-Fetch-Site'] = 'same-origin'
         try:
-            resp = session.get(url, headers=headers, timeout=8)
+            resp = session.get(url, headers=headers, timeout=10)
             if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code in [401, 403]:
-                # Force cookie renewal on next attempt
-                global _LAST_COOKIE_TIME
+                try:
+                    return resp.json()
+                except Exception:
+                    pass
+            elif resp.status_code in [401, 403, 429]:
+                # Force cookie renewal & session rebuild on 401, 403, or 429
                 with _SESSION_LOCK:
                     _LAST_COOKIE_TIME = 0.0
+                    _GLOBAL_SESSION = None
                 time.sleep(1.0 * (attempt + 1))
             else:
                 time.sleep(0.5 * (attempt + 1))
         except Exception:
+            with _SESSION_LOCK:
+                _LAST_COOKIE_TIME = 0.0
+                _GLOBAL_SESSION = None
             time.sleep(0.5 * (attempt + 1))
     return None
 

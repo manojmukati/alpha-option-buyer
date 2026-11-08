@@ -207,8 +207,12 @@ def evaluate_common_5pillar_bar_slice(
     eval_low = float(eval_bar['low'])
     eval_vol = float(eval_bar.get('volume', 0.0))
 
-    # [LINE 8] Live spot price nikalo: Live bar ka close price entry price hoga.
-    live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
+    # [LINE 8] Live bar OHLC aur Live Spot Price nikalo.
+    live_close = float(live_bar['close'])
+    live_open = float(live_bar['open'])
+    live_high = float(live_bar['high'])
+    live_low = float(live_bar['low'])
+    live_spot = float(live_spot_override) if live_spot_override is not None else live_close
 
     # [LINE 9] Aaj ke trading session ka Open, Day High aur Day Low nikalo (prior days ka data mix nahi hona chahiye).
     if hasattr(df_slice.index, 'date'):
@@ -262,7 +266,24 @@ def evaluate_common_5pillar_bar_slice(
     else:
         return None  # Na base high toota na low toota, trade reject karo.
 
-    # [LINE 15] Macro Nifty Regime Filter: Nifty ke opposite trade mat lo.
+    # [LINE 15] LIVE-BAR HOLD CONFIRMATION:
+    # Live bar break level ko hold kar raha hai (Live spot dropped back inside nahi hona chahiye,
+    # aur live low/high breakout level ko 0.18*ATR se zyada violate nahi kare).
+    if direction == 'CALL':
+        if live_spot < comp_high:
+            return None
+        if live_low < (comp_high - 0.18 * atr):
+            return None
+    else:  # PUT
+        if live_spot > comp_low:
+            return None
+        if live_high > (comp_low + 0.18 * atr):
+            return None
+
+    # [LINE 16] Macro Nifty Regime Filter & Relative Strength vs Nifty:
+    nifty_pct = float(nifty_regime.get('nifty_pct', 0.0))
+    rel_strength = round(pct_change - nifty_pct, 2)
+
     if is_idx:
         # Index CALL ke liye Nifty regime allow_call hona chahiye.
         if direction == 'CALL' and not nifty_regime.get('allow_call', True):
@@ -274,21 +295,28 @@ def evaluate_common_5pillar_bar_slice(
             if not nifty_regime.get('allow_stock_put', False) or pct_change > -0.15:
                 return None
     else:
-        # Stock CALL ke liye Nifty crash nahi hona chahiye.
-        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-            return None
-        # Stock PUT ke liye Nifty bearish hona zaroori hai.
-        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', False):
-            return None
-
-    # [LINE 16] Stock Universe Quality Gates: Saste aur slow stock reject karo.
-    if not is_idx:
-        # Minimum Stock Price Rs 500 aur Wilder ATR >= 20 points hona chahiye.
-        if live_spot < MIN_STOCK_PRICE or atr < MIN_STOCK_ATR:
+        # Minimum Stock Floor: Price >= 500 & Wilder 14-day ATR >= 20
+        if live_spot < 500.0 or atr < 20.0:
             return None
         # Din ka move 0.35% se kam (choppy) ya 3.50% se zyada (exhausted) ho toh reject karo.
         if abs(pct_change) < 0.35 or abs(pct_change) > 3.50:
             return None
+
+        # Stock Relative Strength vs Nifty:
+        if direction == 'CALL':
+            if not nifty_regime.get('allow_stock_call', True):
+                return None
+            if rel_strength < 0.15:  # CALL requires relative strength >= +0.15%
+                return None
+        else:  # PUT
+            if not nifty_regime.get('allow_stock_put', False):
+                return None
+            if not is_m:  # Morning slab only for PUT
+                return None
+            if pct_change > -0.60:  # Stock pct_change <= -0.60%
+                return None
+            if rel_strength > -0.30:  # Stock relative weakness <= -0.30%
+                return None
 
     # ========================================================================================
     # PILLAR 1: Institutional RVOL & Smart Money Turnover (Max: 25 Points)
@@ -323,41 +351,48 @@ def evaluate_common_5pillar_bar_slice(
         p1_score = round(min(25.0, max(8.0, (idx_rvol - 1.0) * 18.0)), 2)
 
     # ========================================================================================
-    # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD (Max: 25 Points)
+    # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD + Intrabar CLV (Max: 25 Points)
     # ========================================================================================
-    # [LINE 21] Pichhle 5 bars ka BVC (Bulk Volume Classification) delta nikalo.
+    # [LINE 21] Pichhle 5 bars ka BVC Delta aur Intrabar Signed CLV nikalo (55% BVC + 45% CLV).
     bars_5 = df_slice.iloc[-6:-1]
     if len(bars_5) < 3:
         return None
     price_chg = bars_5['close'] - bars_5['open']
     std_val = float(price_chg.std()) if len(bars_5) > 1 else 0.0
     sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
-    # [LINE 22] Normal distribution tanh normalization [-1.0, +1.0] me karo taaki outlier delta na distort kare.
     bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
     bvc_fraction = np.tanh(bvc_z)
+
+    # Intrabar Signed Close Location Value: in [-1.0, +1.0]
+    bar_rng = np.maximum(0.01, bars_5['high'] - bars_5['low'])
+    clv_raw = (bars_5['close'] - bars_5['low']) / bar_rng
+    signed_clv = 2.0 * clv_raw - 1.0
+
+    # Combined Delta: 55% BVC + 45% signed CLV captures body expansion & absorption tails
+    comb_delta = 0.55 * bvc_fraction + 0.45 * signed_clv
 
     # [LINE 23] Volume (stocks) ya Range (index) se weight karke cumulative delta ratio nikalo.
     if not is_idx:
         weights = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else np.ones(len(bars_5))
     else:
         weights = (bars_5['high'] - bars_5['low']).values.astype(float)
-    bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
-    eval_bvc = float(bvc_fraction.iloc[-1])
+    cum_comb_ratio = float(np.sum(weights * comb_delta.values) / max(1.0, float(np.sum(weights))))
+    eval_comb = float(comb_delta.iloc[-1])
 
     # [LINE 24] HARD DIVERGENCE VETO:
-    # CALL trade me delta positive hona chahiye (negative delta par institutional buying nahi hoti).
-    if direction == 'CALL' and (bvc_cum_ratio <= 0.0 or eval_bvc <= 0.0):
+    # CALL trade me combined delta positive hona chahiye (absorption/negative delta par buying mana hai).
+    if direction == 'CALL' and (cum_comb_ratio <= 0.0 or eval_comb <= 0.0):
         return None
-    # PUT trade me delta negative hona chahiye (positive delta par institutional selling nahi hoti).
-    if direction == 'PUT' and (bvc_cum_ratio >= 0.0 or eval_bvc >= 0.0):
+    # PUT trade me combined delta negative hona chahiye.
+    if direction == 'PUT' and (cum_comb_ratio >= 0.0 or eval_comb >= 0.0):
         return None
-    # [LINE 25] Pillar 2 Score: eval_bvc (max 15 pts) + bvc_cum_ratio (max 10 pts) = 25 Points.
-    p2_score = round(min(15.0, abs(eval_bvc) * 16.0) + min(10.0, abs(bvc_cum_ratio) * 18.0), 2)
+    # [LINE 25] Pillar 2 Score: eval_comb (max 15 pts) + cum_comb_ratio (max 10 pts) = 25 Points.
+    p2_score = round(min(15.0, abs(eval_comb) * 16.0) + min(10.0, abs(cum_comb_ratio) * 18.0), 2)
 
     # ========================================================================================
-    # PILLAR 3: Wyckoff Market Profile POC/VAH/VAL & Compression Base (Max: 20 Points)
+    # PILLAR 3: Wyckoff Market Profile POC/VAH/VAL & EMA9/EMA21 Alignment (Max: 20 Points)
     # ========================================================================================
-    # [LINE 26] Intraday Volume Profile: VWAP, POC (Point of Control), VAH (Value Area High), VAL (Value Area Low).
+    # [LINE 26] Intraday Volume Profile: VWAP, POC (Point of Control), VAH, VAL, EMA9, EMA21.
     tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
     vol_all = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
     vwap = float((tp_all * vol_all).sum() / max(1.0, float(vol_all.sum()))) if (not is_idx and float(vol_all.sum()) > 0) else float(tp_all.mean())
@@ -366,33 +401,43 @@ def evaluate_common_5pillar_bar_slice(
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
+    # Developing EMA9 and EMA21 on eval_bar
+    if 'ema9' in eval_bar and pd.notna(eval_bar['ema9']):
+        ema9 = float(eval_bar['ema9'])
+    else:
+        ema9 = float(df_slice['close'].ewm(span=9, adjust=False).mean().iloc[-2])
+
+    if 'ema21' in eval_bar and pd.notna(eval_bar['ema21']):
+        ema21 = float(eval_bar['ema21'])
+    else:
+        ema21 = float(df_slice['close'].ewm(span=21, adjust=False).mean().iloc[-2])
+
     # [LINE 27] VALUE ACCEPTANCE RULE:
-    # Index ke liye base width BankNifty <= 320 pts, other index <= 135 pts honi chahiye.
     max_allowed_base = 320.0 if sym_clean == 'BANKNIFTY' else 135.0
     if is_idx:
         if comp_width > max_allowed_base:
             return None  # Base agar bohot bada hai toh consolidation tight nahi hai, reject karo.
         compression_pts = min(10.0, max(4.0, (1.0 - comp_width / max_allowed_base) * 12.0))
-        # CALL me price VWAP aur POC ke upar accept hona chahiye.
+        # CALL me price VWAP aur POC ke upar accept hona chahiye aur EMA9 >= EMA21 hona chahiye.
         if direction == 'CALL':
-            if not (eval_close > vwap and eval_close >= poc):
+            if not (eval_close > vwap and eval_close >= poc and ema9 >= ema21):
                 return None
-        # PUT me price VWAP aur POC ke niche accept hona chahiye.
+        # PUT me price VWAP aur POC ke niche accept hona chahiye aur EMA9 <= EMA21 hona chahiye.
         else:
-            if not (eval_close < vwap and eval_close <= poc):
+            if not (eval_close < vwap and eval_close <= poc and ema9 <= ema21):
                 return None
     else:
         # Stock ke liye base width ATR ka 72% se kam honi chahiye.
         if comp_width > 0.72 * atr:
             return None  # Loose base reject karo.
         compression_pts = min(10.0, max(3.0, (0.72 - (comp_width / atr)) * 22.0))
-        # CALL me price VWAP aur POC ke upar hona chahiye.
+        # CALL me price VWAP aur POC ke upar hona chahiye aur EMA9 >= EMA21 hona chahiye.
         if direction == 'CALL':
-            if not (eval_close > vwap and eval_close >= poc):
+            if not (eval_close > vwap and eval_close >= poc and ema9 >= ema21):
                 return None
-        # PUT me price VWAP aur POC ke niche hona chahiye.
+        # PUT me price VWAP aur POC ke niche hona chahiye aur EMA9 <= EMA21 hona chahiye.
         else:
-            if not (eval_close < vwap and eval_close <= poc):
+            if not (eval_close < vwap and eval_close <= poc and ema9 <= ema21):
                 return None
 
     # [LINE 28] Value Area Acceptance bonus: CALL agar VAH ke upar breakout kare ya PUT VAL ke niche kare toh 10 pts, warna 6.5 pts.
@@ -427,19 +472,21 @@ def evaluate_common_5pillar_bar_slice(
         'is_index': is_idx,
         'direction': direction,
         'spot_price': round(eval_close, 2),
-        'entry_price': round(float(live_bar['close']), 2),
+        'entry_price': round(float(live_spot), 2),
         'b_close': eval_close,
         'comp_high': comp_high,
         'comp_low': comp_low,
         'comp_width': comp_width,
         'turnover_cr': round(turnover_cr, 2),
         'rvol': real_rvol,
-        'bvc_cum_ratio': round(bvc_cum_ratio, 3),
-        'eval_bvc': round(eval_bvc, 3),
+        'bvc_cum_ratio': round(cum_comb_ratio, 3),
+        'eval_bvc': round(eval_comb, 3),
         'vwap': round(vwap, 2),
         'poc': round(poc, 2),
         'vah': round(vah, 2),
         'val': round(val, 2),
+        'ema9': round(ema9, 2),
+        'ema21': round(ema21, 2),
         'remaining_atr': round(remaining_atr, 2),
         'p1_score': p1_score,
         'p2_score': p2_score,
@@ -449,9 +496,9 @@ def evaluate_common_5pillar_bar_slice(
         'score': prelim_score,
         'stock_atr': atr,
         'pct_change': pct_change,
+        'rel_strength': rel_strength,
         'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
     }
-
 
 class DailyAutonomousScreener:
     """Production Autonomous Screener, Journaler & Live Position Manager."""

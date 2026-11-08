@@ -480,7 +480,6 @@ class ActiveOptionTrade:
         self.exit_reason = None
         self.exit_time = curr_t
         self.t1_hit = False
-        self.t1_step = -1
         self.breakeven_armed = False
         self.max_fav_pts = 0.0
         self.max_adv_pts = 0.0
@@ -526,19 +525,23 @@ class ActiveOptionTrade:
     def update(self, b_high: float, b_low: float, b_close: float, ts):
         """
         Har 3-minute bar par position ko evaluate karo (High, Low, Close intrabar check).
+        Same-Bar T1 aur Peak-Trailing order of operations:
+        1. prev_max_fav save karo before updating current bar max_fav_pts.
+        2. Prior bar par T1 hit tha -> T2 check karo, fir prev_max_fav se 70% trailing stop check karo.
+        3. Current bar par T1 pehli baar laga -> T2 check karo, t1_hit=True mark karo, max_fav_pts update karo, aur IMMEDIATELY RETURN karo!
+        4. Breakeven Shield exit (+0.35R) ONLY on 3-minute candle close (cur_gain <= 0.35*spot_sl), NEVER on wick.
         """
         if self.is_closed:
             return
         self.step += 1
 
-        # [LINE 5] Bar ka favorable move (kitna faayda hua) aur adverse move (kitna nuksan hua) calculate karo.
+        # [LINE 5] Bar ka favorable move, adverse move aur close gain calculate karo
         fav_move = (b_high - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - b_low)
         adv_move = (self.spot_entry - b_low) if self.direction == 'CALL' else (b_high - self.spot_entry)
         cur_gain = (b_close - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - b_close)
 
-        # [LINE 6] Maximum Peak Favorable Excursion (MFE) aur Adverse Excursion (MAE) update karo.
-        if fav_move > self.max_fav_pts:
-            self.max_fav_pts = fav_move
+        # [LINE 6] Save previous bar's peak before updating max_fav_pts on current bar
+        prev_max_fav = self.max_fav_pts
         if adv_move > self.max_adv_pts:
             self.max_adv_pts = adv_move
 
@@ -549,45 +552,20 @@ class ActiveOptionTrade:
             return
 
         # ====================================================================================
-        # RULE 1: FULL STOP-LOSS HIT (Only if trade never hit T1 and never armed Breakeven)
+        # CASE 1: Trade ALREADY hit T1 on a previous bar (Check T2 then 70% Trailing using prev_max_fav)
         # ====================================================================================
-        # [LINE 8] Agar trade ne kabhi profit arm nahi kiya aur adverse move full SL touch kar gaya -> SL_HIT.
-        if not self.t1_hit and not self.breakeven_armed:
-            if adv_move >= self.spot_sl:
-                self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
-                self.exit_reason = "SL_HIT"
+        if self.t1_hit:
+            # Check T2 first
+            if fav_move >= self.spot_t2:
+                self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
+                self.exit_reason = "TARGET_2_HIT (JACKPOT)"
                 self.exit_time = ts
                 self.is_closed = True
+                self.max_fav_pts = max(self.max_fav_pts, fav_move)
                 return
 
-        # ====================================================================================
-        # RULE 2: TARGET 1 HIT CHECK (+0.55 ATR Move in Favor)
-        # ====================================================================================
-        # [LINE 9] Jaise hi spot price Target 1 touch kare, T1 hit mark karo aur agle bars ke liye ratchet active karo.
-        if fav_move >= self.spot_t1:
-            if not self.t1_hit:
-                self.t1_hit = True
-                self.t1_step = self.step
-            self.breakeven_armed = True
-
-        # ====================================================================================
-        # RULE 3: TARGET 2 JACKPOT CHECK (+1.15 ATR Move in Favor)
-        # ====================================================================================
-        # [LINE 10] Agar price Target 2 Jackpot touch kar gaya -> Full Target 2 Exit!
-        if fav_move >= self.spot_t2:
-            self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
-            self.exit_reason = "TARGET_2_HIT (JACKPOT)"
-            self.exit_time = ts
-            self.is_closed = True
-            return
-
-        # ====================================================================================
-        # RULE 4: TRAILING & BREAKEVEN EXIT (Subsequent Bars Only)
-        # ====================================================================================
-        # [LINE 11] Case A: Agar T1 pehle kisi bar par hit ho chuka hai (current bar nahi), toh Dynamic 70% Peak Ratchet lagao:
-        # Peak profit ka 70% lock rahega, taaki bada runner kate nahi aur reverse hone par profit safe rahe.
-        if self.t1_hit and self.step > self.t1_step:
-            lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
+            # Check 70% trailing stop using previous bar's peak (prev_max_fav)
+            lock_pts = round(max(self.spot_t1 * 0.70, prev_max_fav * 0.70), 2)
             locked_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
             sl_breached = (b_low <= locked_exit) if self.direction == 'CALL' else (b_high >= locked_exit)
             if sl_breached or cur_gain <= lock_pts:
@@ -596,13 +574,20 @@ class ActiveOptionTrade:
                 self.exit_time = ts
                 self.is_closed = True
                 return
-        # [LINE 12] Case B: Agar trade ne +1.0R cross kiya tha lekin T1 nahi laga, aur ab wapas entry ki taraf gir raha hai:
-        # Breakeven Shield +0.35R profit par trade band karke capital protect karegi.
-        elif self.breakeven_armed:
+
+            # Trailing stop not breached: update max_fav_pts for current bar
+            if fav_move > self.max_fav_pts:
+                self.max_fav_pts = fav_move
+            return
+
+        # ====================================================================================
+        # CASE 2: Breakeven Shield Exit Check (Armed on prior bar, but T1 not hit)
+        # Trigger ONLY on a 3-minute candle close (cur_gain <= 0.35 * spot_sl), NEVER on intra-candle wick!
+        # ====================================================================================
+        if self.breakeven_armed:
             be_pts = round(self.spot_sl * 0.35, 2)
             locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
-            be_breached = (b_low <= locked_be) if self.direction == 'CALL' else (b_high >= locked_be)
-            if be_breached or cur_gain <= be_pts:
+            if cur_gain <= be_pts:
                 self.spot_exit = locked_be
                 self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
                 self.exit_time = ts
@@ -610,17 +595,49 @@ class ActiveOptionTrade:
                 return
 
         # ====================================================================================
-        # RULE 5: ARM BREAKEVEN FOR NEXT BAR (Once trade moves +1.0R in favor)
+        # CASE 3: Full Stop-Loss Hit (Only if Breakeven NOT armed and T1 NOT hit)
         # ====================================================================================
-        # [LINE 13] Current bar par agar fav_move >= spot_sl hua, toh NEXT bar ke liye breakeven arm karo (same bar par exit nahi).
+        if not self.breakeven_armed:
+            if adv_move >= self.spot_sl:
+                self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
+                self.exit_reason = "SL_HIT"
+                self.exit_time = ts
+                self.is_closed = True
+                return
+
+        # ====================================================================================
+        # CASE 4: Reaching T1 for the FIRST TIME on current bar
+        # ====================================================================================
+        if fav_move >= self.spot_t1:
+            if fav_move >= self.spot_t2:
+                self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
+                self.exit_reason = "TARGET_2_HIT (JACKPOT)"
+                self.exit_time = ts
+                self.is_closed = True
+                self.max_fav_pts = max(self.max_fav_pts, fav_move)
+                return
+
+            # Mark T1 hit and arm breakeven
+            self.t1_hit = True
+            self.breakeven_armed = True
+            if fav_move > self.max_fav_pts:
+                self.max_fav_pts = fav_move
+            # RETURN IMMEDIATELY so trailing stop is only checked starting from next bar!
+            return
+
+        # ====================================================================================
+        # CASE 5: Arm Breakeven for NEXT BAR (Once trade moves +1.0R in favor)
+        # ====================================================================================
         if not self.breakeven_armed and fav_move >= self.spot_sl:
             self.breakeven_armed = True
 
+        # Update peak favorable move
+        if fav_move > self.max_fav_pts:
+            self.max_fav_pts = fav_move
+
         # ====================================================================================
-        # RULE 6: 30-MINUTE STAGNANT SCRATCH (Sirf un trades ke liye jo KABHI +1.0R nahi gaye aur KABHI T1 nahi lage)
+        # CASE 6: 30-Minute Stagnant Scratch (10 bars / 30 mins)
         # ====================================================================================
-        # [LINE 14] 30 Minute (10 bars) Stagnant Scratch: 10 bars (30 mins) pure hone ke baad hi check hoga!
-        # 12 minute ya 15 minute ka koi premature exit nahi hai - trade ko full 30 minute room milta hai.
         if not self.breakeven_armed and not self.t1_hit:
             if self.step >= 10 and cur_gain <= -(self.spot_sl * 0.25):
                 self.spot_exit = b_close
@@ -850,7 +867,6 @@ if __name__ == "__main__":
                 
                 sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
                 if sig:
-                    sig['entry_price'] = float(today_bars.iloc[-1]['close'])
                     target_dist = 220.0 if isym == 'BANKNIFTY' else 140.0
                     t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
@@ -881,7 +897,6 @@ if __name__ == "__main__":
 
                     sig = evaluate_common_5pillar_bar_slice(ssym, today_bars, stock_atr, regime, is_index=False)
                     if sig:
-                        sig['entry_price'] = float(today_bars.iloc[-1]['close'])
                         target_dist = max(40.0, min(65.0, 0.85 * stock_atr))
                         t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
