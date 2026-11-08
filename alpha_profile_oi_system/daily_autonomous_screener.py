@@ -170,36 +170,47 @@ def evaluate_common_5pillar_bar_slice(
     is_index: bool = False
 ) -> Optional[Dict[str, Any]]:
     """
-    Authoritative 5-Pillar Institutional Breakout Evaluation Engine:
-    Pillar 1: 25 pts (Institutional RVOL & Smart Money Turnover)
-    Pillar 2: 25 pts (True BVC Volume Delta & Multi-Bar CVD Persistence)
-    Pillar 3: 20 pts (Wyckoff Market Profile POC/VAH/VAL & Compression Base)
-    Pillar 4: 20 pts (Symmetric -4 to +4 Strikes OI Runway & Short-Covering Unwind)
-    Pillar 5: 10 pts (Remaining ATR Fuel & Decoupled Targets)
-    Total: 100 Points (Qualification Threshold >= 70.0)
-    Candlestick Shape = 0% Veto Power.
+    ========================================================================================
+    5-PILLAR INSTITUTIONAL EVALUATION ENGINE (HINDI LINE-BY-LINE LOGIC COMMENTS)
+    Pillar 1: 25 Pts (RVOL >= 1.40x & Turnover >= 1.5 Cr)
+    Pillar 2: 25 Pts (True BVC Delta & CVD - Divergence Veto)
+    Pillar 3: 20 Pts (Wyckoff Market Profile Acceptance: VWAP/POC & Base Compression)
+    Pillar 4: 20 Pts (Symmetric -4 to +4 Strikes OI Runway & Unwind)
+    Pillar 5: 10 Pts (Remaining ATR Fuel >= 35% & Decoupled Targets)
+    Total Score: 100 Points (Qualification Threshold >= 70.0)
+    Candlestick Shape = 0% Veto Power (Candle shape se koi trade reject nahi hoga).
+    ========================================================================================
     """
+    # [LINE 1] Check karo: Kya kam se kam 7 bars (3-minute candles) available hain? Agar nahi toh reject karo.
     if df_slice is None or len(df_slice) < 7:
         return None
 
+    # [LINE 2] Symbol name saaf karo (jaise .NS ya ^ hatao) aur check karo ki ye Index hai ya Stock.
     sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
     is_idx = is_index or (sym_clean in INDEX_NAMES)
 
+    # [LINE 3] Base bars nikalo: Breakout candle se pehle ki 5 se 8 candles base consolidation define karti hain.
     comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
+    # [LINE 4] eval_bar = Breakout candle (jo base ko todti hai).
     eval_bar = df_slice.iloc[-2]
+    # [LINE 5] live_bar = Live entry candle (jisme breakout confirm hone par turant entry li jati hai).
     live_bar = df_slice.iloc[-1]
 
+    # [LINE 6] Agar base me 5 candles se kam hain toh pattern invalid hai, reject karo.
     if len(comp_bars) < 5:
         return None
 
+    # [LINE 7] Breakout candle ke OHLCV (Open, High, Low, Close, Volume) values nikalo.
     eval_close = float(eval_bar['close'])
     eval_open = float(eval_bar['open'])
     eval_high = float(eval_bar['high'])
     eval_low = float(eval_bar['low'])
     eval_vol = float(eval_bar.get('volume', 0.0))
 
+    # [LINE 8] Live spot price nikalo: Live bar ka close price entry price hoga.
     live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
 
+    # [LINE 9] Aaj ke trading session ka Open, Day High aur Day Low nikalo (prior days ka data mix nahi hona chahiye).
     if hasattr(df_slice.index, 'date'):
         today_date = df_slice.index[-1].date()
         today_bars = df_slice[df_slice.index.date == today_date]
@@ -216,94 +227,116 @@ def evaluate_common_5pillar_bar_slice(
         day_high = float(df_slice['high'].max())
         day_low = float(df_slice['low'].min())
 
+    # [LINE 10] Din ka percentage move nikalo: (Live Spot - Day Open) / Day Open * 100
     if pct_change_override is not None:
         pct_change = float(pct_change_override)
     else:
         pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
+    # [LINE 11] Verified Wilder 14-day Daily ATR nikalo (agar missing ho toh spot ka 2.2% default lo).
     atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
 
+    # [LINE 12] Trading Slab Check: Morning (09:30-10:12 AM) ya Afternoon (01:12-02:09 PM) me hi trade allow hai.
     target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
     if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
         tot_m = target_bar.name.hour * 60 + target_bar.name.minute
-        is_m = (570 <= tot_m <= 612)
-        is_a = (792 <= tot_m <= 849)
+        is_m = (570 <= tot_m <= 612)   # 09:30 se 10:12 AM IST
+        is_a = (792 <= tot_m <= 849)   # 01:12 se 02:09 PM IST
         if not (is_m or is_a):
-            return None
+            return None  # Slab ke bahar trade reject karo
     else:
         is_m, is_a = True, False
 
+    # [LINE 13] Base range nikalo: Consolidation base ka High, Low aur Width (comp_width).
     comp_high = float(comp_bars['high'].max())
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # Candlestick is ONLY supporting breakout trigger (0% VETO POWER FOR CANDLESTICK SHAPE):
+    # [LINE 14] 0% CANDLESTICK SHAPE VETO: Sirf break out trigger check karo (wick/rejection shape se reject mat karo).
+    # Agar Breakout candle ka Close base High se upar aur green candle hai -> CALL direction.
     if eval_close > comp_high and eval_close > eval_open:
         direction = 'CALL'
+    # Agar Breakout candle ka Close base Low se niche aur red candle hai -> PUT direction.
     elif eval_close < comp_low and eval_close < eval_open:
         direction = 'PUT'
     else:
-        return None
+        return None  # Na base high toota na low toota, trade reject karo.
 
-    # Macro regime alignment
+    # [LINE 15] Macro Nifty Regime Filter: Nifty ke opposite trade mat lo.
     if is_idx:
+        # Index CALL ke liye Nifty regime allow_call hona chahiye.
         if direction == 'CALL' and not nifty_regime.get('allow_call', True):
             return None
+        # Index PUT ke liye Nifty bearish aur fall confirmed hona chahiye.
         if direction == 'PUT':
             if not nifty_regime.get('allow_put', True):
                 return None
             if not nifty_regime.get('allow_stock_put', False) or pct_change > -0.15:
                 return None
     else:
+        # Stock CALL ke liye Nifty crash nahi hona chahiye.
         if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
             return None
+        # Stock PUT ke liye Nifty bearish hona zaroori hai.
         if direction == 'PUT' and not nifty_regime.get('allow_stock_put', False):
             return None
 
+    # [LINE 16] Stock Universe Quality Gates: Saste aur slow stock reject karo.
     if not is_idx:
+        # Minimum Stock Price Rs 500 aur Wilder ATR >= 20 points hona chahiye.
         if live_spot < MIN_STOCK_PRICE or atr < MIN_STOCK_ATR:
             return None
+        # Din ka move 0.35% se kam (choppy) ya 3.50% se zyada (exhausted) ho toh reject karo.
         if abs(pct_change) < 0.35 or abs(pct_change) > 3.50:
             return None
 
-    # -------------------------------------------------------------
-    # PILLAR 1: Institutional RVOL & Smart Money Turnover (25 Points)
-    # -------------------------------------------------------------
+    # ========================================================================================
+    # PILLAR 1: Institutional RVOL & Smart Money Turnover (Max: 25 Points)
+    # ========================================================================================
+    # [LINE 17] Breakout volume ko historical same-time slot volume ya base median volume se compare karo.
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
 
     if not is_idx:
+        # Stock ke liye 3-minute turnover in Crores: (Price * Volume) / 1 Crore
         turnover_cr = (eval_close * eval_vol) / 1e7
         real_rvol = round(eval_vol / max(1.0, base_vol), 2)
+        # [LINE 18] HARD VETO: RVOL kam se kam 1.40x aur turnover kam se kam Rs 1.5 Cr hona hi chahiye!
         if real_rvol < 1.40 or turnover_cr < 1.50:
             return None
+        # [LINE 19] Score: RVOL points (max 15) + Turnover points (max 10) = 25 Points
         rvol_pts = min(15.0, max(4.0, (real_rvol - 1.0) * 7.5))
         turn_pts = min(10.0, max(2.0, turnover_cr * 1.5))
         p1_score = round(rvol_pts + turn_pts, 2)
     else:
+        # Index ke liye range-expansion RVOL nikalo (Index me cash volume nahi hota, spot range hota hai).
         bar_rng = max(0.05, eval_high - eval_low)
         comp_rngs = comp_bars['high'] - comp_bars['low']
         median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
         idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
+        # [LINE 20] HARD VETO: Index ka range RVOL kam se kam 1.25x hona chahiye!
         if idx_rvol < 1.25:
             return None
         real_rvol = idx_rvol
         turnover_cr = 50.0
         p1_score = round(min(25.0, max(8.0, (idx_rvol - 1.0) * 18.0)), 2)
 
-    # -------------------------------------------------------------
-    # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD (25 Points)
-    # -------------------------------------------------------------
+    # ========================================================================================
+    # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD (Max: 25 Points)
+    # ========================================================================================
+    # [LINE 21] Pichhle 5 bars ka BVC (Bulk Volume Classification) delta nikalo.
     bars_5 = df_slice.iloc[-6:-1]
     if len(bars_5) < 3:
         return None
     price_chg = bars_5['close'] - bars_5['open']
     std_val = float(price_chg.std()) if len(bars_5) > 1 else 0.0
     sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
+    # [LINE 22] Normal distribution tanh normalization [-1.0, +1.0] me karo taaki outlier delta na distort kare.
     bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
     bvc_fraction = np.tanh(bvc_z)
 
+    # [LINE 23] Volume (stocks) ya Range (index) se weight karke cumulative delta ratio nikalo.
     if not is_idx:
         weights = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else np.ones(len(bars_5))
     else:
@@ -311,15 +344,20 @@ def evaluate_common_5pillar_bar_slice(
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
 
+    # [LINE 24] HARD DIVERGENCE VETO:
+    # CALL trade me delta positive hona chahiye (negative delta par institutional buying nahi hoti).
     if direction == 'CALL' and (bvc_cum_ratio <= 0.0 or eval_bvc <= 0.0):
         return None
+    # PUT trade me delta negative hona chahiye (positive delta par institutional selling nahi hoti).
     if direction == 'PUT' and (bvc_cum_ratio >= 0.0 or eval_bvc >= 0.0):
         return None
+    # [LINE 25] Pillar 2 Score: eval_bvc (max 15 pts) + bvc_cum_ratio (max 10 pts) = 25 Points.
     p2_score = round(min(15.0, abs(eval_bvc) * 16.0) + min(10.0, abs(bvc_cum_ratio) * 18.0), 2)
 
-    # -------------------------------------------------------------
-    # PILLAR 3: Wyckoff Market Profile POC/VAH/VAL & Compression Base (20 Points)
-    # -------------------------------------------------------------
+    # ========================================================================================
+    # PILLAR 3: Wyckoff Market Profile POC/VAH/VAL & Compression Base (Max: 20 Points)
+    # ========================================================================================
+    # [LINE 26] Intraday Volume Profile: VWAP, POC (Point of Control), VAH (Value Area High), VAL (Value Area Low).
     tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
     vol_all = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
     vwap = float((tp_all * vol_all).sum() / max(1.0, float(vol_all.sum()))) if (not is_idx and float(vol_all.sum()) > 0) else float(tp_all.mean())
@@ -328,36 +366,47 @@ def evaluate_common_5pillar_bar_slice(
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
+    # [LINE 27] VALUE ACCEPTANCE RULE:
+    # Index ke liye base width BankNifty <= 320 pts, other index <= 135 pts honi chahiye.
     max_allowed_base = 320.0 if sym_clean == 'BANKNIFTY' else 135.0
     if is_idx:
         if comp_width > max_allowed_base:
-            return None
+            return None  # Base agar bohot bada hai toh consolidation tight nahi hai, reject karo.
         compression_pts = min(10.0, max(4.0, (1.0 - comp_width / max_allowed_base) * 12.0))
+        # CALL me price VWAP aur POC ke upar accept hona chahiye.
         if direction == 'CALL':
             if not (eval_close > vwap and eval_close >= poc):
                 return None
+        # PUT me price VWAP aur POC ke niche accept hona chahiye.
         else:
             if not (eval_close < vwap and eval_close <= poc):
                 return None
     else:
+        # Stock ke liye base width ATR ka 72% se kam honi chahiye.
         if comp_width > 0.72 * atr:
-            return None
+            return None  # Loose base reject karo.
         compression_pts = min(10.0, max(3.0, (0.72 - (comp_width / atr)) * 22.0))
+        # CALL me price VWAP aur POC ke upar hona chahiye.
         if direction == 'CALL':
             if not (eval_close > vwap and eval_close >= poc):
                 return None
+        # PUT me price VWAP aur POC ke niche hona chahiye.
         else:
             if not (eval_close < vwap and eval_close <= poc):
                 return None
 
+    # [LINE 28] Value Area Acceptance bonus: CALL agar VAH ke upar breakout kare ya PUT VAL ke niche kare toh 10 pts, warna 6.5 pts.
     profile_pts = 10.0 if (eval_close >= vah if direction == 'CALL' else eval_close <= val) else 6.5
     p3_score = round(compression_pts + profile_pts, 2)
 
-    # -------------------------------------------------------------
-    # PILLAR 5: PBD & Remaining ATR Fuel (10 Points)
-    # -------------------------------------------------------------
+    # ========================================================================================
+    # PILLAR 5: PBD & Remaining ATR Fuel (Max: 10 Points)
+    # ========================================================================================
+    # [LINE 29] Aaj ka kharch hua fuel: Day High - Day Low.
     fuel_spent = day_high - day_low
+    # [LINE 30] Bacha hua fuel (Remaining ATR): Daily ATR - Fuel Spent.
     remaining_atr = atr - fuel_spent
+    # [LINE 31] HARD VETO: Stock me kam se kam 18 pts ya 35% ATR fuel unspent bacha hona chahiye (exhausted stock me entry mana hai).
     if not is_idx:
         if remaining_atr < max(18.0, 0.35 * atr):
             return None
@@ -365,9 +414,14 @@ def evaluate_common_5pillar_bar_slice(
         if remaining_atr < 0.35 * atr:
             return None
 
+    # [LINE 32] Pillar 5 Score: Remaining ATR fuel ratio par 3 se 10 points.
     p5_score = round(min(10.0, max(3.0, (remaining_atr / max(1.0, atr)) * 12.5)), 2)
+
+    # [LINE 33] 4 Pillars ka Preliminary Score nikalo (Pillar 1 + 2 + 3 + 5 = Max 80 Points).
+    # Baad me Stage 2 me Pillar 4 (OI Runway, Max 20 Points) judkar Final 100 Points banega.
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
 
+    # [LINE 34] Sabhi metrics return karo live screener aur backtest ke liye.
     return {
         'symbol': sym_clean,
         'is_index': is_idx,

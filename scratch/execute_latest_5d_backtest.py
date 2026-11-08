@@ -456,7 +456,15 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
 
 
 class ActiveOptionTrade:
+    """
+    ========================================================================================
+    ACTIVE OPTION TRADE MANAGER (HINDI LINE-BY-LINE LOGIC COMMENTS)
+    Decoupled Spot Targets: T1 = +0.55 ATR, T2 = +1.15 ATR, SL = 0.26 ATR
+    Dynamic 70% Profit Ratchet & Capital Protection Shield.
+    ========================================================================================
+    """
     def __init__(self, cand: Dict[str, Any], b_idx: int, curr_t, lot_map: Dict[str, int]):
+        # [LINE 1] Candidate signal details store karo (Symbol, Direction, Entry Spot Price, Evaluation Time).
         self.cand = cand
         self.entry_idx = b_idx
         self.entry_time = curr_t
@@ -476,16 +484,20 @@ class ActiveOptionTrade:
         self.max_fav_pts = 0.0
         self.max_adv_pts = 0.0
 
+        # [LINE 2] DECOUPLED POINT TARGETS (Index aur Stock ke liye fixed point targets):
         if self.is_idx:
             if self.sym == 'BANKNIFTY':
+                # BankNifty: SL = 60 pts, T1 = 120 pts, T2 = 240 pts
                 self.spot_sl = 60.0
                 self.spot_t1 = 120.0
                 self.spot_t2 = 240.0
             elif self.sym in ['NIFTY', 'FINNIFTY']:
+                # Nifty / FinNifty: SL = 40 pts, T1 = 85 pts, T2 = 150 pts
                 self.spot_sl = 40.0
                 self.spot_t1 = 85.0
                 self.spot_t2 = 150.0
             elif self.sym == 'MIDCPNIFTY':
+                # MidcpNifty: SL = 30 pts, T1 = 65 pts, T2 = 130 pts
                 self.spot_sl = 30.0
                 self.spot_t1 = 65.0
                 self.spot_t2 = 130.0
@@ -494,39 +506,51 @@ class ActiveOptionTrade:
                 self.spot_t1 = 70.0
                 self.spot_t2 = 140.0
         else:
+            # Stock Decoupled Targets: SL = 0.26 ATR (min 8 pts), T1 = 0.55 ATR (min 22 pts), T2 = 1.15 ATR (min 50 pts)
             self.spot_sl = max(8.0, round(self.atr * 0.26, 2))
             self.spot_t1 = max(22.0, round(self.atr * 0.55, 2))
             self.spot_t2 = max(50.0, round(self.atr * 1.15, 2))
 
+        # [LINE 3] ATM Strike Price aur Contract Name fix karo (Stocks me 50/100 strike step, Index me 50/100).
         step = 50.0 if not self.is_idx else (100.0 if self.is_bank else 50.0)
         self.atm_strike = round(self.spot_entry / step) * step
         self.opt_type = 'CE' if self.direction == 'CALL' else 'PE'
         stk_str = f"{int(self.atm_strike)}" if self.atm_strike == int(self.atm_strike) else f"{self.atm_strike:.1f}"
         self.contract_name = f"{self.sym} {stk_str} {self.opt_type}"
         self.lot_size = lot_map.get(self.sym, (25 if self.is_idx else 250))
+        # [LINE 4] Option Premium pricing: Entry premium ~ 2x SL points, Option SL points = 0.50x spot SL (Delta ~0.50).
         self.opt_entry_premium = max(6.0, round(self.spot_sl * 2.00, 2))
         self.opt_sl_pts = round(max(1.5, self.spot_sl * 0.50), 2)
 
     def update(self, b_high: float, b_low: float, b_close: float, ts):
+        """
+        Har 3-minute bar par position ko evaluate karo (High, Low, Close intrabar check).
+        """
         if self.is_closed:
             return
         self.step += 1
 
+        # [LINE 5] Bar ka favorable move (kitna faayda hua) aur adverse move (kitna nuksan hua) calculate karo.
         fav_move = (b_high - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - b_low)
         adv_move = (self.spot_entry - b_low) if self.direction == 'CALL' else (b_high - self.spot_entry)
         cur_gain = (b_close - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - b_close)
 
+        # [LINE 6] Maximum Peak Favorable Excursion (MFE) aur Adverse Excursion (MAE) update karo.
         if fav_move > self.max_fav_pts:
             self.max_fav_pts = fav_move
         if adv_move > self.max_adv_pts:
             self.max_adv_pts = adv_move
 
+        # [LINE 7] EOD 15:20 IST Square-off: Raat ko koi option position carry nahi karni hai.
         tot_m = ts.hour * 60 + ts.minute
         if tot_m >= 920:
             self.close_eod(b_close, ts)
             return
 
-        # 1. Full SL Hit (only if trade never reached +1.0R / armed breakeven or hit T1)
+        # ====================================================================================
+        # RULE 1: FULL STOP-LOSS HIT (Only if trade never hit T1 and never armed Breakeven)
+        # ====================================================================================
+        # [LINE 8] Agar trade ne kabhi profit arm nahi kiya aur adverse move full SL touch kar gaya -> SL_HIT.
         if not self.t1_hit and not self.breakeven_armed:
             if adv_move >= self.spot_sl:
                 self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
@@ -535,12 +559,18 @@ class ActiveOptionTrade:
                 self.is_closed = True
                 return
 
-        # 2. T1 Hit Check
+        # ====================================================================================
+        # RULE 2: TARGET 1 HIT CHECK (+0.55 ATR Move in Favor)
+        # ====================================================================================
+        # [LINE 9] Jaise hi spot price Target 1 touch kare, T1 hit mark karo aur Breakeven arm karo.
         if fav_move >= self.spot_t1:
             self.t1_hit = True
             self.breakeven_armed = True
 
-        # 3. T2 Jackpot Check
+        # ====================================================================================
+        # RULE 3: TARGET 2 JACKPOT CHECK (+1.15 ATR Move in Favor)
+        # ====================================================================================
+        # [LINE 10] Agar price Target 2 Jackpot touch kar gaya -> Full Target 2 Exit!
         if fav_move >= self.spot_t2:
             self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
             self.exit_reason = "TARGET_2_HIT (JACKPOT)"
@@ -548,7 +578,11 @@ class ActiveOptionTrade:
             self.is_closed = True
             return
 
-        # 4. Trailing & Breakeven Check (ONLY on trades armed from a PREVIOUS bar)
+        # ====================================================================================
+        # RULE 4: TRAILING & BREAKEVEN EXIT (Only checked on trades armed from a PREVIOUS bar)
+        # ====================================================================================
+        # [LINE 11] Case A: Agar T1 hit ho chuka hai, toh Dynamic 70% Peak Ratchet lagao:
+        # Peak profit ka 70% lock rahega, taaki bada runner kate nahi aur reverse hone par profit safe rahe.
         if self.t1_hit:
             lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
             locked_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
@@ -559,6 +593,8 @@ class ActiveOptionTrade:
                 self.exit_time = ts
                 self.is_closed = True
                 return
+        # [LINE 12] Case B: Agar trade ne +1.0R cross kiya tha lekin T1 nahi laga, aur ab wapas entry ki taraf gir raha hai:
+        # Breakeven Shield +0.35R profit par trade band karke capital protect karegi.
         elif self.breakeven_armed:
             be_pts = round(self.spot_sl * 0.35, 2)
             locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
@@ -570,12 +606,18 @@ class ActiveOptionTrade:
                 self.is_closed = True
                 return
 
-        # 5. Arm Breakeven for NEXT bar once +1.0R (spot_sl) move is reached
+        # ====================================================================================
+        # RULE 5: ARM BREAKEVEN FOR NEXT BAR (Once trade moves +1.0R in favor)
+        # ====================================================================================
+        # [LINE 13] Current bar par agar fav_move >= spot_sl hua, toh NEXT bar ke liye breakeven arm karo (same bar par exit nahi).
         if not self.breakeven_armed and fav_move >= self.spot_sl:
             self.breakeven_armed = True
 
-        # 6. Time Scratches (ONLY if trade NEVER armed breakeven and NEVER hit T1)
+        # ====================================================================================
+        # RULE 6: TIME SCRATCHES (Sirf un trades ke liye jo KABHI +1.0R nahi gaye aur KABHI T1 nahi lage)
+        # ====================================================================================
         if not self.breakeven_armed and not self.t1_hit:
+            # [LINE 14] 15-Minute Failed Auction Scratch: 4 bars (12 mins) baad agar trade 55% SL loss me hai -> Cut Loss.
             if self.step >= 4 and cur_gain <= -(self.spot_sl * 0.55):
                 self.spot_exit = b_close
                 self.exit_reason = "15M_TIME_SL_SCRATCH"
@@ -583,6 +625,7 @@ class ActiveOptionTrade:
                 self.is_closed = True
                 return
 
+            # [LINE 15] 30-Minute Stagnant Scratch: 9 bars (27 mins) baad agar trade 25% loss me stagnant hai -> Scratch.
             if self.step >= 9 and cur_gain <= -(self.spot_sl * 0.25):
                 self.spot_exit = b_close
                 self.exit_reason = "30M_STAGNANT_SCRATCH"
@@ -591,6 +634,7 @@ class ActiveOptionTrade:
                 return
 
     def close_eod(self, final_close: float, ts):
+        """15:20 IST EOD closure logic."""
         if not self.is_closed:
             if self.t1_hit:
                 lock_pts = round(max(self.spot_t1 * 0.70, self.max_fav_pts * 0.70), 2)
@@ -607,6 +651,7 @@ class ActiveOptionTrade:
             self.is_closed = True
 
     def get_summary(self, d_str: str) -> Dict[str, Any]:
+        """Trade summary aur Indian F&O statutory taxes (STT, GST, Brokerage) deduct karke Net PnL nikaalo."""
         spot_pts = round((self.spot_exit - self.spot_entry) if self.direction == 'CALL' else (self.spot_entry - self.spot_exit), 2)
         if "JACKPOT" in self.exit_reason:
             eff_delta = 0.72
