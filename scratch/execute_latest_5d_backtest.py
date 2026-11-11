@@ -240,8 +240,8 @@ def get_nifty_regime(nifty_day: pd.DataFrame, b_idx: int) -> Dict[str, Any]:
     is_chop = (recent_rng < 22.0 and ema_dist < 12.0)
 
     n_pct = round((move_from_open / max(1.0, day_open)) * 100.0, 2)
-    is_nifty_bullish = (n_spot >= tp_vwap and n_spot >= ema9 and n_spot >= ema21 and move_from_open >= 10.0)
-    is_nifty_bearish = (n_spot < tp_vwap and n_spot < ema9 and n_spot < ema21 and move_from_open <= -35.0)
+    is_nifty_bullish = (n_spot >= tp_vwap and move_from_open >= 10.0)
+    is_nifty_bearish = (n_spot < tp_vwap and move_from_open <= -35.0)
 
     is_runaway_bull = (move_from_open >= 40.0)
     allow_stock_call = not is_nifty_bearish

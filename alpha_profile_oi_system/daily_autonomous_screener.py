@@ -176,7 +176,7 @@ def evaluate_common_5pillar_bar_slice(
     EXACT PURE 5-PILLAR INSTITUTIONAL EVALUATION ENGINE (HINDI LINE-BY-LINE LOGIC COMMENTS)
     Pillar 1: 25 Pts (RVOL >= 1.40x & Turnover >= 1.5 Cr)
     Pillar 2: 25 Pts (True BVC Volume Delta & CVD Flow - Divergence Veto)
-    Pillar 3: 20 Pts (Wyckoff Market Profile Acceptance: VWAP/POC/EMA9>=EMA21 & Base Compression)
+    Pillar 3: 20 Pts (Wyckoff Market Profile Acceptance: VWAP/POC & Base Compression - Lagging EMA Removed)
     Pillar 4: 20 Pts (Symmetric -4 to +4 Strikes OI Runway & Short-Covering Unwind)
     Pillar 5: 10 Pts (Remaining ATR Fuel >= 35% & Decoupled Targets)
     Total Score: 100 Points (Qualification Threshold >= 70.0)
@@ -381,26 +381,26 @@ def evaluate_common_5pillar_bar_slice(
         if comp_width > max_allowed_base:
             return None  # Base agar bohot bada hai toh consolidation tight nahi hai, reject karo.
         compression_pts = min(10.0, max(4.0, (1.0 - comp_width / max_allowed_base) * 12.0))
-        # CALL me price VWAP aur POC ke upar accept hona chahiye aur EMA9 >= EMA21 hona chahiye.
+        # CALL me price VWAP aur POC ke upar accept hona chahiye (Lagging EMA removed).
         if direction == 'CALL':
-            if not (eval_close > vwap and eval_close >= poc and ema9 >= ema21):
+            if not (eval_close > vwap and eval_close >= poc):
                 return None
-        # PUT me price VWAP aur POC ke niche accept hona chahiye aur EMA9 <= EMA21 hona chahiye.
+        # PUT me price VWAP aur POC ke niche accept hona chahiye (Lagging EMA removed).
         else:
-            if not (eval_close < vwap and eval_close <= poc and ema9 <= ema21):
+            if not (eval_close < vwap and eval_close <= poc):
                 return None
     else:
         # Stock ke liye base width ATR ka 72% se kam honi chahiye.
         if comp_width > 0.72 * atr:
             return None  # Loose base reject karo.
         compression_pts = min(10.0, max(3.0, (0.72 - (comp_width / atr)) * 22.0))
-        # CALL me price VWAP aur POC ke upar hona chahiye aur EMA9 >= EMA21 hona chahiye.
+        # CALL me price VWAP aur POC ke upar hona chahiye (Lagging EMA removed).
         if direction == 'CALL':
-            if not (eval_close > vwap and eval_close >= poc and ema9 >= ema21):
+            if not (eval_close > vwap and eval_close >= poc):
                 return None
-        # PUT me price VWAP aur POC ke niche hona chahiye aur EMA9 <= EMA21 hona chahiye.
+        # PUT me price VWAP aur POC ke niche hona chahiye (Lagging EMA removed).
         else:
-            if not (eval_close < vwap and eval_close <= poc and ema9 <= ema21):
+            if not (eval_close < vwap and eval_close <= poc):
                 return None
 
     # [LINE 26] Value Area Acceptance bonus: CALL agar VAH ke upar breakout kare ya PUT VAL ke niche kare toh 10 pts, warna 6.5 pts.
@@ -593,8 +593,8 @@ class DailyAutonomousScreener:
         ema_dist = abs(cur_close - ema9)
         is_chop = (recent_rng < 22.0 and ema_dist < 12.0)
 
-        is_nifty_bullish = (cur_close >= tp_vwap and cur_close >= ema9 and cur_close >= ema21 and move_pts >= 10.0)
-        is_nifty_bearish = (cur_close < tp_vwap and cur_close < ema9 and cur_close < ema21 and move_pts <= -35.0)
+        is_nifty_bullish = (cur_close >= tp_vwap and move_pts >= 10.0)
+        is_nifty_bearish = (cur_close < tp_vwap and move_pts <= -35.0)
 
         is_runaway_bull = (move_pts >= 40.0)
         allow_stock_call = not is_nifty_bearish
