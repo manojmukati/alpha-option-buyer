@@ -31,6 +31,8 @@ import json
 import random
 import datetime
 import math
+import html
+import logging
 import urllib.request
 import numpy as np
 import pandas as pd
@@ -465,6 +467,12 @@ class DailyAutonomousScreener:
     """Production Autonomous Screener, Journaler & Live Position Manager."""
 
     def __init__(self):
+        self.logger = logging.getLogger('alpha_5pillar_screener')
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+            self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
         self.data_feed = LiveMarketDataFeed()
         self.notifier = TelegramNotifier(CONFIG_PATH)
         self.universe = self._load_fno_universe()
@@ -1041,6 +1049,133 @@ class DailyAutonomousScreener:
             time.sleep(interval_seconds)
 
 
+    def run_live_slab_loop(self):
+        print(f"=======================================================")
+        print(f"  ALPHA CONTINUOUS SLAB RUNNER INITIALIZED")
+        print(f"  Designated Slabs: 09:30-10:15 AM IST & 01:15-02:15 PM IST")
+        print(f"=======================================================")
+
+        iteration = 1
+        while True:
+            ist_now = get_ist_time()
+            tot_mins = ist_now.hour * 60 + ist_now.minute
+            is_weekday = (ist_now.weekday() < 5)
+
+            if not is_weekday:
+                print(f"[MARKET CLOSED]: Weekend detected ({ist_now.strftime('%A')}). Exiting loop.")
+                break
+
+            if is_in_active_trading_slab(ist_now):
+                print(f"\n>>> [ITERATION #{iteration}] Running 5-Pillar F&O Scan at {ist_now.strftime('%I:%M:%S %p IST')}...")
+                self.run_screener(ignore_window=True)
+                print(f">>> [ITERATION #{iteration} COMPLETE] Sleeping 180s (3 minutes) until next scan...")
+                time.sleep(180)
+                iteration += 1
+            elif tot_mins < 570:
+                sleep_secs = min(300, (570 - tot_mins) * 60)
+                print(f"\r[STANDBY]: Pre-slab 1. Sleeping {sleep_secs}s until 09:30 AM IST...   ", end='', flush=True)
+                time.sleep(sleep_secs)
+            elif 615 < tot_mins < 795:
+                rem_mins = 795 - tot_mins
+                sleep_secs = min(300, rem_mins * 60)
+                print(f"\r[MID-DAY CHOP PAUSE]: Standing by for Slab 2 (01:15 PM IST). Resuming in {rem_mins} mins...   ", end='', flush=True)
+                time.sleep(sleep_secs)
+            else:
+                print(f"\n[TRADING SLABS CONCLUDED]: Current time {ist_now.strftime('%I:%M:%S %p IST')} is past 02:15 PM IST. Completed for today.")
+                break
+
+    def run_eod_analysis_and_dispatch(self):
+        """Performs daily trade success/failure analysis at 03:35 PM IST and dispatches Report + Excel strictly to Owner Chatbot."""
+        ist_now = get_ist_time()
+        ist_time_str = ist_now.strftime('%I:%M:%S %p IST')
+        ist_date_str = ist_now.strftime('%d-%b-%Y')
+        daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
+
+        if not os.path.exists(daily_xl):
+            print(f"[EOD ERROR]: Excel file {daily_xl} not found.")
+            return
+
+        import pandas as pd
+        df = pd.read_excel(daily_xl)
+        df_today = df[df['Date'].astype(str).str.contains(ist_date_str, na=False)] if 'Date' in df.columns else pd.DataFrame()
+
+        total_trades = len(df_today)
+        wins = 0
+        losses = 0
+        net_pnl = 0.0
+        trade_diagnostics = []
+
+        if total_trades > 0:
+            for idx, r in df_today.iterrows():
+                outcome = str(r.get('Trade_Outcome', r.get('Status', '')))
+                sym = r.get('Stock_Index', '')
+                contract = r.get('Option_Contract', '')
+                pnl = float(r.get('Net_PnL_INR', 0.0))
+                net_pnl += pnl
+                why = str(r.get('Why_Success_or_Fail', r.get('Rectification_Suggestion', 'Normal execution')))
+
+                if 'TARGET' in outcome or pnl > 0:
+                    wins += 1
+                    status_emoji = '🎯 WIN'
+                else:
+                    losses += 1
+                    status_emoji = '🛑 SL HIT'
+
+                trade_diagnostics.append(
+                    f"• <b>{sym} ({contract}):</b> {status_emoji} | Net PnL: <b>Rs. {pnl:+,.2f}</b>\n"
+                    f"  <i>Analysis:</i> {html.escape(why[:120])}..."
+                )
+
+            win_rate = round((wins / total_trades) * 100.0, 1) if total_trades > 0 else 0.0
+        else:
+            win_rate = 0.0
+            trade_diagnostics.append("• <i>Zero trades executed today. Market maintained in sideways chop; capital 100% protected.</i>")
+
+        pnl_sign = '+' if net_pnl >= 0 else ''
+        pnl_color = '🟢' if net_pnl >= 0 else '🔴'
+
+        report_lines = [
+            "📊 <b>DAILY EOD TRADE AUDIT & PERFORMANCE POST-MORTEM</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"📅 <b>DATE:</b> <b>{ist_date_str}</b> | ⏰ <b>TIME:</b> <b>{ist_time_str}</b>",
+            f"📈 <b>TOTAL TRADES EXECUTED:</b> <b>{total_trades}</b>",
+            f"🏆 <b>WINS:</b> <b>{wins}</b> | 🛑 <b>LOSSES:</b> <b>{losses}</b> | 🎯 <b>WIN RATE:</b> <b>{win_rate}%</b>",
+            f"{pnl_color} <b>TOTAL NET REALIZED P&L:</b> <b>{pnl_sign}Rs. {net_pnl:,.2f}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🔍 <b>DETAILED INDIVIDUAL TRADE POST-MORTEM:</b>",
+            "\n".join(trade_diagnostics),
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🔒 <i>Report & Excel Journal delivered strictly to Owner Chatbot. Group silence maintained.</i>"
+        ]
+
+        report_text = "\n".join(report_lines)
+        self.notifier.send_broadcast_message(report_text, is_trade_signal=False)
+
+        caption = (
+            f"📊 <b>DAILY OFFICIAL LIVE PAPER TRADING JOURNAL</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 <b>DATE:</b> {ist_date_str}\n"
+            f"⏰ <b>DISPATCH TIME:</b> {ist_time_str}\n"
+            f"🎯 <b>MODE:</b> EOD Official Paper Trading Ledger\n"
+            f"🔒 <b>SECURITY:</b> Strictly Confidential (Owner Private DM Only)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        res = self.notifier.send_document_to_owner_with_approval_prompt(daily_xl, caption=caption)
+        print(f"[EOD AUDIT & DISPATCH]: Delivered daily analysis & journal to Owner DM. Result: {res.get('ok')}")
+        return res
+
+    def send_eod_journal_to_owner(self):
+        """Compatibility alias for EOD dispatch."""
+        return self.run_eod_analysis_and_dispatch()
+
+
 if __name__ == '__main__':
     screener = DailyAutonomousScreener()
-    screener.run_screener(ignore_window=True)
+    if '--slab-loop' in sys.argv:
+        screener.run_live_slab_loop()
+    elif '--eod-audit' in sys.argv or '--send-journal' in sys.argv:
+        screener.run_eod_analysis_and_dispatch()
+    else:
+        ignore_win = ('--ignore-window' in sys.argv)
+        screener.run_screener(ignore_window=ignore_win)
+
