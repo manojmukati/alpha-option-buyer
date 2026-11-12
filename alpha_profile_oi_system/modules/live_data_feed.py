@@ -264,6 +264,11 @@ def fetch_bulk_nse_snapshot(force_refresh: bool = False) -> Dict[str, Dict[str, 
                     'is_index': True
                 }
 
+    # Ensure major indices are always present even if NSE indices endpoint is blocked
+    for idx_sym in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
+        if idx_sym not in result_map:
+            result_map[idx_sym] = {'symbol': idx_sym, 'is_index': True}
+
     if result_map:
         _BULK_CACHE = result_map
         _BULK_CACHE_TIME = now
