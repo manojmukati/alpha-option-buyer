@@ -851,32 +851,19 @@ class LiveMarketDataFeed:
         # Executable pricing: Entry at ask, monitoring at bid
         entry_p = ask
         if is_index:
-            if sym_clean == 'BANKNIFTY':
-                spot_sl = 60.0
-                spot_t1 = 120.0
-                spot_t2 = 240.0
-            elif sym_clean in ['NIFTY', 'FINNIFTY']:
-                spot_sl = 40.0
-                spot_t1 = 85.0
-                spot_t2 = 150.0
-            elif sym_clean == 'MIDCPNIFTY':
-                spot_sl = 30.0
-                spot_t1 = 65.0
-                spot_t2 = 130.0
-            else:
-                spot_sl = 35.0
-                spot_t1 = 70.0
-                spot_t2 = 140.0
-            sl_pts = round(max(14.0, spot_sl * 0.50), 2)
+            # Strictly Fixed 25.0 Points Spot Stop Loss on Index
+            spot_sl = 25.0
+            spot_t1 = 60.0 if sym_clean == 'BANKNIFTY' else 50.0
+            spot_t2 = 180.0 if sym_clean == 'BANKNIFTY' else 120.0
+            sl_pts = round(max(8.0, spot_sl * 0.50), 2)   # ~12.5 pts Option SL
             t1_pts = round(spot_t1 * 0.55, 2)
             t2_pts = round(spot_t2 * 0.65, 2)
         else:
-            # Stock Option Decoupled Targets (Wilder ATR)
-            atr_val = self.get_wilder_daily_atr(sym_clean)
-            spot_sl = max(8.0, round(atr_val * 0.26, 2))
-            spot_t1 = max(22.0, round(atr_val * 0.55, 2))
-            spot_t2 = max(50.0, round(atr_val * 1.15, 2))
-            sl_pts = round(max(1.5, spot_sl * 0.50), 2)
+            # Strictly Fixed 10.0 Points Spot Stop Loss on Stocks
+            spot_sl = 10.0
+            spot_t1 = 15.0
+            spot_t2 = 35.0
+            sl_pts = round(max(1.5, spot_sl * 0.50), 2)   # ~5.0 pts Option SL
             t1_pts = round(spot_t1 * 0.55, 2)
             t2_pts = round(spot_t2 * 0.65, 2)
 

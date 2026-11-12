@@ -282,17 +282,17 @@ def evaluate_common_5pillar_bar_slice(
         # Stock PUT ke liye Nifty bearish hona zaroori hai.
         if direction == 'PUT' and not nifty_regime.get('allow_stock_put', False):
             return None
-        # Minimum Stock Floor: Price >= 500 & Wilder 14-day ATR >= 20
-        if live_spot < MIN_STOCK_PRICE or atr < MIN_STOCK_ATR:
+        # Minimum Stock Floor: Price >= 500 & Volatility check (ATR >= 12 or >= 1.2% of spot)
+        if live_spot < MIN_STOCK_PRICE or (atr < 12.0 and (atr / max(1.0, live_spot)) < 0.012):
             return None
-        # Din ka move 0.35% se kam (choppy) ya 3.50% se zyada (exhausted) ho toh reject karo.
-        if abs(pct_change) < 0.35 or abs(pct_change) > 3.50:
+        # Din ka move 0.20% se kam (completely flat) ya 4.50% se zyada (exhausted circuit) ho toh reject karo.
+        if abs(pct_change) < 0.20 or abs(pct_change) > 4.50:
             return None
 
     # ========================================================================================
     # PILLAR 1: Institutional RVOL & Smart Money Turnover (Max: 25 Points)
+    # PURE 100-POINT SCORING: Smooth continuous scoring, no arbitrary hard vetoes!
     # ========================================================================================
-    # [LINE 16] Breakout volume ko historical same-time slot volume ya base median volume se compare karo.
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
@@ -301,30 +301,53 @@ def evaluate_common_5pillar_bar_slice(
         # Stock ke liye 3-minute turnover in Crores: (Price * Volume) / 1 Crore
         turnover_cr = (eval_close * eval_vol) / 1e7
         real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-        # [LINE 17] HARD VETO: RVOL kam se kam 1.40x aur turnover kam se kam Rs 1.5 Cr hona hi chahiye!
-        if real_rvol < 1.40 or turnover_cr < 1.50:
-            return None
-        # [LINE 18] Score: RVOL points (max 15) + Turnover points (max 10) = 25 Points
-        rvol_pts = min(15.0, max(4.0, (real_rvol - 1.0) * 7.5))
-        turn_pts = min(10.0, max(2.0, turnover_cr * 1.5))
-        p1_score = round(rvol_pts + turn_pts, 2)
+        # Continuous scoring: RVOL points (max 15) + Turnover points (max 10) = 25 Points
+        if real_rvol >= 2.0:
+            rvol_pts = 15.0
+        elif real_rvol >= 1.5:
+            rvol_pts = 12.0
+        elif real_rvol >= 1.2:
+            rvol_pts = 9.0
+        elif real_rvol >= 1.0:
+            rvol_pts = 6.0
+        else:
+            rvol_pts = round(max(1.0, real_rvol * 5.0), 2)
+
+        if turnover_cr >= 2.5:
+            turn_pts = 10.0
+        elif turnover_cr >= 1.5:
+            turn_pts = 8.0
+        elif turnover_cr >= 0.8:
+            turn_pts = 5.0
+        else:
+            turn_pts = round(max(1.0, turnover_cr * 4.0), 2)
+
+        p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
     else:
-        # Index ke liye range-expansion RVOL nikalo (Index me cash volume nahi hota, spot range hota hai).
+        # Index ke liye range-expansion RVOL
         bar_rng = max(0.05, eval_high - eval_low)
         comp_rngs = comp_bars['high'] - comp_bars['low']
         median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
         idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
-        # [LINE 19] HARD VETO: Index ka range RVOL kam se kam 1.25x hona chahiye!
-        if idx_rvol < 1.25:
-            return None
         real_rvol = idx_rvol
-        turnover_cr = 50.0
-        p1_score = round(min(25.0, max(8.0, (idx_rvol - 1.0) * 18.0)), 2)
+        turnover_cr = 50.0  # Index institutional liquidity
+        if idx_rvol >= 2.0:
+            p1_score = 25.0
+        elif idx_rvol >= 1.5:
+            p1_score = 21.0
+        elif idx_rvol >= 1.2:
+            p1_score = 18.0
+        elif idx_rvol >= 1.0:
+            p1_score = 15.0
+        elif idx_rvol >= 0.8:
+            p1_score = 11.0
+        else:
+            p1_score = round(max(3.0, idx_rvol * 12.0), 2)
 
     # ========================================================================================
     # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD (Max: 25 Points)
+    # PURE 100-POINT SCORING: Aligned flow gets full points, divergent gets low points
     # ========================================================================================
-    # [LINE 20] Pichhle 5 bars ka BVC Delta nikalo.
     bars_5 = df_slice.iloc[-6:-1]
     if len(bars_5) < 3:
         return None
@@ -334,7 +357,6 @@ def evaluate_common_5pillar_bar_slice(
     bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
     bvc_fraction = np.tanh(bvc_z)
 
-    # [LINE 21] Volume (stocks) ya Range (index) se weight karke cumulative delta ratio nikalo.
     if not is_idx:
         weights = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else np.ones(len(bars_5))
     else:
@@ -342,20 +364,23 @@ def evaluate_common_5pillar_bar_slice(
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
 
-    # [LINE 22] HARD DIVERGENCE VETO:
-    # CALL trade me delta positive hona chahiye (negative delta par buying mana hai).
-    if direction == 'CALL' and (bvc_cum_ratio <= 0.0 or eval_bvc <= 0.0):
-        return None
-    # PUT trade me delta negative hona chahiye (positive delta par selling mana hai).
-    if direction == 'PUT' and (bvc_cum_ratio >= 0.0 or eval_bvc >= 0.0):
-        return None
-    # [LINE 23] Pillar 2 Score: eval_bvc (max 15 pts) + bvc_cum_ratio (max 10 pts) = 25 Points.
-    p2_score = round(min(15.0, abs(eval_bvc) * 16.0) + min(10.0, abs(bvc_cum_ratio) * 18.0), 2)
+    is_delta_aligned = (direction == 'CALL' and eval_bvc > 0) or (direction == 'PUT' and eval_bvc < 0)
+    is_cum_aligned = (direction == 'CALL' and bvc_cum_ratio > 0) or (direction == 'PUT' and bvc_cum_ratio < 0)
+
+    if is_delta_aligned and is_cum_aligned:
+        eval_pts = min(15.0, abs(eval_bvc) * 16.0)
+        cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0)
+        p2_score = round(eval_pts + cum_pts, 2)
+    elif is_delta_aligned:
+        p2_score = round(max(6.0, min(14.0, abs(eval_bvc) * 14.0)), 2)
+    elif is_cum_aligned:
+        p2_score = round(max(5.0, min(10.0, abs(bvc_cum_ratio) * 12.0)), 2)
+    else:
+        p2_score = 2.0  # Divergence penalty reflected in score
 
     # ========================================================================================
-    # PILLAR 3: Wyckoff Market Profile POC/VAH/VAL & EMA Alignment (Max: 20 Points)
+    # PILLAR 3: Wyckoff Market Profile POC/VAH/VAL & Compression Quality (Max: 20 Points)
     # ========================================================================================
-    # [LINE 24] Intraday Volume Profile: VWAP, POC (Point of Control), VAH, VAL, EMA9, EMA21.
     tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
     vol_all = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
     vwap = float((tp_all * vol_all).sum() / max(1.0, float(vol_all.sum()))) if (not is_idx and float(vol_all.sum()) > 0) else float(tp_all.mean())
@@ -364,7 +389,6 @@ def evaluate_common_5pillar_bar_slice(
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
-    # Developing EMA9 and EMA21 on eval_bar
     if 'ema9' in eval_bar and pd.notna(eval_bar['ema9']):
         ema9 = float(eval_bar['ema9'])
     else:
@@ -375,55 +399,38 @@ def evaluate_common_5pillar_bar_slice(
     else:
         ema21 = float(df_slice['close'].ewm(span=21, adjust=False).mean().iloc[-2])
 
-    # [LINE 25] VALUE ACCEPTANCE RULE:
-    max_allowed_base = 520.0 if sym_clean == 'BANKNIFTY' else 160.0
-    if is_idx:
-        if comp_width > max_allowed_base:
-            return None  # Base agar bohot bada hai toh consolidation tight nahi hai, reject karo.
-        compression_pts = min(10.0, max(4.0, (1.0 - comp_width / max_allowed_base) * 12.0))
-        # CALL me price VWAP aur POC ke upar accept hona chahiye (Lagging EMA removed).
-        if direction == 'CALL':
-            if not (eval_close > vwap and eval_close >= poc):
-                return None
-        # PUT me price VWAP aur POC ke niche accept hona chahiye (Lagging EMA removed).
-        else:
-            if not (eval_close < vwap and eval_close <= poc):
-                return None
+    # VALUE ACCEPTANCE RULE: Price must accept on the breakout side of VWAP & POC
+    if direction == 'CALL':
+        if not (eval_close > vwap and eval_close >= poc):
+            return None
     else:
-        # Stock ke liye base width ATR ka 72% se kam honi chahiye.
-        if comp_width > 0.72 * atr:
-            return None  # Loose base reject karo.
-        compression_pts = min(10.0, max(3.0, (0.72 - (comp_width / atr)) * 22.0))
-        # CALL me price VWAP aur POC ke upar hona chahiye (Lagging EMA removed).
-        if direction == 'CALL':
-            if not (eval_close > vwap and eval_close >= poc):
-                return None
-        # PUT me price VWAP aur POC ke niche hona chahiye (Lagging EMA removed).
-        else:
-            if not (eval_close < vwap and eval_close <= poc):
-                return None
+        if not (eval_close < vwap and eval_close <= poc):
+            return None
 
-    # [LINE 26] Value Area Acceptance bonus: CALL agar VAH ke upar breakout kare ya PUT VAL ke niche kare toh 10 pts, warna 6.5 pts.
-    profile_pts = 10.0 if (eval_close >= vah if direction == 'CALL' else eval_close <= val) else 6.5
+    # Base Compression Quality (Max 10 Points)
+    norm_base = 500.0 if sym_clean == 'BANKNIFTY' else (160.0 if is_idx else (0.75 * atr))
+    comp_ratio = comp_width / max(1.0, norm_base)
+    compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
+
+    # Value Area Acceptance (Max 10 Points)
+    if direction == 'CALL':
+        profile_pts = 10.0 if eval_close >= vah else 6.5
+    else:
+        profile_pts = 10.0 if eval_close <= val else 6.5
+
     p3_score = round(compression_pts + profile_pts, 2)
 
     # ========================================================================================
-    # PILLAR 5: PBD & Remaining ATR Fuel (Max: 10 Points)
+    # PILLAR 5: Remaining ATR Fuel / Trend Expansion (Max: 10 Points)
+    # PURE 100-POINT SCORING: Proportional fuel score, no arbitrary drop
     # ========================================================================================
-    # [LINE 27] Aaj ka kharch hua fuel: Day High - Day Low.
     fuel_spent = day_high - day_low
-    # [LINE 28] Bacha hua fuel (Remaining ATR): Daily ATR - Fuel Spent.
     remaining_atr = atr - fuel_spent
-    # [LINE 29] HARD VETO: Stock me kam se kam 18 pts ya 35% ATR fuel unspent bacha hona chahiye (exhausted stock me entry mana hai).
-    if not is_idx:
-        if remaining_atr < max(18.0, 0.35 * atr):
-            return None
+    fuel_ratio = remaining_atr / max(1.0, atr)
+    if remaining_atr > 0:
+        p5_score = round(min(10.0, max(3.0, fuel_ratio * 12.5)), 2)
     else:
-        if remaining_atr < 0.35 * atr:
-            return None
-
-    # [LINE 30] Pillar 5 Score: Remaining ATR fuel ratio par 3 se 10 points.
-    p5_score = round(min(10.0, max(3.0, (remaining_atr / max(1.0, atr)) * 12.5)), 2)
+        p5_score = 4.0  # Trend expansion continuation score
 
     # [LINE 31] 4 Pillars ka Preliminary Score nikalo (Pillar 1 + 2 + 3 + 5 = Max 80 Points).
     # Baad me Stage 2 me Pillar 4 (OI Runway, Max 20 Points) judkar Final 100 Points banega.
@@ -825,11 +832,12 @@ class DailyAutonomousScreener:
         opt_action = 'BUY CALL (CE)' if direction == 'CALL' else 'BUY PUT (PE)'
 
         buffer_end_time = (ist_now + datetime.timedelta(minutes=4)).strftime('%I:%M:%S %p IST')
-        time_sl_time = (ist_now + datetime.timedelta(minutes=30)).strftime('%I:%M:%S %p IST')
+        time_sl_time = (ist_now + datetime.timedelta(minutes=15)).strftime('%I:%M:%S %p IST')
 
         opt_sl = float(opt['sl_price'])
         opt_tgt1 = float(opt['target_1'])
         opt_tgt2 = float(opt['target_2'])
+        fixed_spot_sl_str = "25.0 Pts" if is_idx else "10.0 Pts"
 
         pure_signal_msg = (
             f"🚀 <b>ALPHA 5-PILLAR INSTITUTIONAL TRADE</b>\n"
@@ -838,10 +846,10 @@ class DailyAutonomousScreener:
             f"⚡ <b>ACTION:</b> <b>{opt_action}</b>\n"
             f"📌 <b>CONTRACT:</b> <code>{contract}</code>\n"
             f"💵 <b>BUYING PRICE:</b> <b>Rs. {opt_entry:,.2f}</b>\n"
-            f"🛡️ <b>STOP LOSS:</b> <b>Rs. {opt_sl:,.2f}</b>\n"
+            f"🛡️ <b>STOP LOSS:</b> <b>Rs. {opt_sl:,.2f} (Spot SL: {fixed_spot_sl_str})</b>\n"
             f"🎯 <b>TARGET 1 (Lock Profit):</b> <b>Rs. {opt_tgt1:,.2f}</b>\n"
             f"🏆 <b>TARGET 2 (Jackpot):</b> <b>Rs. {opt_tgt2:,.2f}</b>\n"
-            f"⏱️ <b>STAGNANT TIME EXIT:</b> <b>{time_sl_time} (30-Min Stagnant Scratch)</b>\n"
+            f"⏱️ <b>15-MIN TIMEOUT SL:</b> <b>{time_sl_time} (Cut if Stagnant/Red)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏳ <b>4-MIN BUFFER VALID TILL:</b> <b>{buffer_end_time}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -319,28 +319,37 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
     atm_info = strike_data[atm_strike]
 
     score = 12.0
+    immediate_target_dist = 60.0 if (is_index and sym == 'BANKNIFTY') else (50.0 if is_index else 15.0)
     if direction == 'CALL':
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
         if tot_lower_pe_chg > 0: score += 4.0
         if atm_info.get('ce_chg_oi', 0.0) < 0 or tot_upper_ce_chg < 0: score += 4.0
-        max_upper_ce = max([strike_data[s]['ce_oi'] for s in upper_4], default=0.0)
-        if max_upper_ce > (2500.0 if is_index else 800.0):
-            wall_s = [s for s in upper_4 if strike_data[s]['ce_oi'] == max_upper_ce][0]
-            if strike_data[wall_s]['ce_oi'] > 3.0 * max(10.0, strike_data[wall_s]['pe_oi']) and strike_data[wall_s]['ce_vol'] < 0.8 * max_upper_ce:
-                return {'confluent': False, 'score': 0.0, 'reason': f'UNBREACHABLE_CALL_WALL_AT_{int(wall_s)}'}
-        return {'confluent': True, 'score': score, 'reason': 'CLEAR_RUNWAY'}
+        # Check if an immediate call wall sits right inside target zone (< immediate_target_dist)
+        immediate_upper = [s for s in upper_4 if (s - spot) <= immediate_target_dist]
+        if immediate_upper:
+            max_imm_ce = max([strike_data[s]['ce_oi'] for s in immediate_upper], default=0.0)
+            wall_thresh = 50000.0 if is_index else 2500.0
+            if max_imm_ce > wall_thresh:
+                w_s = [s for s in immediate_upper if strike_data[s]['ce_oi'] == max_imm_ce][0]
+                if strike_data[w_s]['ce_oi'] > 4.0 * max(10.0, strike_data[w_s]['pe_oi']) and strike_data[w_s]['ce_vol'] < 0.3 * max_imm_ce:
+                    # Heavy wall right at doorstep: lower Pillar 4 score, but let 100-pt engine decide
+                    return {'confluent': True, 'score': 6.0, 'reason': f'CALL_WALL_RESISTANCE_AT_{int(w_s)}'}
+        return {'confluent': True, 'score': min(20.0, score), 'reason': 'CLEAR_RUNWAY'}
     else:
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
         if tot_upper_ce_chg > 0: score += 4.0
         if atm_info.get('pe_chg_oi', 0.0) < 0 or tot_lower_pe_chg < 0: score += 4.0
-        max_lower_pe = max([strike_data[s]['pe_oi'] for s in lower_4], default=0.0)
-        if max_lower_pe > (2500.0 if is_index else 800.0):
-            wall_s = [s for s in lower_4 if strike_data[s]['pe_oi'] == max_lower_pe][0]
-            if strike_data[wall_s]['pe_oi'] > 3.0 * max(10.0, strike_data[wall_s]['ce_oi']) and strike_data[wall_s]['pe_vol'] < 0.8 * max_lower_pe:
-                return {'confluent': False, 'score': 0.0, 'reason': f'UNBREACHABLE_PUT_WALL_AT_{int(wall_s)}'}
-        return {'confluent': True, 'score': score, 'reason': 'CLEAR_RUNWAY'}
+        immediate_lower = [s for s in lower_4 if (spot - s) <= immediate_target_dist]
+        if immediate_lower:
+            max_imm_pe = max([strike_data[s]['pe_oi'] for s in immediate_lower], default=0.0)
+            wall_thresh = 50000.0 if is_index else 2500.0
+            if max_imm_pe > wall_thresh:
+                w_s = [s for s in immediate_lower if strike_data[s]['pe_oi'] == max_imm_pe][0]
+                if strike_data[w_s]['pe_oi'] > 4.0 * max(10.0, strike_data[w_s]['ce_oi']) and strike_data[w_s]['pe_vol'] < 0.3 * max_imm_pe:
+                    return {'confluent': True, 'score': 6.0, 'reason': f'PUT_WALL_RESISTANCE_AT_{int(w_s)}'}
+        return {'confluent': True, 'score': min(20.0, score), 'reason': 'CLEAR_RUNWAY'}
 
 
 class ActiveOptionTrade:
@@ -372,32 +381,21 @@ class ActiveOptionTrade:
         self.max_fav_pts = 0.0
         self.max_adv_pts = 0.0
 
-        # [LINE 2] DECOUPLED POINT TARGETS (Index aur Stock ke liye fixed point targets):
+        # [LINE 2] STRICT USER SPECIFICATIONS: Fixed 25.0 Pts on Index, Fixed 10.0 Pts on Stocks
         if self.is_idx:
+            # Index Spot SL strictly fixed to 25.0 points
+            self.spot_sl = 25.0
             if self.sym == 'BANKNIFTY':
-                # BankNifty: SL = 60 pts, T1 = 120 pts, T2 = 240 pts
-                self.spot_sl = 60.0
-                self.spot_t1 = 120.0
-                self.spot_t2 = 240.0
-            elif self.sym in ['NIFTY', 'FINNIFTY']:
-                # Nifty / FinNifty: SL = 40 pts, T1 = 85 pts, T2 = 150 pts
-                self.spot_sl = 40.0
-                self.spot_t1 = 85.0
-                self.spot_t2 = 150.0
-            elif self.sym == 'MIDCPNIFTY':
-                # MidcpNifty: SL = 30 pts, T1 = 65 pts, T2 = 130 pts
-                self.spot_sl = 30.0
-                self.spot_t1 = 65.0
-                self.spot_t2 = 130.0
+                self.spot_t1 = 60.0
+                self.spot_t2 = 180.0
             else:
-                self.spot_sl = 35.0
-                self.spot_t1 = 70.0
-                self.spot_t2 = 140.0
+                self.spot_t1 = 50.0
+                self.spot_t2 = 120.0
         else:
-            # Stock Decoupled Targets: SL = 0.26 ATR (min 8 pts), T1 = 0.55 ATR (min 22 pts), T2 = 1.15 ATR (min 50 pts)
-            self.spot_sl = max(8.0, round(self.atr * 0.26, 2))
-            self.spot_t1 = max(22.0, round(self.atr * 0.55, 2))
-            self.spot_t2 = max(50.0, round(self.atr * 1.15, 2))
+            # Stock Spot SL strictly fixed to 10.0 points
+            self.spot_sl = 10.0
+            self.spot_t1 = 15.0
+            self.spot_t2 = 35.0
 
         # [LINE 3] ATM Strike Price aur Contract Name fix karo (Stocks me 50/100 strike step, Index me 50/100).
         step = 50.0 if not self.is_idx else (100.0 if self.is_bank else 50.0)
@@ -469,21 +467,19 @@ class ActiveOptionTrade:
             return
 
         # ====================================================================================
-        # CASE 2: Breakeven Shield Exit Check (Armed on prior bar, but T1 not hit)
-        # Trigger ONLY on a 3-minute candle close (cur_gain <= 0.35 * spot_sl), NEVER on intra-candle wick!
+        # CASE 2: Breakeven Protection at Cost (Armed on prior bar after +1.0R move)
+        # Trigger on candle close returning to cost (cur_gain <= 0.0). No premature +0.35R strangle!
         # ====================================================================================
         if self.breakeven_armed:
-            be_pts = round(self.spot_sl * 0.35, 2)
-            locked_be = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
-            if cur_gain <= be_pts:
-                self.spot_exit = locked_be
-                self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
+            if cur_gain <= 0.0:
+                self.spot_exit = self.spot_entry
+                self.exit_reason = "BREAKEVEN_EXIT"
                 self.exit_time = ts
                 self.is_closed = True
                 return
 
         # ====================================================================================
-        # CASE 3: Full Stop-Loss Hit (Only if Breakeven NOT armed and T1 NOT hit)
+        # CASE 3: Full Stop-Loss Hit (Fixed 25 Pts Index / 10 Pts Stock)
         # ====================================================================================
         if not self.breakeven_armed:
             if adv_move >= self.spot_sl:
@@ -510,7 +506,6 @@ class ActiveOptionTrade:
             self.breakeven_armed = True
             if fav_move > self.max_fav_pts:
                 self.max_fav_pts = fav_move
-            # RETURN IMMEDIATELY so trailing stop is only checked starting from next bar!
             return
 
         # ====================================================================================
@@ -524,12 +519,13 @@ class ActiveOptionTrade:
             self.max_fav_pts = fav_move
 
         # ====================================================================================
-        # CASE 6: 30-Minute Stagnant Scratch (10 bars / 30 mins)
+        # CASE 6: 15-MINUTE TIMEOUT SL (5 bars / 15 mins)
+        # If after 15 minutes price is stagnant or red (cur_gain <= 0.0), cut immediately!
         # ====================================================================================
-        if not self.breakeven_armed and not self.t1_hit:
-            if self.step >= 10 and cur_gain <= -(self.spot_sl * 0.25):
+        if not self.t1_hit:
+            if self.step >= 5 and cur_gain <= 0.0:
                 self.spot_exit = b_close
-                self.exit_reason = "30M_STAGNANT_SCRATCH"
+                self.exit_reason = "15M_TIMEOUT_SL"
                 self.exit_time = ts
                 self.is_closed = True
                 return
@@ -541,9 +537,8 @@ class ActiveOptionTrade:
                 self.spot_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
             elif self.breakeven_armed:
-                be_pts = round(self.spot_sl * 0.35, 2)
-                self.spot_exit = (self.spot_entry + be_pts) if self.direction == 'CALL' else (self.spot_entry - be_pts)
-                self.exit_reason = "BREAKEVEN_SHIELD_EXIT"
+                self.spot_exit = self.spot_entry
+                self.exit_reason = "BREAKEVEN_EXIT"
             else:
                 self.spot_exit = final_close
                 self.exit_reason = "EOD_EXIT"
@@ -755,7 +750,7 @@ if __name__ == "__main__":
                 
                 sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
                 if sig:
-                    target_dist = 220.0 if isym == 'BANKNIFTY' else 140.0
+                    target_dist = 60.0 if isym == 'BANKNIFTY' else 50.0
                     t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                     oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
                     if not oi_res.get('confluent', False):
@@ -785,7 +780,7 @@ if __name__ == "__main__":
 
                     sig = evaluate_common_5pillar_bar_slice(ssym, today_bars, stock_atr, regime, is_index=False)
                     if sig:
-                        target_dist = max(40.0, min(65.0, 0.85 * stock_atr))
+                        target_dist = 15.0
                         t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
                         if not oi_res.get('confluent', False):
