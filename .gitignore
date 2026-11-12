@@ -19,3 +19,8 @@ nse_data_cache/
 
 alpha_profile_oi_system.rar
 alpha_profile_oi_system.zip
+
+# Environment and sensitive secrets
+.env
+.env.*
+*.secret.json

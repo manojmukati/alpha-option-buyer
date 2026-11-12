@@ -27,6 +27,28 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else ""
 
     def load_config(self):
+        # 0. Securely load from git-ignored .env file if available (never hardcoded in code)
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        env_candidates = [
+            os.path.join(repo_root, ".env"),
+            os.path.join(os.path.dirname(self.config_path), ".env"),
+            ".env"
+        ]
+        for ep in env_candidates:
+            if os.path.exists(ep):
+                try:
+                    with open(ep, "r", encoding="utf-8") as env_f:
+                        for line in env_f:
+                            line = line.strip()
+                            if line and not line.startswith("#") and "=" in line:
+                                k, v = line.split("=", 1)
+                                k = k.strip()
+                                v = v.strip().strip("'\"")
+                                if k not in os.environ and v:
+                                    os.environ[k] = v
+                except Exception:
+                    pass
+
         # 1. Read directly from GitHub Secrets / Environment variables
         env_token = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
         env_owner = os.environ.get('TELEGRAM_CHAT_ID', '').strip()

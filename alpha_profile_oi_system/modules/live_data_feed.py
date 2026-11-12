@@ -31,6 +31,11 @@ import random
 import datetime
 import threading
 import requests
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -111,7 +116,10 @@ def _get_active_session() -> requests.Session:
     with _SESSION_LOCK:
         now = time.time()
         if _GLOBAL_SESSION is None or (now - _LAST_COOKIE_TIME > _COOKIE_TTL):
-            sess = requests.Session()
+            if HAS_CURL_CFFI:
+                sess = cffi_requests.Session(impersonate='chrome120')
+            else:
+                sess = requests.Session()
             base_headers = _get_next_headers()
             sess.headers.update(base_headers)
             try:
