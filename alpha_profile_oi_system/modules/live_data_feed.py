@@ -204,34 +204,32 @@ def fetch_bulk_nse_snapshot(force_refresh: bool = False) -> Dict[str, Dict[str, 
 
     result_map = {}
     
-    # 1. Fetch Equities Bulk
-    fno_sec_url = "https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O"
-    eq_data = _safe_nse_fetch(fno_sec_url, origin_url=NSE_HOME_URL)
+    # 1. Fetch Equities Bulk from NSE official underlying-information API
+    underlying_url = "https://www.nseindia.com/api/underlying-information"
+    origin_deriv = "https://www.nseindia.com/products-services/equity-derivatives-list-underlyings-information"
+    eq_data = _safe_nse_fetch(underlying_url, origin_url=origin_deriv)
     if eq_data and 'data' in eq_data:
-        for row in eq_data['data']:
+        underlyings = eq_data['data'].get('UnderlyingList', [])
+        for row in underlyings:
             sym = str(row.get('symbol', '')).strip().upper()
             if sym:
-                last_p = clean_num(row.get('lastPrice', 0.0))
-                open_p = clean_num(row.get('open', last_p))
-                high_p = clean_num(row.get('dayHigh', last_p))
-                low_p = clean_num(row.get('dayLow', last_p))
-                prev_c = clean_num(row.get('previousClose', last_p))
-                pct_chg = clean_num(row.get('pChange', 0.0))
-                tot_v = clean_num(row.get('totalTradedVolume', 0.0))
-                tot_val = clean_num(row.get('totalTradedValue', 0.0))
                 result_map[sym] = {
                     'symbol': sym,
-                    'live_spot': last_p,
-                    'close': last_p,
-                    'open': open_p,
-                    'high': high_p,
-                    'low': low_p,
-                    'previous_close': prev_c,
-                    'pct_change': pct_chg,
-                    'volume': tot_v,
-                    'turnover_cr': round(tot_val / 1e7, 2),
                     'is_index': False
                 }
+    else:
+        # Fallback to fno_universe_cache or bhavcopy_latest_oi if NSE is unreachable
+        fb_cache_p = os.path.join(SYSTEM_ROOT, "modules", "fno_universe_cache.json")
+        if os.path.exists(fb_cache_p):
+            try:
+                with open(fb_cache_p, 'r', encoding='utf-8') as f:
+                    u_list = json.load(f)
+                    for item in u_list:
+                        s = (item.get('symbol') if isinstance(item, dict) else str(item)).strip().upper()
+                        if s:
+                            result_map[s] = {'symbol': s, 'is_index': False}
+            except Exception:
+                pass
 
     # 2. Fetch Indices Bulk
     idx_data = _safe_nse_fetch(NSE_INDICES_URL, origin_url=NSE_HOME_URL)
@@ -276,7 +274,26 @@ def fetch_bulk_nse_snapshot(force_refresh: bool = False) -> Dict[str, Dict[str, 
 
 
 def _get_bhavcopy_oi_fallback(sym_clean: str, is_index: bool = False) -> Optional[Dict[str, Any]]:
-    """Reads official NSE Bhavcopy parquet cache as a resilient fallback if live NSE API is blocked/offline."""
+    """Reads official NSE Bhavcopy cache (JSON or Parquet) as a resilient fallback if live NSE API is blocked/offline."""
+    # 1. High-speed JSON fallback (committed in Git, 100% available on GitHub Actions)
+    json_path = os.path.join(SYSTEM_ROOT, "config", "bhavcopy_latest_oi.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                full_cache = json.load(f)
+                if sym_clean in full_cache:
+                    cached = full_cache[sym_clean]
+                    # Convert string strike keys to floats
+                    s_data = {float(k): v for k, v in cached.get('strike_data', {}).items()}
+                    return {
+                        'strike_data': s_data,
+                        'active_expiry': cached.get('active_expiry', ''),
+                        'lot_size': float(cached.get('lot_size', 25.0 if is_index else 250.0))
+                    }
+        except Exception:
+            pass
+
+    # 2. Local parquet files fallback
     bhav_dir = os.path.join(SYSTEM_ROOT, "bhavcopy_cache")
     bhav_files = glob.glob(os.path.join(bhav_dir, "*.parquet"))
     if not bhav_files:
@@ -389,7 +406,8 @@ class LiveMarketDataFeed:
             'FINNIFTY': 'NIFTY_FIN_SERVICE.NS',
             'NIFTY_FIN_SERVICE': 'NIFTY_FIN_SERVICE.NS',
             'MIDCPNIFTY': '^NSEMDCP50',
-            'NIFTY_MID_SELECT': '^NSEMDCP50'
+            'NIFTY_MID_SELECT': '^NSEMDCP50',
+            'NIFTYNXT50': '^NSMIDCP'
         }
         return yf_map.get(sym_clean, f"{sym_clean}.NS")
 

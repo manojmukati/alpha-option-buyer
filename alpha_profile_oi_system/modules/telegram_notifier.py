@@ -199,7 +199,17 @@ class TelegramNotifier:
                 if res.get("ok"):
                     print(f"[TELEGRAM DISPATCH SUCCESS for {cid}]")
                 else:
-                    print(f"[TELEGRAM DISPATCH WARNING for {cid}]: {res.get('description', res)}")
+                    warn_desc = str(res.get('description', ''))
+                    if "can't parse entities" in warn_desc.lower() or "bad request" in warn_desc.lower():
+                        clean_plain = re.sub(r'<[^>]+>', '', text)
+                        retry_resp = requests.post(url, json={"chat_id": cid, "text": clean_plain}, timeout=10)
+                        res = retry_resp.json()
+                        if res.get("ok"):
+                            print(f"[TELEGRAM PLAIN-TEXT FALLBACK SUCCESS for {cid}]")
+                        else:
+                            print(f"[TELEGRAM DISPATCH WARNING for {cid}]: {res.get('description', res)}")
+                    else:
+                        print(f"[TELEGRAM DISPATCH WARNING for {cid}]: {res.get('description', res)}")
             except Exception as e:
                 print(f"[TELEGRAM ERROR for {cid}]: {e}")
         return res

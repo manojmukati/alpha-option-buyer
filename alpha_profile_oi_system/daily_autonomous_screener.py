@@ -1467,7 +1467,7 @@ class DailyAutonomousScreener:
                         f"💰 <b>NET P&L:</b> <b>Rs. {net_pnl:+,.2f}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
-                    self.notifier.send_broadcast_message(exit_msg, is_trade_signal=False)
+                    self.notifier.send_broadcast_message(exit_msg, is_trade_signal=True)
 
             if updated_any:
                 df.to_csv(csv_path, index=False)
