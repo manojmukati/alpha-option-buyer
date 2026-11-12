@@ -420,7 +420,7 @@ class LiveMarketDataFeed:
         """Fast live asset quote retrieval from bulk NSE snapshot cache."""
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         bulk = fetch_bulk_nse_snapshot()
-        if sym_clean in bulk:
+        if sym_clean in bulk and bulk[sym_clean].get('live_spot'):
             return bulk[sym_clean]
         
         # Fallback to intraday bars close if not in bulk snapshot
@@ -615,18 +615,20 @@ class LiveMarketDataFeed:
             data_url = NSE_OC_DATA_URL.format(type=type_str, symbol=sym_clean, expiry=active_expiry)
             chain_resp = _safe_nse_fetch(data_url, origin_url=NSE_OC_PAGE_URL)
 
-            if chain_resp and 'data' in chain_resp:
-                package = {
-                    'records': {
-                        'expiryDates': info_data['expiryDates'],
-                        'data': chain_resp.get('data', []),
-                        'strikePrices': chain_resp.get('strikePrices', []),
-                        'timestamp': chain_resp.get('timestamp', '')
+            if chain_resp:
+                raw_data = chain_resp.get('data') or chain_resp.get('records', {}).get('data', [])
+                if raw_data:
+                    package = {
+                        'records': {
+                            'expiryDates': info_data['expiryDates'],
+                            'data': raw_data,
+                            'strikePrices': chain_resp.get('strikePrices') or chain_resp.get('records', {}).get('strikePrices', []),
+                            'timestamp': chain_resp.get('timestamp') or chain_resp.get('records', {}).get('timestamp', '')
+                        }
                     }
-                }
-                self._oc_cache[sym_clean] = package
-                self._last_oc_fetch[sym_clean] = time.time()
-                return package
+                    self._oc_cache[sym_clean] = package
+                    self._last_oc_fetch[sym_clean] = time.time()
+                    return package
 
         return None
 
