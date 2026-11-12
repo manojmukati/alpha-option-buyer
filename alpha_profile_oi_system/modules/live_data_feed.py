@@ -853,16 +853,16 @@ class LiveMarketDataFeed:
         if is_index:
             # Strictly Fixed 25.0 Points Spot Stop Loss on Index
             spot_sl = 25.0
-            spot_t1 = 60.0 if sym_clean == 'BANKNIFTY' else 50.0
-            spot_t2 = 180.0 if sym_clean == 'BANKNIFTY' else 120.0
+            spot_t1 = 50.0 if sym_clean == 'BANKNIFTY' else 45.0
+            spot_t2 = 140.0 if sym_clean == 'BANKNIFTY' else 90.0
             sl_pts = round(max(8.0, spot_sl * 0.50), 2)   # ~12.5 pts Option SL
             t1_pts = round(spot_t1 * 0.55, 2)
             t2_pts = round(spot_t2 * 0.65, 2)
         else:
             # Strictly Fixed 10.0 Points Spot Stop Loss on Stocks
             spot_sl = 10.0
-            spot_t1 = 15.0
-            spot_t2 = 35.0
+            spot_t1 = 12.0
+            spot_t2 = 25.0
             sl_pts = round(max(1.5, spot_sl * 0.50), 2)   # ~5.0 pts Option SL
             t1_pts = round(spot_t1 * 0.55, 2)
             t2_pts = round(spot_t2 * 0.65, 2)

@@ -386,19 +386,19 @@ class ActiveOptionTrade:
             # Index Spot SL strictly fixed to 25.0 points
             self.spot_sl = 25.0
             if self.sym == 'BANKNIFTY':
-                self.spot_t1 = 60.0
-                self.spot_t2 = 180.0
-            else:
                 self.spot_t1 = 50.0
-                self.spot_t2 = 120.0
+                self.spot_t2 = 140.0
+            else:
+                self.spot_t1 = 45.0
+                self.spot_t2 = 90.0
         else:
             # Stock Spot SL strictly fixed to 10.0 points
             self.spot_sl = 10.0
-            self.spot_t1 = 15.0
-            self.spot_t2 = 35.0
+            self.spot_t1 = 12.0
+            self.spot_t2 = 25.0
 
-        # [LINE 3] ATM Strike Price aur Contract Name fix karo (Stocks me 50/100 strike step, Index me 50/100).
-        step = 50.0 if not self.is_idx else (100.0 if self.is_bank else 50.0)
+        # Exact NSE Strike Slabs via determine_step_size
+        step = determine_step_size(self.spot_entry, is_index=self.is_idx, symbol=self.sym)
         self.atm_strike = round(self.spot_entry / step) * step
         self.opt_type = 'CE' if self.direction == 'CALL' else 'PE'
         stk_str = f"{int(self.atm_strike)}" if self.atm_strike == int(self.atm_strike) else f"{self.atm_strike:.1f}"
@@ -450,12 +450,10 @@ class ActiveOptionTrade:
                 self.max_fav_pts = max(self.max_fav_pts, fav_move)
                 return
 
-            # Check 70% trailing stop using previous bar's peak (prev_max_fav)
-            lock_pts = round(max(self.spot_t1 * 0.70, prev_max_fav * 0.70), 2)
-            locked_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
-            sl_breached = (b_low <= locked_exit) if self.direction == 'CALL' else (b_high >= locked_exit)
-            if sl_breached or cur_gain <= lock_pts:
-                self.spot_exit = locked_exit
+            # Trailing stop on candle close: lock profit at 60% of peak, with min lock at 50% of T1
+            lock_pts = round(max(self.spot_t1 * 0.50, prev_max_fav * 0.60), 2)
+            if cur_gain <= lock_pts:
+                self.spot_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
                 self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
                 self.exit_time = ts
                 self.is_closed = True
@@ -693,6 +691,10 @@ if __name__ == "__main__":
     stock_syms = [s for s in asset_data.keys() if s not in INDEX_NAMES]
     all_closed_trades = []
 
+    SCORE_THRESHOLD = 80.0
+    MAX_INDEX_PER_SLAB = 1
+    MAX_STOCKS_PER_SLAB = 1
+
     print(f"Loaded {len(asset_data)} active assets ({len(stock_syms)} equities, {len(INDEX_NAMES)} indices).")
     print(f"Authoritative 5-Day Backtest Window: {unique_dates}")
 
@@ -708,13 +710,15 @@ if __name__ == "__main__":
 
         active_trades = []
         daily_traded_symbols = set()
+        m_idx_count, m_stk_count = 0, 0
+        a_idx_count, a_stk_count = 0, 0
         time_index = nifty_day.index
 
         for b_idx in range(len(time_index)):
             curr_t = time_index[b_idx]
             tot_m = curr_t.hour * 60 + curr_t.minute
-            is_m = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
-            is_a = (795 <= tot_m <= 855)   # 01:15 to 02:15 PM IST
+            is_m = (576 <= tot_m <= 615)   # 09:36 to 10:15 AM IST
+            is_a = (798 <= tot_m <= 855)   # 01:18 to 02:15 PM IST
 
             # 1. Update Open Active Trades Concurrently
             for tr in active_trades:
@@ -731,46 +735,48 @@ if __name__ == "__main__":
             if not (is_m or is_a):
                 continue
 
-            regime = get_nifty_regime(nifty_day, b_idx)
-            act_stocks = sum(1 for t in active_trades if (not t.is_closed and not t.is_idx))
-            act_broad = sum(1 for t in active_trades if (not t.is_closed and t.is_idx and not t.is_bank))
-            act_bank = sum(1 for t in active_trades if (not t.is_closed and t.is_bank))
+            # Slab caps: 1 Index + 1 Stock per slab
+            cur_idx_count = m_idx_count if is_m else a_idx_count
+            cur_stk_count = m_stk_count if is_m else a_stk_count
+            if cur_idx_count >= MAX_INDEX_PER_SLAB and cur_stk_count >= MAX_STOCKS_PER_SLAB:
+                continue
 
+            regime = get_nifty_regime(nifty_day, b_idx)
             candidates = []
 
             # A. Index Candidates (MAX_INDEX_PER_SLAB = 1)
-            for isym in INDEX_NAMES:
-                if isym in daily_traded_symbols or isym not in asset_data:
-                    continue
-                idf = asset_data[isym]
-                today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
-                if len(today_bars) < 7:
-                    continue
-                idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
-                
-                sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
-                if sig:
-                    target_dist = 60.0 if isym == 'BANKNIFTY' else 50.0
-                    t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
-                    oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
-                    if not oi_res.get('confluent', False):
+            if cur_idx_count < MAX_INDEX_PER_SLAB:
+                for isym in INDEX_NAMES:
+                    if isym in daily_traded_symbols or isym not in asset_data:
                         continue
-                    sig['oi_confluent'] = True
-                    oi_score = float(oi_res.get('score', 12.0))
-                    total_score = round(sig['prelim_score'] + oi_score, 2)
-                    if total_score < 70.0:
+                    idf = asset_data[isym]
+                    today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
+                    if len(today_bars) < 7:
                         continue
-                    sig['score'] = total_score
-                    candidates.append(sig)
+                    idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
+                    
+                    sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
+                    if sig:
+                        t_dist = 50.0 if isym == 'BANKNIFTY' else 45.0
+                        t_price = (sig['entry_price'] + t_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - t_dist)
+                        oi_res = verify_bhavcopy_oi_confluence(isym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=True)
+                        if not oi_res.get('confluent', False):
+                            continue
+                        sig['oi_confluent'] = True
+                        oi_score = float(oi_res.get('score', 12.0))
+                        total_score = round(sig['prelim_score'] + oi_score, 2)
+                        if total_score >= SCORE_THRESHOLD:
+                            sig['score'] = total_score
+                            candidates.append(sig)
 
-            # B. Stock Candidates (MAX_STOCKS_PER_SLAB = 2)
-            if act_stocks < MAX_ACTIVE_STOCKS:
+            # B. Stock Candidates (MAX_STOCKS_PER_SLAB = 1)
+            if cur_stk_count < MAX_STOCKS_PER_SLAB:
                 for ssym in stock_syms:
                     if ssym in daily_traded_symbols or ssym not in asset_data:
                         continue
                     lot_sz = lot_map.get(ssym, 0)
                     if lot_sz <= 0:
-                        continue  # Reject symbol with unknown/invalid lot size
+                        continue
 
                     sdf = asset_data[ssym]
                     today_bars = sdf[(sdf.index.date == d) & (sdf.index <= curr_t)]
@@ -780,18 +786,17 @@ if __name__ == "__main__":
 
                     sig = evaluate_common_5pillar_bar_slice(ssym, today_bars, stock_atr, regime, is_index=False)
                     if sig:
-                        target_dist = 15.0
-                        t_price = (sig['entry_price'] + target_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - target_dist)
+                        t_dist = 12.0
+                        t_price = (sig['entry_price'] + t_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - t_dist)
                         oi_res = verify_bhavcopy_oi_confluence(ssym, d, sig['entry_price'], sig['direction'], target_price=t_price, is_index=False)
                         if not oi_res.get('confluent', False):
                             continue
                         sig['oi_confluent'] = True
                         oi_score = float(oi_res.get('score', 12.0))
                         total_score = round(sig['prelim_score'] + oi_score, 2)
-                        if total_score < 70.0:
-                            continue
-                        sig['score'] = total_score
-                        candidates.append(sig)
+                        if total_score >= SCORE_THRESHOLD:
+                            sig['score'] = total_score
+                            candidates.append(sig)
 
             # Sort combined candidates by 100-point 5-Pillar Score
             candidates.sort(key=lambda x: x['score'], reverse=True)
@@ -799,37 +804,28 @@ if __name__ == "__main__":
             # Dispatch new trades into available slots
             for cand in candidates:
                 is_i = cand.get('is_index', False)
-                is_b = (cand['symbol'] == 'BANKNIFTY')
-                if is_i:
-                    if is_b and act_bank >= MAX_ACTIVE_BANK_INDEX:
-                        continue
-                    if (not is_b) and act_broad >= MAX_ACTIVE_BROAD_INDEX:
-                        continue
-                else:
-                    if act_stocks >= MAX_ACTIVE_STOCKS:
-                        continue
+                if is_i and (m_idx_count >= MAX_INDEX_PER_SLAB if is_m else a_idx_count >= MAX_INDEX_PER_SLAB):
+                    continue
+                if (not is_i) and (m_stk_count >= MAX_STOCKS_PER_SLAB if is_m else a_stk_count >= MAX_STOCKS_PER_SLAB):
+                    continue
 
                 new_trade = ActiveOptionTrade(cand, b_idx, curr_t, lot_map)
                 active_trades.append(new_trade)
                 daily_traded_symbols.add(cand['symbol'])
                 if is_i:
-                    if is_b:
-                        act_bank += 1
-                    else:
-                        act_broad += 1
+                    if is_m: m_idx_count += 1
+                    else: a_idx_count += 1
                 else:
-                    act_stocks += 1
+                    if is_m: m_stk_count += 1
+                    else: a_stk_count += 1
 
         # End of day: close remaining active trades
         for tr in active_trades:
             if not tr.is_closed:
                 df_asset = asset_data[tr.sym]
                 today_asset = df_asset[df_asset.index.date == d]
-                if len(today_asset) > 0:
-                    final_close = float(today_asset.iloc[-1]['close'])
-                    tr.close_eod(final_close, today_asset.index[-1])
-                else:
-                    tr.close_eod(tr.spot_entry, curr_t)
+                final_close = float(today_asset.iloc[-1]['close']) if len(today_asset) > 0 else tr.spot_entry
+                tr.close_eod(final_close, today_asset.index[-1] if len(today_asset) > 0 else curr_t)
                 all_closed_trades.append(tr)
 
     summaries = [tr.get_summary(str(tr.cand['eval_time'].date())) for tr in all_closed_trades]
