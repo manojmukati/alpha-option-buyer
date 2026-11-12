@@ -368,7 +368,11 @@ class ActiveOptionTrade:
         # [LINE 1] Candidate signal details store karo (Symbol, Direction, Entry Spot Price, Evaluation Time).
         self.cand = cand
         self.entry_idx = b_idx
-        self.entry_time = curr_t
+        self.signal_time = curr_t
+        self.lead_buffer = "4 Min"
+        # 4-minute manual entry buffer: trader receives signal and executes with 4-min lead
+        self.entry_time = curr_t + datetime.timedelta(minutes=4)
+        self.time_sl_time = self.entry_time + datetime.timedelta(minutes=15)
         self.sym = cand['symbol']
         self.direction = cand['direction']
         self.spot_entry = float(cand['entry_price'])
@@ -379,7 +383,7 @@ class ActiveOptionTrade:
         self.is_closed = False
         self.spot_exit = self.spot_entry
         self.exit_reason = None
-        self.exit_time = curr_t
+        self.exit_time = self.entry_time
         self.t1_hit = False
         self.breakeven_armed = False
         self.max_fav_pts = 0.0
@@ -469,30 +473,45 @@ class ActiveOptionTrade:
             return
 
         # ====================================================================================
-        # CASE 2: Breakeven Protection at Cost (Armed on prior bar after +1.0R move)
-        # Trigger on candle close returning to cost (cur_gain <= 0.0). No premature +0.35R strangle!
+        # CASE 1: Trade ALREADY hit T1 on a previous bar (Check T2 then Trailing Profit Lock)
         # ====================================================================================
-        if self.breakeven_armed:
-            if cur_gain <= 0.0:
-                self.spot_exit = self.spot_entry
-                self.exit_reason = "BREAKEVEN_EXIT"
+        if self.t1_hit:
+            # Check T2 first
+            if fav_move >= self.spot_t2:
+                self.spot_exit = (self.spot_entry + self.spot_t2) if self.direction == 'CALL' else (self.spot_entry - self.spot_t2)
+                self.exit_reason = "TARGET_2_HIT (JACKPOT)"
+                self.exit_time = ts
+                self.is_closed = True
+                self.max_fav_pts = max(self.max_fav_pts, fav_move)
+                return
+
+            # Trailing stop on candle close: lock profit at 60% of peak, with min lock at 50% of T1
+            lock_pts = round(max(self.spot_t1 * 0.50, prev_max_fav * 0.60), 2)
+            if cur_gain <= lock_pts:
+                self.spot_exit = (self.spot_entry + lock_pts) if self.direction == 'CALL' else (self.spot_entry - lock_pts)
+                self.exit_reason = "T1_PROFIT_LOCKED_EXIT"
                 self.exit_time = ts
                 self.is_closed = True
                 return
 
-        # ====================================================================================
-        # CASE 3: Full Stop-Loss Hit (Fixed 25 Pts Index / 10 Pts Stock)
-        # ====================================================================================
-        if not self.breakeven_armed:
-            if adv_move >= self.spot_sl:
-                self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
-                self.exit_reason = "SL_HIT"
-                self.exit_time = ts
-                self.is_closed = True
-                return
+            # Trailing stop not breached: update max_fav_pts for current bar
+            if fav_move > self.max_fav_pts:
+                self.max_fav_pts = fav_move
+            return
 
         # ====================================================================================
-        # CASE 4: Reaching T1 for the FIRST TIME on current bar
+        # CASE 2: Full Stop-Loss Hit (Fixed 25 Pts Index / 10 Pts Stock)
+        # Strict hard stop protection against adverse momentum
+        # ====================================================================================
+        if adv_move >= self.spot_sl:
+            self.spot_exit = (self.spot_entry - self.spot_sl) if self.direction == 'CALL' else (self.spot_entry + self.spot_sl)
+            self.exit_reason = "SL_HIT"
+            self.exit_time = ts
+            self.is_closed = True
+            return
+
+        # ====================================================================================
+        # CASE 3: Reaching T1 or T2 for the FIRST TIME on current bar
         # ====================================================================================
         if fav_move >= self.spot_t1:
             if fav_move >= self.spot_t2:
@@ -503,26 +522,20 @@ class ActiveOptionTrade:
                 self.max_fav_pts = max(self.max_fav_pts, fav_move)
                 return
 
-            # Mark T1 hit and arm breakeven
+            # Mark T1 hit: position secured, lock trail for next bars
             self.t1_hit = True
-            self.breakeven_armed = True
             if fav_move > self.max_fav_pts:
                 self.max_fav_pts = fav_move
             return
-
-        # ====================================================================================
-        # CASE 5: Arm Breakeven for NEXT BAR (Once trade moves +1.0R in favor)
-        # ====================================================================================
-        if not self.breakeven_armed and fav_move >= self.spot_sl:
-            self.breakeven_armed = True
 
         # Update peak favorable move
         if fav_move > self.max_fav_pts:
             self.max_fav_pts = fav_move
 
         # ====================================================================================
-        # CASE 6: 15-MINUTE TIMEOUT SL (5 bars / 15 mins)
-        # If after 15 minutes price is stagnant or red (cur_gain <= 0.0), cut immediately!
+        # CASE 4: STRICT 15-MINUTE TIMEOUT SL (5 bars / 15 mins full gestation)
+        # Position is given full 15 minutes to mature! No premature kick-out in 6-9 minutes!
+        # If after full 15 minutes (step >= 5) price is stagnant or red (cur_gain <= 0.0), cut!
         # ====================================================================================
         if not self.t1_hit:
             if self.step >= 5 and cur_gain <= 0.0:
@@ -602,8 +615,10 @@ class ActiveOptionTrade:
         mfe_r = round((self.max_fav_pts * 0.60) / max(0.5, self.opt_sl_pts), 2)
         mae_r = round((self.max_adv_pts * 0.50) / max(0.5, self.opt_sl_pts), 2)
 
-        # Formatted Date Time Strings for Entry and Exit
-        en_dt_str = self.cand['eval_time'].strftime('%Y-%m-%d %H:%M:%S IST') if hasattr(self.cand['eval_time'], 'strftime') else str(self.cand['eval_time'])
+        # Formatted Date Time Strings for Entry, Exit, Signal and Buffer
+        sig_dt_str = self.signal_time.strftime('%Y-%m-%d %H:%M:%S IST') if hasattr(self.signal_time, 'strftime') else str(self.signal_time)
+        en_dt_str = self.entry_time.strftime('%Y-%m-%d %H:%M:%S IST') if hasattr(self.entry_time, 'strftime') else str(self.entry_time)
+        time_sl_str = self.time_sl_time.strftime('%Y-%m-%d %H:%M:%S IST') if hasattr(self.time_sl_time, 'strftime') else str(self.time_sl_time)
         ex_dt_str = self.exit_time.strftime('%Y-%m-%d %H:%M:%S IST') if hasattr(self.exit_time, 'strftime') else str(self.exit_time)
 
         # Precise Forensic Failure Analysis & Needed Correction
@@ -612,9 +627,9 @@ class ActiveOptionTrade:
         elif "T1" in self.exit_reason:
             forensic_reason = "SUCCESS_T1_PROFIT: Target 1 achieved (+0.85R to +1.70R); 70% trail profit lock executed cleanly."
         elif "BREAKEVEN" in self.exit_reason:
-            forensic_reason = "BREAKEVEN_SHIELD: Initial +1.0R burst achieved, capital 100% protected when momentum paused. Zero loss."
+            forensic_reason = "BREAKEVEN_SHIELD: Capital protected when momentum paused. Zero loss."
         elif "15M_TIMEOUT" in self.exit_reason or "TIMEOUT" in self.exit_reason:
-            forensic_reason = "15M_TIMEOUT_SL: Momentum stalled after initial +0.8R move. Rule protected capital against theta bleed (-0.08R). Execution perfect."
+            forensic_reason = "15M_TIMEOUT_SL: Stagnant after full 15-minute window. Protected capital against theta bleed. Execution disciplined."
         elif "SLOT_END" in self.exit_reason:
             if opt_pts > 0:
                 forensic_reason = "SLOT_END_PROFIT: Trade squared off in profit at trading slab boundary (10:15 AM / 14:15 PM). Zero midday chop holding risk."
@@ -639,7 +654,10 @@ class ActiveOptionTrade:
             'symbol': self.sym,
             'contract': self.contract_name,
             'direction': self.direction,
+            'signal_time_ist': sig_dt_str,
+            'lead_buffer': self.lead_buffer,
             'entry_date_time': en_dt_str,
+            'time_sl_ist': time_sl_str,
             'exit_date_time': ex_dt_str,
             'holding_mins': holding_mins,
             'spot_entry': self.spot_entry,
