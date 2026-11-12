@@ -94,14 +94,32 @@ def get_ist_time() -> datetime.datetime:
     return utc_now.astimezone(ist_tz)
 
 def clean_num(val, default=0.0):
-    """Safely parses float from raw data strings or numbers."""
+    """Safely parses float from raw data strings or numbers, handling Indian number units (K, L/Lakhs, Cr/Crores)."""
     if val is None:
         return default
     if isinstance(val, (int, float)):
         return float(val) if not np.isnan(val) else default
     try:
         s = str(val).replace(',', '').strip()
-        return float(s) if s else default
+        if not s or s == '-':
+            return default
+        import re
+        m = re.match(r'^([0-9\.\+\-]+)\s*([a-zA-Z]*)$', s)
+        if m:
+            num = float(m.group(1))
+            unit = m.group(2).upper()
+            if unit in ['K']:
+                return num * 1e3
+            elif unit in ['L', 'LAC', 'LAKH', 'LAKHS']:
+                return num * 1e5
+            elif unit in ['CR', 'CRORE', 'CRORES']:
+                return num * 1e7
+            elif unit in ['M', 'MN']:
+                return num * 1e6
+            elif unit in ['B', 'BN']:
+                return num * 1e9
+            return num
+        return float(s)
     except Exception:
         return default
 
@@ -666,22 +684,26 @@ class LiveMarketDataFeed:
                         continue
                     ce = item.get('CE', {})
                     pe = item.get('PE', {})
+                    nse_spot = clean_num(ce.get('underlyingValue') or pe.get('underlyingValue', 0.0))
+                    if nse_spot > 0.0:
+                        ref_spot = nse_spot
+
                     strike_data[stk] = {
                         'strike': stk,
-                        'ce_oi': float(ce.get('openInterest', 0.0) or 0.0),
-                        'ce_chg_oi': float(ce.get('changeinOpenInterest', 0.0) or 0.0),
-                        'ce_vol': float(ce.get('totalTradedVolume', 0.0) or 0.0),
+                        'ce_oi': clean_num(ce.get('openInterest', 0.0)),
+                        'ce_chg_oi': clean_num(ce.get('changeinOpenInterest', 0.0)),
+                        'ce_vol': clean_num(ce.get('totalTradedVolume', 0.0)),
                         'ce_ltp': clean_num(ce.get('lastPrice', 0.0)),
-                        'ce_bid': float(ce.get('buyPrice1', ce.get('bidprice', 0.0)) or 0.0),
-                        'ce_ask': float(ce.get('sellPrice1', ce.get('askPrice', 0.0)) or 0.0),
-                        'ce_iv': float(ce.get('impliedVolatility', 0.0) or 0.0),
-                        'pe_oi': float(pe.get('openInterest', 0.0) or 0.0),
-                        'pe_chg_oi': float(pe.get('changeinOpenInterest', 0.0) or 0.0),
-                        'pe_vol': float(pe.get('totalTradedVolume', 0.0) or 0.0),
+                        'ce_bid': clean_num(ce.get('buyPrice1', ce.get('bidprice', 0.0))),
+                        'ce_ask': clean_num(ce.get('sellPrice1', ce.get('askPrice', 0.0))),
+                        'ce_iv': clean_num(ce.get('impliedVolatility', 0.0)),
+                        'pe_oi': clean_num(pe.get('openInterest', 0.0)),
+                        'pe_chg_oi': clean_num(pe.get('changeinOpenInterest', 0.0)),
+                        'pe_vol': clean_num(pe.get('totalTradedVolume', 0.0)),
                         'pe_ltp': clean_num(pe.get('lastPrice', 0.0)),
-                        'pe_bid': float(pe.get('buyPrice1', pe.get('bidprice', 0.0)) or 0.0),
-                        'pe_ask': float(pe.get('sellPrice1', pe.get('askPrice', 0.0)) or 0.0),
-                        'pe_iv': float(pe.get('impliedVolatility', 0.0) or 0.0),
+                        'pe_bid': clean_num(pe.get('buyPrice1', pe.get('bidprice', 0.0))),
+                        'pe_ask': clean_num(pe.get('sellPrice1', pe.get('askPrice', 0.0))),
+                        'pe_iv': clean_num(pe.get('impliedVolatility', 0.0)),
                     }
 
         # 2. Resilient Fallback to offline official Bhavcopy parquet cache if live NSE API is blocked/unavailable
@@ -779,6 +801,7 @@ class LiveMarketDataFeed:
                 'score': score,
                 'reason': 'CLEAR_CALL_RUNWAY_AND_SUPPORT_WALL',
                 'atm_strike': atm_strike,
+                'live_spot': ref_spot,
                 'expiry_date': active_expiry,
                 'atm_info': atm_info,
                 'atm_ce_ltp': atm_info['ce_ltp'],
@@ -840,6 +863,7 @@ class LiveMarketDataFeed:
                 'score': score,
                 'reason': 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL',
                 'atm_strike': atm_strike,
+                'live_spot': ref_spot,
                 'expiry_date': active_expiry,
                 'atm_info': atm_info,
                 'atm_pe_ltp': atm_info['pe_ltp'],
