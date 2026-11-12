@@ -543,7 +543,7 @@ class ActiveOptionTrade:
                 self.exit_reason = "BREAKEVEN_EXIT"
             else:
                 self.spot_exit = final_close
-                self.exit_reason = "EOD_EXIT"
+                self.exit_reason = "SLOT_END_CLOSE"
             self.exit_time = ts
             self.is_closed = True
 
@@ -558,6 +558,8 @@ class ActiveOptionTrade:
             eff_delta = 0.50
         elif "SCRATCH" in self.exit_reason or "TIMEOUT" in self.exit_reason:
             eff_delta = 0.45
+        elif "SLOT_END" in self.exit_reason:
+            eff_delta = 0.50
         elif "SL" in self.exit_reason:
             eff_delta = 0.50
         else:
@@ -613,6 +615,11 @@ class ActiveOptionTrade:
             forensic_reason = "BREAKEVEN_SHIELD: Initial +1.0R burst achieved, capital 100% protected when momentum paused. Zero loss."
         elif "15M_TIMEOUT" in self.exit_reason or "TIMEOUT" in self.exit_reason:
             forensic_reason = "15M_TIMEOUT_SL: Momentum stalled after initial +0.8R move. Rule protected capital against theta bleed (-0.08R). Execution perfect."
+        elif "SLOT_END" in self.exit_reason:
+            if opt_pts > 0:
+                forensic_reason = "SLOT_END_PROFIT: Trade squared off in profit at trading slab boundary (10:15 AM / 14:15 PM). Zero midday chop holding risk."
+            else:
+                forensic_reason = "SLOT_END_SCRATCH: Trade squared off at trading slab boundary. Avoided midday lunch doldrums and theta burn."
         elif self.exit_reason == "SL_HIT":
             if self.sym == "BSE":
                 forensic_reason = "SL_HIT: Opening bar expansion reversal at 3524. Heavy ATM Call Writer supply absorbed breakout; ultra-high ATR (>Rs 120) triggered 10-pt SL. Needed Correction: Require 2nd bar delta confirmation on ultra-high ATR stocks."
@@ -782,17 +789,49 @@ if __name__ == "__main__":
             is_m = (576 <= tot_m <= 615)   # 09:36 to 10:15 AM IST
             is_a = (798 <= tot_m <= 855)   # 01:18 to 02:15 PM IST
 
-            # 1. Update Open Active Trades Concurrently
-            for tr in active_trades:
-                if not tr.is_closed:
-                    df_asset = asset_data[tr.sym]
-                    if curr_t in df_asset.index:
-                        b = df_asset.loc[curr_t]
-                        if isinstance(b, pd.DataFrame):
-                            b = b.iloc[0]
-                        tr.update(float(b['high']), float(b['low']), float(b['close']), curr_t)
-                        if tr.is_closed:
-                            all_closed_trades.append(tr)
+            # 1. ONLY update positions during our active designated trading slabs
+            if is_m or is_a:
+                for tr in active_trades:
+                    if not tr.is_closed:
+                        df_asset = asset_data[tr.sym]
+                        if curr_t in df_asset.index:
+                            b = df_asset.loc[curr_t]
+                            if isinstance(b, pd.DataFrame):
+                                b = b.iloc[0]
+                            tr.update(float(b['high']), float(b['low']), float(b['close']), curr_t)
+                            if tr.is_closed:
+                                all_closed_trades.append(tr)
+
+            # 2. Strict Trading Slab Boundary Square-Off:
+            # Morning slab ends at 10:15 AM (tot_m == 615): Close any morning trade still open!
+            if tot_m == 615:
+                for tr in active_trades:
+                    if not tr.is_closed:
+                        df_asset = asset_data[tr.sym]
+                        if curr_t in df_asset.index:
+                            b = df_asset.loc[curr_t]
+                            if isinstance(b, pd.DataFrame):
+                                b = b.iloc[0]
+                            b_close = float(b['close'])
+                        else:
+                            b_close = tr.spot_entry
+                        tr.close_eod(b_close, curr_t)
+                        all_closed_trades.append(tr)
+
+            # Afternoon slab ends at 14:15 PM (tot_m == 855): Close any afternoon trade still open!
+            if tot_m == 855:
+                for tr in active_trades:
+                    if not tr.is_closed:
+                        df_asset = asset_data[tr.sym]
+                        if curr_t in df_asset.index:
+                            b = df_asset.loc[curr_t]
+                            if isinstance(b, pd.DataFrame):
+                                b = b.iloc[0]
+                            b_close = float(b['close'])
+                        else:
+                            b_close = tr.spot_entry
+                        tr.close_eod(b_close, curr_t)
+                        all_closed_trades.append(tr)
 
             if not (is_m or is_a):
                 continue
