@@ -580,9 +580,9 @@ class ActiveOptionTrade:
 
         gross_opt_pts = round(spot_pts * eff_delta, 2)
 
-        # Holding duration in minutes
-        if hasattr(self.exit_time, '__sub__') and hasattr(self.cand['eval_time'], '__sub__'):
-            holding_mins = max(1, int((self.exit_time - self.cand['eval_time']).total_seconds() / 60.0))
+        # Holding duration in minutes from actual trade entry after 4-min lead buffer
+        if hasattr(self.exit_time, '__sub__') and hasattr(self.entry_time, '__sub__'):
+            holding_mins = max(1, int((self.exit_time - self.entry_time).total_seconds() / 60.0))
         else:
             holding_mins = max(1, self.step * 3)
 
@@ -811,6 +811,9 @@ if __name__ == "__main__":
             if is_m or is_a:
                 for tr in active_trades:
                     if not tr.is_closed:
+                        # Trade MUST only be evaluated on bars that close AFTER its entry time!
+                        if curr_t < tr.entry_time:
+                            continue
                         df_asset = asset_data[tr.sym]
                         if curr_t in df_asset.index:
                             b = df_asset.loc[curr_t]
