@@ -245,10 +245,11 @@ def evaluate_index_call_slice(
     comp_rngs = comp_bars['high'] - comp_bars['low']
     median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
     idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
+    if idx_rvol < 1.2:
+        return None
     if idx_rvol >= 2.0: p1_score = 25.0
     elif idx_rvol >= 1.5: p1_score = 21.0
-    elif idx_rvol >= 1.2: p1_score = 17.0
-    else: p1_score = 10.0
+    else: p1_score = 17.0
 
     # PILLAR 2: True Range Delta & Multi-Bar CVD Flow
     bars_5 = df_slice.iloc[-6:-1]
@@ -261,11 +262,11 @@ def evaluate_index_call_slice(
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
 
-    if eval_bvc <= 0:
+    if eval_bvc <= 0 or bvc_cum_ratio <= 0:
         return None
 
     eval_pts = min(15.0, abs(eval_bvc) * 16.0)
-    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio > 0 else 3.0
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0)
     p2_score = round(eval_pts + cum_pts, 2)
 
     # PILLAR 3: Wyckoff Market Profile POC/VAH Acceptance
@@ -276,7 +277,7 @@ def evaluate_index_call_slice(
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
-    if not (eval_close > vwap and eval_close >= poc):
+    if not (eval_close > vwap and eval_close >= poc and eval_close >= vah):
         return None
 
     if (abs(eval_close - vwap) / vwap) > 0.022:
@@ -285,7 +286,7 @@ def evaluate_index_call_slice(
     norm_base = 500.0 if sym_clean == 'BANKNIFTY' else 160.0
     comp_ratio = comp_width / max(1.0, norm_base)
     compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
-    profile_pts = 10.0 if eval_close >= vah else 7.0
+    profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
     # PILLAR 5: Remaining ATR Fuel
@@ -411,10 +412,11 @@ def evaluate_index_put_slice(
     comp_rngs = comp_bars['high'] - comp_bars['low']
     median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
     idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
+    if idx_rvol < 1.2:
+        return None
     if idx_rvol >= 2.0: p1_score = 25.0
     elif idx_rvol >= 1.5: p1_score = 21.0
-    elif idx_rvol >= 1.2: p1_score = 17.0
-    else: p1_score = 10.0
+    else: p1_score = 17.0
 
     # PILLAR 2: True Range Delta & Multi-Bar CVD Flow
     bars_5 = df_slice.iloc[-6:-1]
@@ -427,11 +429,11 @@ def evaluate_index_put_slice(
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
 
-    if eval_bvc >= 0:
+    if eval_bvc >= 0 or bvc_cum_ratio >= 0:
         return None
 
     eval_pts = min(15.0, abs(eval_bvc) * 16.0)
-    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio < 0 else 3.0
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0)
     p2_score = round(eval_pts + cum_pts, 2)
 
     # PILLAR 3: Wyckoff Market Profile POC/VAL Acceptance
@@ -442,7 +444,7 @@ def evaluate_index_put_slice(
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
-    if not (eval_close < vwap and eval_close <= poc):
+    if not (eval_close < vwap and eval_close <= poc and eval_close <= val):
         return None
 
     if (abs(eval_close - vwap) / vwap) > 0.022:
@@ -451,7 +453,7 @@ def evaluate_index_put_slice(
     norm_base = 500.0 if sym_clean == 'BANKNIFTY' else 160.0
     comp_ratio = comp_width / max(1.0, norm_base)
     compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
-    profile_pts = 10.0 if eval_close <= val else 7.0
+    profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
     # PILLAR 5: Remaining ATR Fuel
@@ -589,14 +591,15 @@ def evaluate_stock_call_slice(
 
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
+    if real_rvol < 1.2 or turnover_cr < 1.0:
+        return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0
-    elif real_rvol >= 1.2: rvol_pts = 8.0
-    else: rvol_pts = 4.0
+    else: rvol_pts = 8.0
 
     if turnover_cr >= 2.5: turn_pts = 10.0
     elif turnover_cr >= 1.2: turn_pts = 7.0
-    else: turn_pts = 3.0
+    else: turn_pts = 4.0
     p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
 
     # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD Flow
@@ -610,11 +613,11 @@ def evaluate_stock_call_slice(
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
 
-    if eval_bvc <= 0:
+    if eval_bvc <= 0 or bvc_cum_ratio <= 0:
         return None
 
     eval_pts = min(15.0, abs(eval_bvc) * 16.0)
-    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio > 0 else 3.0
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0)
     p2_score = round(eval_pts + cum_pts, 2)
 
     # PILLAR 3: Wyckoff Market Profile POC/VAH Acceptance
@@ -626,7 +629,7 @@ def evaluate_stock_call_slice(
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
-    if not (eval_close > vwap and eval_close >= poc):
+    if not (eval_close > vwap and eval_close >= poc and eval_close >= vah):
         return None
 
     if (abs(eval_close - vwap) / vwap) > 0.022:
@@ -635,7 +638,7 @@ def evaluate_stock_call_slice(
     norm_base = 0.75 * atr
     comp_ratio = comp_width / max(1.0, norm_base)
     compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
-    profile_pts = 10.0 if eval_close >= vah else 7.0
+    profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
     # PILLAR 5: Remaining ATR Fuel
@@ -773,14 +776,15 @@ def evaluate_stock_put_slice(
 
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
+    if real_rvol < 1.2 or turnover_cr < 1.0:
+        return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0
-    elif real_rvol >= 1.2: rvol_pts = 8.0
-    else: rvol_pts = 4.0
+    else: rvol_pts = 8.0
 
     if turnover_cr >= 2.5: turn_pts = 10.0
     elif turnover_cr >= 1.2: turn_pts = 7.0
-    else: turn_pts = 3.0
+    else: turn_pts = 4.0
     p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
 
     # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD Flow
@@ -794,11 +798,11 @@ def evaluate_stock_put_slice(
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
 
-    if eval_bvc >= 0:
+    if eval_bvc >= 0 or bvc_cum_ratio >= 0:
         return None
 
     eval_pts = min(15.0, abs(eval_bvc) * 16.0)
-    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio < 0 else 3.0
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0)
     p2_score = round(eval_pts + cum_pts, 2)
 
     # PILLAR 3: Wyckoff Market Profile POC/VAL Acceptance
@@ -810,7 +814,7 @@ def evaluate_stock_put_slice(
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
-    if not (eval_close < vwap and eval_close <= poc):
+    if not (eval_close < vwap and eval_close <= poc and eval_close <= val):
         return None
 
     if (abs(eval_close - vwap) / vwap) > 0.022:
@@ -819,7 +823,7 @@ def evaluate_stock_put_slice(
     norm_base = 0.75 * atr
     comp_ratio = comp_width / max(1.0, norm_base)
     compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
-    profile_pts = 10.0 if eval_close <= val else 7.0
+    profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
     # PILLAR 5: Remaining ATR Fuel
@@ -1081,7 +1085,7 @@ class DailyAutonomousScreener:
         atr = self.get_stock_atr(sym_clean, live_q)
         regime = nifty_context or self.get_nifty_market_regime()
         live_spot = float(live_q.get('live_spot', df['close'].iloc[-1])) if live_q else float(df['close'].iloc[-1])
-        pct_change = float(live_q.get('pct_change', 0.0)) if live_q else None
+        pct_change = float(live_q['pct_change']) if (live_q and live_q.get('pct_change') is not None) else None
 
         # Dedicated 4-Function Stock Evaluation (Call then Put)
         cand = evaluate_stock_call_slice(sym_clean, df, atr, regime, live_spot_override=live_spot, pct_change_override=pct_change)
