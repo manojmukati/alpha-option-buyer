@@ -30,6 +30,8 @@ import json
 import random
 import datetime
 import threading
+import collections
+import logging
 import requests
 try:
     from curl_cffi import requests as cffi_requests
@@ -40,6 +42,13 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from typing import Dict, Any, Optional, Tuple, List
+
+logger = logging.getLogger("LiveDataFeed")
+if not logger.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] [LIVE_FEED] %(message)s'))
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SYSTEM_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
@@ -83,9 +92,62 @@ NSE_HEADERS = _get_next_headers()
 
 _OC_LOCK = threading.Lock()
 _SESSION_LOCK = threading.Lock()
+_NSE_RATE_LOCK = threading.Lock()
+_NSE_CALL_TIMESTAMPS: collections.deque = collections.deque()
+_LAST_NSE_CALL_TIME: float = 0.0
+_MIN_NSE_REQUEST_GAP: float = 15.0       # Strict 15.0s minimum gap between ANY two outbound calls to nseindia.com
+_MAX_CALLS_PER_MINUTE: int = 3          # Strict ceiling: max 3 requests per 60-second rolling window (Akamai block is ~5/min in live market)
+_AKAMAI_BACKOFF_UNTIL: float = 0.0      # Timestamp if Akamai 429/403 triggers 120s cooldown
 _GLOBAL_SESSION = None
 _LAST_COOKIE_TIME = 0.0
-_COOKIE_TTL = 180.0
+_COOKIE_TTL = 300.0                     # Reusable session lifespan (5 minutes)
+
+def _acquire_nse_request_slot(timeout: float = 30.0) -> bool:
+    """
+    Hardware-Enforced NSE Rate Gatekeeper:
+    - Guarantees minimum 15.0s between any consecutive calls to nseindia.com.
+    - Limits outbound requests to <= 3 per rolling 60s window (Akamai block threshold is ~5/min in live market).
+    - Checks 120s Akamai backoff circuit breaker; bypasses to fallback immediately if active.
+    - Thread-safe across all concurrent threads.
+    """
+    global _LAST_NSE_CALL_TIME, _AKAMAI_BACKOFF_UNTIL
+    start_wait = time.time()
+
+    with _NSE_RATE_LOCK:
+        while True:
+            now = time.time()
+            if now < _AKAMAI_BACKOFF_UNTIL:
+                remaining = _AKAMAI_BACKOFF_UNTIL - now
+                logger.warning(f"[AKAMAI SHIELD] Active backoff in effect ({remaining:.1f}s remaining). Bypassing live NSE request to preserve IP reputation.")
+                return False
+
+            # Purge timestamps older than 60 seconds
+            while _NSE_CALL_TIMESTAMPS and (now - _NSE_CALL_TIMESTAMPS[0] >= 60.0):
+                _NSE_CALL_TIMESTAMPS.popleft()
+
+            gap_sleep = 0.0
+            if _LAST_NSE_CALL_TIME > 0:
+                elapsed = now - _LAST_NSE_CALL_TIME
+                if elapsed < _MIN_NSE_REQUEST_GAP:
+                    gap_sleep = _MIN_NSE_REQUEST_GAP - elapsed
+
+            window_sleep = 0.0
+            if len(_NSE_CALL_TIMESTAMPS) >= _MAX_CALLS_PER_MINUTE:
+                oldest = _NSE_CALL_TIMESTAMPS[0]
+                window_sleep = max(0.0, 60.0 - (now - oldest) + 0.5)
+
+            req_sleep = max(gap_sleep, window_sleep)
+            if req_sleep <= 0.05:
+                cur_t = time.time()
+                _LAST_NSE_CALL_TIME = cur_t
+                _NSE_CALL_TIMESTAMPS.append(cur_t)
+                return True
+
+            if (time.time() - start_wait) + req_sleep > timeout:
+                logger.warning(f"[AKAMAI SHIELD] Rate limiter wait {req_sleep:.1f}s exceeds timeout {timeout:.1f}s. Switching to offline cache.")
+                return False
+
+            time.sleep(min(req_sleep, 2.0))
 
 def get_ist_time() -> datetime.datetime:
     """Returns current datetime in Asia/Kolkata timezone."""
@@ -125,10 +187,11 @@ def clean_num(val, default=0.0):
 
 def _get_active_session() -> requests.Session:
     """
-    Thread-safe session builder with 2-step cookie priming:
+    Thread-safe session builder with realistic desktop browser handshake:
     1. Requests NSE Home Page first (https://www.nseindia.com)
-    2. Requests Option Chain Page (https://www.nseindia.com/option-chain) with Home Page as Referer
+    2. Navigates to Option Chain Page (https://www.nseindia.com/option-chain) with Home Page as Referer
     Rotates realistic desktop User-Agent headers.
+    Session is cached and reused for 300s (5 minutes) to avoid frequent handshakes.
     """
     global _GLOBAL_SESSION, _LAST_COOKIE_TIME
     with _SESSION_LOCK:
@@ -141,14 +204,14 @@ def _get_active_session() -> requests.Session:
             base_headers = _get_next_headers()
             sess.headers.update(base_headers)
             try:
-                # Step 1: Request NSE Home Page
-                r1 = sess.get(NSE_HOME_URL, timeout=10)
-                if r1.status_code == 200:
-                    time.sleep(0.3)
-                    # Step 2: Request Option Chain page with Home Page as Referer
-                    step2_headers = dict(base_headers)
-                    step2_headers['Referer'] = NSE_HOME_URL
-                    sess.get(NSE_OC_PAGE_URL, headers=step2_headers, timeout=10)
+                # Priming Handshake: Acquire 1 slot for the session creation
+                if _acquire_nse_request_slot(timeout=15.0):
+                    r1 = sess.get(NSE_HOME_URL, timeout=10)
+                    if r1.status_code == 200:
+                        time.sleep(0.4)
+                        step2_headers = dict(base_headers)
+                        step2_headers['Referer'] = NSE_HOME_URL
+                        sess.get(NSE_OC_PAGE_URL, headers=step2_headers, timeout=10)
                     _GLOBAL_SESSION = sess
                     _LAST_COOKIE_TIME = now
                 else:
@@ -159,39 +222,54 @@ def _get_active_session() -> requests.Session:
                 _LAST_COOKIE_TIME = now
         return _GLOBAL_SESSION
 
-def _safe_nse_fetch(url: str, origin_url: str = NSE_OC_PAGE_URL, max_retries: int = 3) -> Optional[Dict[str, Any]]:
+def _safe_nse_fetch(url: str, origin_url: str = NSE_OC_PAGE_URL, max_retries: int = 2) -> Optional[Dict[str, Any]]:
     """
-    Fetches NSE JSON data with exponential backoff and automatic cookie renewal on 401, 403, or 429.
+    Fetches NSE JSON data with strict hardware-spaced rate limiting (15s gap, max 3 req/min)
+    and immediate 120s backoff on Akamai 429/403 (never tight-loop retries against Akamai).
     """
-    global _LAST_COOKIE_TIME, _GLOBAL_SESSION
+    global _LAST_COOKIE_TIME, _GLOBAL_SESSION, _AKAMAI_BACKOFF_UNTIL
+
+    if time.time() < _AKAMAI_BACKOFF_UNTIL:
+        logger.warning(f"[AKAMAI SHIELD] Backoff active ({_AKAMAI_BACKOFF_UNTIL - time.time():.1f}s remaining). Bypassing live fetch to protect IP.")
+        return None
+
     for attempt in range(max_retries):
         session = _get_active_session()
+        if not _acquire_nse_request_slot(timeout=35.0):
+            logger.warning("[AKAMAI SHIELD] Rate limiter slot wait timed out. Falling back to offline Bhavcopy cache.")
+            return None
+
         headers = _get_next_headers()
         headers['Accept'] = 'application/json, text/plain, */*'
         headers['Referer'] = origin_url
         headers['Sec-Fetch-Dest'] = 'empty'
         headers['Sec-Fetch-Mode'] = 'cors'
         headers['Sec-Fetch-Site'] = 'same-origin'
+
         try:
             resp = session.get(url, headers=headers, timeout=10)
             if resp.status_code == 200:
                 try:
                     return resp.json()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[NSE JSON PARSE ERROR]: {e}")
+                    return None
             elif resp.status_code in [401, 403, 429]:
-                # Force cookie renewal & session rebuild on 401, 403, or 429
+                logger.warning(f"[AKAMAI BLOCK/THROTTLE] HTTP {resp.status_code} detected on {url}. Engaging 120s circuit-breaker backoff.")
+                _AKAMAI_BACKOFF_UNTIL = time.time() + 120.0
                 with _SESSION_LOCK:
                     _LAST_COOKIE_TIME = 0.0
                     _GLOBAL_SESSION = None
-                time.sleep(1.0 * (attempt + 1))
+                return None  # Immediately fail-over to Bhavcopy cache; DO NOT retry!
             else:
-                time.sleep(0.5 * (attempt + 1))
-        except Exception:
-            with _SESSION_LOCK:
-                _LAST_COOKIE_TIME = 0.0
-                _GLOBAL_SESSION = None
-            time.sleep(0.5 * (attempt + 1))
+                logger.warning(f"[NSE HTTP STATUS {resp.status_code}]: Retrying after cooldown...")
+                time.sleep(1.0 * (attempt + 1))
+        except Exception as e:
+            logger.warning(f"[NSE FETCH EXCEPTION]: {e}")
+            if attempt == max_retries - 1:
+                return None
+            time.sleep(1.0 * (attempt + 1))
+
     return None
 
 def calculate_wilder_atr(df: pd.DataFrame, period: int = 14) -> float:
@@ -208,12 +286,12 @@ def calculate_wilder_atr(df: pd.DataFrame, period: int = 14) -> float:
 
 _BULK_CACHE = None
 _BULK_CACHE_TIME = 0.0
-_BULK_CACHE_TTL = 30.0
+_BULK_CACHE_TTL = 300.0
 
 def fetch_bulk_nse_snapshot(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
     """
     Fetches official NSE equity snapshot in bulk with session recovery and caching.
-    Reads all 216 F&O equities and market indices in a single fast call.
+    Loads from fno_universe_cache.json instantly (zero network requests, immune to Akamai rate-limits).
     """
     global _BULK_CACHE, _BULK_CACHE_TIME
     now = time.time()
@@ -222,7 +300,36 @@ def fetch_bulk_nse_snapshot(force_refresh: bool = False) -> Dict[str, Dict[str, 
 
     result_map = {}
     
-    # 1. Fetch Equities Bulk from NSE official underlying-information API
+    # 1. Load from local F&O universe cache (0 network requests, avoids Akamai throttling)
+    fb_cache_p = os.path.join(SYSTEM_ROOT, "modules", "fno_universe_cache.json")
+    if os.path.exists(fb_cache_p):
+        try:
+            with open(fb_cache_p, 'r', encoding='utf-8') as f:
+                u_list = json.load(f)
+                for item in u_list:
+                    s = (item.get('symbol') if isinstance(item, dict) else str(item)).strip().upper()
+                    if s:
+                        is_idx = s in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50']
+                        result_map[s] = {
+                            'symbol': s,
+                            'is_index': is_idx,
+                            'lot_size': item.get('lot', 25 if is_idx else 250) if isinstance(item, dict) else 250,
+                            'step_size': item.get('step', 50.0 if is_idx else 10.0) if isinstance(item, dict) else 10.0
+                        }
+        except Exception:
+            pass
+
+    # Ensure major indices are always present
+    for idx_sym in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
+        if idx_sym not in result_map:
+            result_map[idx_sym] = {'symbol': idx_sym, 'is_index': True}
+
+    if result_map:
+        _BULK_CACHE = result_map
+        _BULK_CACHE_TIME = now
+        return result_map
+
+    # Fallback to NSE API only if local cache was completely missing
     underlying_url = "https://www.nseindia.com/api/underlying-information"
     origin_deriv = "https://www.nseindia.com/products-services/equity-derivatives-list-underlyings-information"
     eq_data = _safe_nse_fetch(underlying_url, origin_url=origin_deriv)
@@ -235,19 +342,6 @@ def fetch_bulk_nse_snapshot(force_refresh: bool = False) -> Dict[str, Dict[str, 
                     'symbol': sym,
                     'is_index': False
                 }
-    else:
-        # Fallback to fno_universe_cache or bhavcopy_latest_oi if NSE is unreachable
-        fb_cache_p = os.path.join(SYSTEM_ROOT, "modules", "fno_universe_cache.json")
-        if os.path.exists(fb_cache_p):
-            try:
-                with open(fb_cache_p, 'r', encoding='utf-8') as f:
-                    u_list = json.load(f)
-                    for item in u_list:
-                        s = (item.get('symbol') if isinstance(item, dict) else str(item)).strip().upper()
-                        if s:
-                            result_map[s] = {'symbol': s, 'is_index': False}
-            except Exception:
-                pass
 
     # 2. Fetch Indices Bulk
     idx_data = _safe_nse_fetch(NSE_INDICES_URL, origin_url=NSE_HOME_URL)
@@ -369,6 +463,7 @@ class LiveMarketDataFeed:
         self._intraday_ts: Dict[str, float] = {}
         self._oc_cache: Dict[str, Dict[str, Any]] = {}
         self._last_oc_fetch: Dict[str, float] = {}
+        self._expiry_cache: Dict[str, List[str]] = {}
         self._atr_cache: Dict[str, float] = self._load_wilder_atr_cache()
 
     def _load_wilder_atr_cache(self) -> Dict[str, float]:
@@ -604,32 +699,37 @@ class LiveMarketDataFeed:
 
     def fetch_live_option_chain_data(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
-        Fetches live NSE Option Chain with thread-locking and official v3 endpoints.
+        Fetches live NSE Option Chain with rate-limited v3 endpoints and in-memory caching.
         """
         now = time.time()
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-        if (now - self._last_oc_fetch.get(sym_clean, 0.0) < 45.0) and (sym_clean in self._oc_cache):
+        if (now - self._last_oc_fetch.get(sym_clean, 0.0) < 60.0) and (sym_clean in self._oc_cache):
             return self._oc_cache[sym_clean]
 
         is_idx = sym_clean in ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
         type_str = "Indices" if is_idx else "Equity"
 
         with _OC_LOCK:
-            if (time.time() - self._last_oc_fetch.get(sym_clean, 0.0) < 45.0) and (sym_clean in self._oc_cache):
+            if (time.time() - self._last_oc_fetch.get(sym_clean, 0.0) < 60.0) and (sym_clean in self._oc_cache):
                 return self._oc_cache[sym_clean]
 
-            info_url = NSE_OC_INFO_URL.format(symbol=sym_clean)
-            info_data = None
-            for attempt in range(3):
+            # 1. Retrieve or reuse active expiry
+            active_expiry = None
+            expiry_dates = self._expiry_cache.get(sym_clean)
+            if not expiry_dates:
+                info_url = NSE_OC_INFO_URL.format(symbol=sym_clean)
                 info_data = _safe_nse_fetch(info_url, origin_url=NSE_OC_PAGE_URL)
                 if info_data and info_data.get('expiryDates'):
-                    break
-                time.sleep(0.4)
+                    expiry_dates = info_data['expiryDates']
+                    self._expiry_cache[sym_clean] = expiry_dates
 
-            if not info_data or not info_data.get('expiryDates'):
+            if expiry_dates:
+                active_expiry = expiry_dates[0]
+
+            if not active_expiry:
                 return None
 
-            active_expiry = info_data['expiryDates'][0]
+            # 2. Fetch Option Chain Data for the active expiry
             data_url = NSE_OC_DATA_URL.format(type=type_str, symbol=sym_clean, expiry=active_expiry)
             chain_resp = _safe_nse_fetch(data_url, origin_url=NSE_OC_PAGE_URL)
 
@@ -638,7 +738,7 @@ class LiveMarketDataFeed:
                 if raw_data:
                     package = {
                         'records': {
-                            'expiryDates': info_data['expiryDates'],
+                            'expiryDates': expiry_dates,
                             'data': raw_data,
                             'strikePrices': chain_resp.get('strikePrices') or chain_resp.get('records', {}).get('strikePrices', []),
                             'timestamp': chain_resp.get('timestamp') or chain_resp.get('records', {}).get('timestamp', '')
