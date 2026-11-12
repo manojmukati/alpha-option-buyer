@@ -162,33 +162,25 @@ def compute_bvc_cvd(df_bars: pd.DataFrame) -> Dict[str, Any]:
     return compute_bar_delta_proxy(df_bars)
 
 
-def evaluate_common_5pillar_bar_slice(
+def evaluate_index_call_slice(
     symbol: str,
     df_slice: pd.DataFrame,
     daily_atr: float,
     nifty_regime: Dict[str, Any],
     live_spot_override: Optional[float] = None,
-    pct_change_override: Optional[float] = None,
-    is_index: bool = False
+    pct_change_override: Optional[float] = None
 ) -> Optional[Dict[str, Any]]:
     """
     ========================================================================================
-    EXACT ALADDIN INSTITUTIONAL 5-PILLAR EVALUATION ENGINE (HINDI LINE-BY-LINE LOGIC COMMENTS)
-    Pillar 1: 25 Pts (RVOL >= 1.6x & Turnover >= 2.5 Cr for Stocks | Range-Expansion RVOL for Index)
-    Pillar 2: 25 Pts (True BVC Volume Delta & Multi-Bar CVD Flow - Direction Must Align)
-    Pillar 3: 20 Pts (Wyckoff Market Profile Acceptance: VWAP/POC & Base Compression <= 2.2% Extension)
-    Pillar 4: 20 Pts (Symmetric OI Runway & Short-Covering Unwind)
-    Pillar 5: 10 Pts (Remaining ATR Fuel >= 25% & Trend Decoupling)
-    Qualification Threshold: Total Score >= 80.0 / 100
-    Body Thrust Gate: Candle Thrust >= 0.65 (Rejection Wicks Eliminated)
+    MODULE 1: ALADDIN DEDICATED INDEX CALL ENGINE (NIFTY / BANKNIFTY / FINNIFTY / MIDCP)
+    Market Regime: Macro Bullish Expansion | Range RVOL & Delta Flow (Zero Cash Volume Dependency)
+    Qualification Threshold: Prelim Score >= 80.0 / 100 | Candle Thrust >= 0.65
     ========================================================================================
     """
     if df_slice is None or len(df_slice) < 7:
         return None
 
     sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-    is_idx = is_index or (sym_clean in INDEX_NAMES)
-
     comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
     eval_bar = df_slice.iloc[-2]
     live_bar = df_slice.iloc[-1]
@@ -200,7 +192,6 @@ def evaluate_common_5pillar_bar_slice(
     eval_open = float(eval_bar['open'])
     eval_high = float(eval_bar['high'])
     eval_low = float(eval_bar['low'])
-    eval_vol = float(eval_bar.get('volume', 0.0))
     bar_rng = max(0.01, eval_high - eval_low)
     live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
 
@@ -230,123 +221,72 @@ def evaluate_common_5pillar_bar_slice(
         is_a = (795 <= tot_m <= 855)
         if not (is_m or is_a):
             return None
-    else:
-        is_m, is_a = True, False
 
     comp_high = float(comp_bars['high'].max())
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
     # 1. Breakout Trigger
-    if eval_close > comp_high and eval_close > eval_open:
-        direction = 'CALL'
-    elif eval_close < comp_low and eval_close < eval_open:
-        direction = 'PUT'
-    else:
+    if not (eval_close > comp_high and eval_close > eval_open):
         return None
 
-    # 2. Breakout Body Thrust (Close must be strong in outer 35% of bar range)
-    candle_thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
+    # 2. Breakout Body Thrust
+    candle_thrust = (eval_close - eval_low) / bar_rng
     if candle_thrust < 0.65:
         return None
 
     # 3. Macro Nifty Alignment
-    if is_idx:
-        if direction == 'CALL' and not nifty_regime.get('allow_call', True):
-            return None
-        if direction == 'PUT' and not nifty_regime.get('allow_put', True):
-            return None
-    else:
-        if direction == 'CALL' and not nifty_regime.get('allow_stock_call', True):
-            return None
-        if direction == 'PUT' and not nifty_regime.get('allow_stock_put', True):
-            return None
-        if live_spot < MIN_STOCK_PRICE:
-            return None
-        if abs(pct_change) < 0.35 or abs(pct_change) > 4.20:
-            return None
+    if not nifty_regime.get('allow_call', True):
+        return None
 
-    # PILLAR 1: Institutional RVOL & Smart Money Volume (Max: 25)
-    hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
-    comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
-    base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
+    # PILLAR 1: Range-Expansion RVOL
+    comp_rngs = comp_bars['high'] - comp_bars['low']
+    median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
+    idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
+    if idx_rvol >= 2.0: p1_score = 25.0
+    elif idx_rvol >= 1.5: p1_score = 21.0
+    elif idx_rvol >= 1.2: p1_score = 17.0
+    else: p1_score = 10.0
 
-    if not is_idx:
-        turnover_cr = (eval_close * eval_vol) / 1e7
-        real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-        if real_rvol >= 2.2: rvol_pts = 15.0
-        elif real_rvol >= 1.6: rvol_pts = 12.0
-        elif real_rvol >= 1.2: rvol_pts = 8.0
-        else: rvol_pts = 4.0
-
-        if turnover_cr >= 2.5: turn_pts = 10.0
-        elif turnover_cr >= 1.2: turn_pts = 7.0
-        else: turn_pts = 3.0
-        p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
-    else:
-        comp_rngs = comp_bars['high'] - comp_bars['low']
-        median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
-        idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
-        real_rvol = idx_rvol
-        turnover_cr = 50.0
-        if idx_rvol >= 2.0: p1_score = 25.0
-        elif idx_rvol >= 1.5: p1_score = 21.0
-        elif idx_rvol >= 1.2: p1_score = 17.0
-        else: p1_score = 10.0
-
-    # PILLAR 2: True BVC Delta & CVD Flow (Max: 25)
+    # PILLAR 2: True Range Delta & Multi-Bar CVD Flow
     bars_5 = df_slice.iloc[-6:-1]
     price_chg = bars_5['close'] - bars_5['open']
     std_val = float(price_chg.std()) if len(bars_5) > 1 else 0.0
     sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
     bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
     bvc_fraction = np.tanh(bvc_z)
-
-    if not is_idx:
-        weights = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else np.ones(len(bars_5))
-    else:
-        weights = (bars_5['high'] - bars_5['low']).values.astype(float)
+    weights = (bars_5['high'] - bars_5['low']).values.astype(float)
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
 
-    is_delta_aligned = (direction == 'CALL' and eval_bvc > 0) or (direction == 'PUT' and eval_bvc < 0)
-    is_cum_aligned = (direction == 'CALL' and bvc_cum_ratio > 0) or (direction == 'PUT' and bvc_cum_ratio < 0)
-
-    if not is_delta_aligned:
-        return None  # Delta must support the breakout
+    if eval_bvc <= 0:
+        return None
 
     eval_pts = min(15.0, abs(eval_bvc) * 16.0)
-    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if is_cum_aligned else 3.0
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio > 0 else 3.0
     p2_score = round(eval_pts + cum_pts, 2)
 
-    # PILLAR 3: Wyckoff Market Profile POC/VAH/VAL (Max: 20)
+    # PILLAR 3: Wyckoff Market Profile POC/VAH Acceptance
     tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
-    vol_all = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
-    vwap = float((tp_all * vol_all).sum() / max(1.0, float(vol_all.sum()))) if (not is_idx and float(vol_all.sum()) > 0) else float(tp_all.mean())
+    vwap = float(tp_all.mean())
     std_dev = float(df_slice['close'].std()) if len(df_slice) > 1 else 0.35 * atr
     poc = float(eval_bar['poc']) if ('poc' in eval_bar and pd.notna(eval_bar['poc']) and float(eval_bar['poc']) > 0) else float(tp_all.median())
     vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
     val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
 
-    # Value acceptance
-    if direction == 'CALL':
-        if not (eval_close > vwap and eval_close >= poc):
-            return None
-    else:
-        if not (eval_close < vwap and eval_close <= poc):
-            return None
+    if not (eval_close > vwap and eval_close >= poc):
+        return None
 
-    # Extension check: not extended > 2.2% from VWAP
     if (abs(eval_close - vwap) / vwap) > 0.022:
         return None
 
-    norm_base = 500.0 if sym_clean == 'BANKNIFTY' else (160.0 if is_idx else (0.75 * atr))
+    norm_base = 500.0 if sym_clean == 'BANKNIFTY' else 160.0
     comp_ratio = comp_width / max(1.0, norm_base)
     compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
-    profile_pts = 10.0 if (eval_close >= vah if direction == 'CALL' else eval_close <= val) else 7.0
+    profile_pts = 10.0 if eval_close >= vah else 7.0
     p3_score = round(compression_pts + profile_pts, 2)
 
-    # PILLAR 5: Remaining ATR Fuel (Max: 10)
+    # PILLAR 5: Remaining ATR Fuel
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
@@ -359,8 +299,358 @@ def evaluate_common_5pillar_bar_slice(
 
     return {
         'symbol': sym_clean,
-        'is_index': is_idx,
-        'direction': direction,
+        'is_index': True,
+        'direction': 'CALL',
+        'spot_price': round(eval_close, 2),
+        'entry_price': round(float(live_spot), 2),
+        'b_close': eval_close,
+        'comp_high': comp_high,
+        'comp_low': comp_low,
+        'comp_width': comp_width,
+        'turnover_cr': 50.0,
+        'rvol': idx_rvol,
+        'bvc_cum_ratio': round(bvc_cum_ratio, 3),
+        'eval_bvc': round(eval_bvc, 3),
+        'vwap': round(vwap, 2),
+        'poc': round(poc, 2),
+        'vah': round(vah, 2),
+        'val': round(val, 2),
+        'remaining_atr': round(remaining_atr, 2),
+        'p1_score': p1_score,
+        'p2_score': p2_score,
+        'p3_score': p3_score,
+        'p5_score': p5_score,
+        'prelim_score': prelim_score,
+        'score': prelim_score,
+        'stock_atr': atr,
+        'pct_change': pct_change,
+        'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
+    }
+
+
+def evaluate_index_put_slice(
+    symbol: str,
+    df_slice: pd.DataFrame,
+    daily_atr: float,
+    nifty_regime: Dict[str, Any],
+    live_spot_override: Optional[float] = None,
+    pct_change_override: Optional[float] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    ========================================================================================
+    MODULE 2: ALADDIN DEDICATED INDEX PUT ENGINE (NIFTY / BANKNIFTY / FINNIFTY / MIDCP)
+    Market Regime: Macro Panic Selloff | Range RVOL & Negative Delta Flow (Zero Cash Volume Dependency)
+    Qualification Threshold: Prelim Score >= 80.0 / 100 | Candle Thrust >= 0.65
+    ========================================================================================
+    """
+    if df_slice is None or len(df_slice) < 7:
+        return None
+
+    sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+    comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
+    eval_bar = df_slice.iloc[-2]
+    live_bar = df_slice.iloc[-1]
+
+    if len(comp_bars) < 5:
+        return None
+
+    eval_close = float(eval_bar['close'])
+    eval_open = float(eval_bar['open'])
+    eval_high = float(eval_bar['high'])
+    eval_low = float(eval_bar['low'])
+    bar_rng = max(0.01, eval_high - eval_low)
+    live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
+
+    if hasattr(df_slice.index, 'date'):
+        today_date = df_slice.index[-1].date()
+        today_bars = df_slice[df_slice.index.date == today_date]
+        if len(today_bars) > 0:
+            day_open = float(today_bars['open'].iloc[0])
+            day_high = float(today_bars['high'].max())
+            day_low = float(today_bars['low'].min())
+        else:
+            day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+    else:
+        day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+
+    if pct_change_override is not None:
+        pct_change = float(pct_change_override)
+    else:
+        pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
+    atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
+
+    target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
+    if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
+        tot_m = target_bar.name.hour * 60 + target_bar.name.minute
+        # Morning: 09:30 to 10:15 | Afternoon: 13:15 to 14:15
+        is_m = (570 <= tot_m <= 615)
+        is_a = (795 <= tot_m <= 855)
+        if not (is_m or is_a):
+            return None
+
+    comp_high = float(comp_bars['high'].max())
+    comp_low = float(comp_bars['low'].min())
+    comp_width = comp_high - comp_low
+
+    # 1. Breakdown Trigger
+    if not (eval_close < comp_low and eval_close < eval_open):
+        return None
+
+    # 2. Breakdown Body Thrust
+    candle_thrust = (eval_high - eval_close) / bar_rng
+    if candle_thrust < 0.65:
+        return None
+
+    # 3. Macro Nifty Alignment
+    if not nifty_regime.get('allow_put', True):
+        return None
+
+    # PILLAR 1: Range-Expansion RVOL
+    comp_rngs = comp_bars['high'] - comp_bars['low']
+    median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
+    idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
+    if idx_rvol >= 2.0: p1_score = 25.0
+    elif idx_rvol >= 1.5: p1_score = 21.0
+    elif idx_rvol >= 1.2: p1_score = 17.0
+    else: p1_score = 10.0
+
+    # PILLAR 2: True Range Delta & Multi-Bar CVD Flow
+    bars_5 = df_slice.iloc[-6:-1]
+    price_chg = bars_5['close'] - bars_5['open']
+    std_val = float(price_chg.std()) if len(bars_5) > 1 else 0.0
+    sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
+    bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
+    bvc_fraction = np.tanh(bvc_z)
+    weights = (bars_5['high'] - bars_5['low']).values.astype(float)
+    bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
+    eval_bvc = float(bvc_fraction.iloc[-1])
+
+    if eval_bvc >= 0:
+        return None
+
+    eval_pts = min(15.0, abs(eval_bvc) * 16.0)
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio < 0 else 3.0
+    p2_score = round(eval_pts + cum_pts, 2)
+
+    # PILLAR 3: Wyckoff Market Profile POC/VAL Acceptance
+    tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
+    vwap = float(tp_all.mean())
+    std_dev = float(df_slice['close'].std()) if len(df_slice) > 1 else 0.35 * atr
+    poc = float(eval_bar['poc']) if ('poc' in eval_bar and pd.notna(eval_bar['poc']) and float(eval_bar['poc']) > 0) else float(tp_all.median())
+    vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
+    val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
+
+    if not (eval_close < vwap and eval_close <= poc):
+        return None
+
+    if (abs(eval_close - vwap) / vwap) > 0.022:
+        return None
+
+    norm_base = 500.0 if sym_clean == 'BANKNIFTY' else 160.0
+    comp_ratio = comp_width / max(1.0, norm_base)
+    compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
+    profile_pts = 10.0 if eval_close <= val else 7.0
+    p3_score = round(compression_pts + profile_pts, 2)
+
+    # PILLAR 5: Remaining ATR Fuel
+    fuel_spent = day_high - day_low
+    remaining_atr = atr - fuel_spent
+    fuel_ratio = remaining_atr / max(1.0, atr)
+    if remaining_atr > (0.25 * atr):
+        p5_score = round(min(10.0, max(4.0, fuel_ratio * 12.5)), 2)
+    else:
+        p5_score = 4.0
+
+    prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+
+    return {
+        'symbol': sym_clean,
+        'is_index': True,
+        'direction': 'PUT',
+        'spot_price': round(eval_close, 2),
+        'entry_price': round(float(live_spot), 2),
+        'b_close': eval_close,
+        'comp_high': comp_high,
+        'comp_low': comp_low,
+        'comp_width': comp_width,
+        'turnover_cr': 50.0,
+        'rvol': idx_rvol,
+        'bvc_cum_ratio': round(bvc_cum_ratio, 3),
+        'eval_bvc': round(eval_bvc, 3),
+        'vwap': round(vwap, 2),
+        'poc': round(poc, 2),
+        'vah': round(vah, 2),
+        'val': round(val, 2),
+        'remaining_atr': round(remaining_atr, 2),
+        'p1_score': p1_score,
+        'p2_score': p2_score,
+        'p3_score': p3_score,
+        'p5_score': p5_score,
+        'prelim_score': prelim_score,
+        'score': prelim_score,
+        'stock_atr': atr,
+        'pct_change': pct_change,
+        'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
+    }
+
+
+def evaluate_stock_call_slice(
+    symbol: str,
+    df_slice: pd.DataFrame,
+    daily_atr: float,
+    nifty_regime: Dict[str, Any],
+    live_spot_override: Optional[float] = None,
+    pct_change_override: Optional[float] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    ========================================================================================
+    MODULE 3: ALADDIN DEDICATED STOCK CALL ENGINE (218 ACTIVE F&O EQUITIES)
+    Market Regime: Stock Breakout Momentum | Real Cash Turnover (₹ Cr) & BVC Volume Delta
+    Qualification Threshold: Prelim Score >= 80.0 / 100 | Candle Thrust >= 0.65
+    Floor: Spot >= 500 INR | % Move: 0.35% to 4.20%
+    ========================================================================================
+    """
+    if df_slice is None or len(df_slice) < 7:
+        return None
+
+    sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+    comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
+    eval_bar = df_slice.iloc[-2]
+    live_bar = df_slice.iloc[-1]
+
+    if len(comp_bars) < 5:
+        return None
+
+    eval_close = float(eval_bar['close'])
+    eval_open = float(eval_bar['open'])
+    eval_high = float(eval_bar['high'])
+    eval_low = float(eval_bar['low'])
+    eval_vol = float(eval_bar.get('volume', 0.0))
+    bar_rng = max(0.01, eval_high - eval_low)
+    live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
+
+    if live_spot < 500.0:
+        return None
+
+    if hasattr(df_slice.index, 'date'):
+        today_date = df_slice.index[-1].date()
+        today_bars = df_slice[df_slice.index.date == today_date]
+        if len(today_bars) > 0:
+            day_open = float(today_bars['open'].iloc[0])
+            day_high = float(today_bars['high'].max())
+            day_low = float(today_bars['low'].min())
+        else:
+            day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+    else:
+        day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+
+    if pct_change_override is not None:
+        pct_change = float(pct_change_override)
+    else:
+        pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
+
+    if pct_change < 0.35 or pct_change > 4.20:
+        return None
+
+    atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
+
+    target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
+    if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
+        tot_m = target_bar.name.hour * 60 + target_bar.name.minute
+        # Morning: 09:30 to 10:15 | Afternoon: 13:15 to 14:15
+        is_m = (570 <= tot_m <= 615)
+        is_a = (795 <= tot_m <= 855)
+        if not (is_m or is_a):
+            return None
+
+    comp_high = float(comp_bars['high'].max())
+    comp_low = float(comp_bars['low'].min())
+    comp_width = comp_high - comp_low
+
+    # 1. Breakout Trigger
+    if not (eval_close > comp_high and eval_close > eval_open):
+        return None
+
+    # 2. Breakout Body Thrust
+    candle_thrust = (eval_close - eval_low) / bar_rng
+    if candle_thrust < 0.65:
+        return None
+
+    # 3. Macro Nifty Alignment
+    if not nifty_regime.get('allow_stock_call', True):
+        return None
+
+    # PILLAR 1: Real Institutional Cash RVOL & Smart Money Turnover
+    hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
+    comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
+    base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
+
+    turnover_cr = (eval_close * eval_vol) / 1e7
+    real_rvol = round(eval_vol / max(1.0, base_vol), 2)
+    if real_rvol >= 2.2: rvol_pts = 15.0
+    elif real_rvol >= 1.6: rvol_pts = 12.0
+    elif real_rvol >= 1.2: rvol_pts = 8.0
+    else: rvol_pts = 4.0
+
+    if turnover_cr >= 2.5: turn_pts = 10.0
+    elif turnover_cr >= 1.2: turn_pts = 7.0
+    else: turn_pts = 3.0
+    p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
+
+    # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD Flow
+    bars_5 = df_slice.iloc[-6:-1]
+    price_chg = bars_5['close'] - bars_5['open']
+    std_val = float(price_chg.std()) if len(bars_5) > 1 else 0.0
+    sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
+    bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
+    bvc_fraction = np.tanh(bvc_z)
+    weights = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else np.ones(len(bars_5))
+    bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
+    eval_bvc = float(bvc_fraction.iloc[-1])
+
+    if eval_bvc <= 0:
+        return None
+
+    eval_pts = min(15.0, abs(eval_bvc) * 16.0)
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio > 0 else 3.0
+    p2_score = round(eval_pts + cum_pts, 2)
+
+    # PILLAR 3: Wyckoff Market Profile POC/VAH Acceptance
+    tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
+    vol_all = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
+    vwap = float((tp_all * vol_all).sum() / max(1.0, float(vol_all.sum()))) if float(vol_all.sum()) > 0 else float(tp_all.mean())
+    std_dev = float(df_slice['close'].std()) if len(df_slice) > 1 else 0.35 * atr
+    poc = float(eval_bar['poc']) if ('poc' in eval_bar and pd.notna(eval_bar['poc']) and float(eval_bar['poc']) > 0) else float(tp_all.median())
+    vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
+    val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
+
+    if not (eval_close > vwap and eval_close >= poc):
+        return None
+
+    if (abs(eval_close - vwap) / vwap) > 0.022:
+        return None
+
+    norm_base = 0.75 * atr
+    comp_ratio = comp_width / max(1.0, norm_base)
+    compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
+    profile_pts = 10.0 if eval_close >= vah else 7.0
+    p3_score = round(compression_pts + profile_pts, 2)
+
+    # PILLAR 5: Remaining ATR Fuel
+    fuel_spent = day_high - day_low
+    remaining_atr = atr - fuel_spent
+    fuel_ratio = remaining_atr / max(1.0, atr)
+    if remaining_atr > (0.25 * atr):
+        p5_score = round(min(10.0, max(4.0, fuel_ratio * 12.5)), 2)
+    else:
+        p5_score = 4.0
+
+    prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+
+    return {
+        'symbol': sym_clean,
+        'is_index': False,
+        'direction': 'CALL',
         'spot_price': round(eval_close, 2),
         'entry_price': round(float(live_spot), 2),
         'b_close': eval_close,
@@ -386,6 +676,214 @@ def evaluate_common_5pillar_bar_slice(
         'pct_change': pct_change,
         'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
     }
+
+
+def evaluate_stock_put_slice(
+    symbol: str,
+    df_slice: pd.DataFrame,
+    daily_atr: float,
+    nifty_regime: Dict[str, Any],
+    live_spot_override: Optional[float] = None,
+    pct_change_override: Optional[float] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    ========================================================================================
+    MODULE 4: ALADDIN DEDICATED STOCK PUT ENGINE (218 ACTIVE F&O EQUITIES)
+    Market Regime: Stock Breakdown & Long Unwinding | Real Cash Turnover & BVC Volume Delta
+    Qualification Threshold: Prelim Score >= 80.0 / 100 | Candle Thrust >= 0.65
+    Floor: Spot >= 500 INR | % Move: -0.35% to -4.20%
+    ========================================================================================
+    """
+    if df_slice is None or len(df_slice) < 7:
+        return None
+
+    sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+    comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
+    eval_bar = df_slice.iloc[-2]
+    live_bar = df_slice.iloc[-1]
+
+    if len(comp_bars) < 5:
+        return None
+
+    eval_close = float(eval_bar['close'])
+    eval_open = float(eval_bar['open'])
+    eval_high = float(eval_bar['high'])
+    eval_low = float(eval_bar['low'])
+    eval_vol = float(eval_bar.get('volume', 0.0))
+    bar_rng = max(0.01, eval_high - eval_low)
+    live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
+
+    if live_spot < 500.0:
+        return None
+
+    if hasattr(df_slice.index, 'date'):
+        today_date = df_slice.index[-1].date()
+        today_bars = df_slice[df_slice.index.date == today_date]
+        if len(today_bars) > 0:
+            day_open = float(today_bars['open'].iloc[0])
+            day_high = float(today_bars['high'].max())
+            day_low = float(today_bars['low'].min())
+        else:
+            day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+    else:
+        day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+
+    if pct_change_override is not None:
+        pct_change = float(pct_change_override)
+    else:
+        pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
+
+    if pct_change > -0.35 or pct_change < -4.20:
+        return None
+
+    atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
+
+    target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
+    if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
+        tot_m = target_bar.name.hour * 60 + target_bar.name.minute
+        # Morning: 09:30 to 10:15 | Afternoon: 13:15 to 14:15
+        is_m = (570 <= tot_m <= 615)
+        is_a = (795 <= tot_m <= 855)
+        if not (is_m or is_a):
+            return None
+
+    comp_high = float(comp_bars['high'].max())
+    comp_low = float(comp_bars['low'].min())
+    comp_width = comp_high - comp_low
+
+    # 1. Breakdown Trigger
+    if not (eval_close < comp_low and eval_close < eval_open):
+        return None
+
+    # 2. Breakdown Body Thrust
+    candle_thrust = (eval_high - eval_close) / bar_rng
+    if candle_thrust < 0.65:
+        return None
+
+    # 3. Macro Nifty Alignment
+    if not nifty_regime.get('allow_stock_put', True):
+        return None
+
+    # PILLAR 1: Real Institutional Cash RVOL & Smart Money Turnover
+    hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
+    comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
+    base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
+
+    turnover_cr = (eval_close * eval_vol) / 1e7
+    real_rvol = round(eval_vol / max(1.0, base_vol), 2)
+    if real_rvol >= 2.2: rvol_pts = 15.0
+    elif real_rvol >= 1.6: rvol_pts = 12.0
+    elif real_rvol >= 1.2: rvol_pts = 8.0
+    else: rvol_pts = 4.0
+
+    if turnover_cr >= 2.5: turn_pts = 10.0
+    elif turnover_cr >= 1.2: turn_pts = 7.0
+    else: turn_pts = 3.0
+    p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
+
+    # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD Flow
+    bars_5 = df_slice.iloc[-6:-1]
+    price_chg = bars_5['close'] - bars_5['open']
+    std_val = float(price_chg.std()) if len(bars_5) > 1 else 0.0
+    sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
+    bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
+    bvc_fraction = np.tanh(bvc_z)
+    weights = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else np.ones(len(bars_5))
+    bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
+    eval_bvc = float(bvc_fraction.iloc[-1])
+
+    if eval_bvc >= 0:
+        return None
+
+    eval_pts = min(15.0, abs(eval_bvc) * 16.0)
+    cum_pts = min(10.0, abs(bvc_cum_ratio) * 18.0) if bvc_cum_ratio < 0 else 3.0
+    p2_score = round(eval_pts + cum_pts, 2)
+
+    # PILLAR 3: Wyckoff Market Profile POC/VAL Acceptance
+    tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
+    vol_all = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
+    vwap = float((tp_all * vol_all).sum() / max(1.0, float(vol_all.sum()))) if float(vol_all.sum()) > 0 else float(tp_all.mean())
+    std_dev = float(df_slice['close'].std()) if len(df_slice) > 1 else 0.35 * atr
+    poc = float(eval_bar['poc']) if ('poc' in eval_bar and pd.notna(eval_bar['poc']) and float(eval_bar['poc']) > 0) else float(tp_all.median())
+    vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
+    val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
+
+    if not (eval_close < vwap and eval_close <= poc):
+        return None
+
+    if (abs(eval_close - vwap) / vwap) > 0.022:
+        return None
+
+    norm_base = 0.75 * atr
+    comp_ratio = comp_width / max(1.0, norm_base)
+    compression_pts = round(min(10.0, max(2.0, (1.0 - min(0.9, comp_ratio)) * 10.0 + 2.0)), 2)
+    profile_pts = 10.0 if eval_close <= val else 7.0
+    p3_score = round(compression_pts + profile_pts, 2)
+
+    # PILLAR 5: Remaining ATR Fuel
+    fuel_spent = day_high - day_low
+    remaining_atr = atr - fuel_spent
+    fuel_ratio = remaining_atr / max(1.0, atr)
+    if remaining_atr > (0.25 * atr):
+        p5_score = round(min(10.0, max(4.0, fuel_ratio * 12.5)), 2)
+    else:
+        p5_score = 4.0
+
+    prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+
+    return {
+        'symbol': sym_clean,
+        'is_index': False,
+        'direction': 'PUT',
+        'spot_price': round(eval_close, 2),
+        'entry_price': round(float(live_spot), 2),
+        'b_close': eval_close,
+        'comp_high': comp_high,
+        'comp_low': comp_low,
+        'comp_width': comp_width,
+        'turnover_cr': round(turnover_cr, 2),
+        'rvol': real_rvol,
+        'bvc_cum_ratio': round(bvc_cum_ratio, 3),
+        'eval_bvc': round(eval_bvc, 3),
+        'vwap': round(vwap, 2),
+        'poc': round(poc, 2),
+        'vah': round(vah, 2),
+        'val': round(val, 2),
+        'remaining_atr': round(remaining_atr, 2),
+        'p1_score': p1_score,
+        'p2_score': p2_score,
+        'p3_score': p3_score,
+        'p5_score': p5_score,
+        'prelim_score': prelim_score,
+        'score': prelim_score,
+        'stock_atr': atr,
+        'pct_change': pct_change,
+        'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
+    }
+
+
+def evaluate_common_5pillar_bar_slice(
+    symbol: str,
+    df_slice: pd.DataFrame,
+    daily_atr: float,
+    nifty_regime: Dict[str, Any],
+    live_spot_override: Optional[float] = None,
+    pct_change_override: Optional[float] = None,
+    is_index: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Master Router delegating to the 4 Aladdin Dedicated Engines."""
+    sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+    is_idx = is_index or (sym_clean in INDEX_NAMES)
+    if is_idx:
+        res = evaluate_index_call_slice(sym_clean, df_slice, daily_atr, nifty_regime, live_spot_override, pct_change_override)
+        if res:
+            return res
+        return evaluate_index_put_slice(sym_clean, df_slice, daily_atr, nifty_regime, live_spot_override, pct_change_override)
+    else:
+        res = evaluate_stock_call_slice(sym_clean, df_slice, daily_atr, nifty_regime, live_spot_override, pct_change_override)
+        if res:
+            return res
+        return evaluate_stock_put_slice(sym_clean, df_slice, daily_atr, nifty_regime, live_spot_override, pct_change_override)
 
 
 class DailyAutonomousScreener:
@@ -562,9 +1060,10 @@ class DailyAutonomousScreener:
         regime = self.get_nifty_market_regime()
         live_spot = float(live_q.get('live_spot', df['close'].iloc[-1])) if live_q else float(df['close'].iloc[-1])
 
-        cand = evaluate_common_5pillar_bar_slice(
-            sym_clean, df, atr, regime, live_spot_override=live_spot, is_index=True
-        )
+        # Dedicated 4-Function Index Evaluation (Call then Put)
+        cand = evaluate_index_call_slice(sym_clean, df, atr, regime, live_spot_override=live_spot)
+        if not cand:
+            cand = evaluate_index_put_slice(sym_clean, df, atr, regime, live_spot_override=live_spot)
         if not cand:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'COMMON_5PILLAR_INDEX_VETO', 'is_index': True}
 
@@ -582,9 +1081,10 @@ class DailyAutonomousScreener:
         live_spot = float(live_q.get('live_spot', df['close'].iloc[-1])) if live_q else float(df['close'].iloc[-1])
         pct_change = float(live_q.get('pct_change', 0.0)) if live_q else None
 
-        cand = evaluate_common_5pillar_bar_slice(
-            sym_clean, df, atr, regime, live_spot_override=live_spot, pct_change_override=pct_change, is_index=False
-        )
+        # Dedicated 4-Function Stock Evaluation (Call then Put)
+        cand = evaluate_stock_call_slice(sym_clean, df, atr, regime, live_spot_override=live_spot, pct_change_override=pct_change)
+        if not cand:
+            cand = evaluate_stock_put_slice(sym_clean, df, atr, regime, live_spot_override=live_spot, pct_change_override=pct_change)
         if not cand:
             return {'symbol': sym_clean, 'passed': False, 'failed_gate': 'COMMON_5PILLAR_STOCK_VETO', 'is_index': False}
 

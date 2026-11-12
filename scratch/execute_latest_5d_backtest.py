@@ -36,7 +36,11 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from alpha_profile_oi_system.modules.fno_universe import determine_step_size
-from alpha_profile_oi_system.daily_autonomous_screener import evaluate_common_5pillar_bar_slice
+from alpha_profile_oi_system.daily_autonomous_screener import (
+    evaluate_index_call_slice, evaluate_index_put_slice,
+    evaluate_stock_call_slice, evaluate_stock_put_slice,
+    evaluate_common_5pillar_bar_slice
+)
 
 CACHE_DIR = os.path.join(REPORT_DIR, "data_cache_latest_5d_1m")
 CONFIG_DIR = os.path.join(REPO_ROOT, "alpha_profile_oi_system", "config")
@@ -755,7 +759,9 @@ if __name__ == "__main__":
                         continue
                     idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
                     
-                    sig = evaluate_common_5pillar_bar_slice(isym, today_bars, idx_atr, regime, is_index=True)
+                    sig = evaluate_index_call_slice(isym, today_bars, idx_atr, regime)
+                    if not sig:
+                        sig = evaluate_index_put_slice(isym, today_bars, idx_atr, regime)
                     if sig:
                         t_dist = 50.0 if isym == 'BANKNIFTY' else 45.0
                         t_price = (sig['entry_price'] + t_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - t_dist)
@@ -784,7 +790,9 @@ if __name__ == "__main__":
                         continue
                     stock_atr = atrs.get(ssym, 30.0)
 
-                    sig = evaluate_common_5pillar_bar_slice(ssym, today_bars, stock_atr, regime, is_index=False)
+                    sig = evaluate_stock_call_slice(ssym, today_bars, stock_atr, regime)
+                    if not sig:
+                        sig = evaluate_stock_put_slice(ssym, today_bars, stock_atr, regime)
                     if sig:
                         t_dist = 12.0
                         t_price = (sig['entry_price'] + t_dist) if sig['direction'] == 'CALL' else (sig['entry_price'] - t_dist)
