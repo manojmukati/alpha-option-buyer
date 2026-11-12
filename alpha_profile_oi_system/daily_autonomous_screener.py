@@ -63,6 +63,7 @@ MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
 MAX_INDEX_PER_SLAB = 1
 MAX_STOCKS_PER_SLAB = 1
+SCORE_THRESHOLD = 80.0  # Aladdin-Level Pure 5-Pillar Score Qualification Threshold
 
 # Pure dynamic asset handling: Zero hardcoded stock names. Only indices are fixed.
 
@@ -1178,7 +1179,7 @@ class DailyAutonomousScreener:
             oi_score = float(opt.get('oi_score', 12.0))
             cand['score'] = round(cand.get('prelim_score', cand.get('score', 60.0)) + oi_score, 2)
             if cand['score'] < 80.0:
-                stage2_rejections[sym] = f"SCORE_BELOW_70 ({cand['score']:.1f} < 70.0)"
+                stage2_rejections[sym] = f"SCORE_BELOW_THRESHOLD ({cand['score']:.1f} < {SCORE_THRESHOLD})"
                 continue
             verified_super_trades.append(cand)
             active_slab_index += 1
@@ -1211,7 +1212,7 @@ class DailyAutonomousScreener:
             oi_score = float(opt.get('oi_score', 12.0))
             cand['score'] = round(cand.get('prelim_score', cand.get('score', 60.0)) + oi_score, 2)
             if cand['score'] < 80.0:
-                stage2_rejections[sym] = f"SCORE_BELOW_70 ({cand['score']:.1f} < 70.0)"
+                stage2_rejections[sym] = f"SCORE_BELOW_THRESHOLD ({cand['score']:.1f} < {SCORE_THRESHOLD})"
                 continue
             verified_super_trades.append(cand)
             active_slab_stock += 1
@@ -1314,7 +1315,8 @@ class DailyAutonomousScreener:
             'Friction_Taxes_INR': 0.0,
             'Net_PnL_INR': 0.0,
             'Trade_Outcome': 'SIGNAL_GENERATED_OPEN',
-            'Status': 'SIGNAL_GENERATED_OPEN'
+            'Status': 'SIGNAL_GENERATED_OPEN',
+            'Failure_Reason_And_Needed_Correction': 'TRADE_OPEN_ACTIVE'
         }
 
         try:
@@ -1432,8 +1434,26 @@ class DailyAutonomousScreener:
                     df.at[idx, 'Gross_PnL_INR'] = gross_pnl
                     df.at[idx, 'Friction_Taxes_INR'] = friction
                     df.at[idx, 'Net_PnL_INR'] = net_pnl
+                    # Determine Failure Reason / Forensic Analysis / Needed Correction
+                    if "JACKPOT" in outcome:
+                        forensic_reason = "SUCCESS_T2_JACKPOT: Full institutional volume & OI expansion follow-through. Zero correction required."
+                    elif "T1" in outcome:
+                        forensic_reason = "SUCCESS_T1_PROFIT: Target 1 achieved; 70% trail profit lock executed cleanly."
+                    elif "BREAKEVEN" in outcome:
+                        forensic_reason = "BREAKEVEN_SHIELD: Initial +1.0R burst achieved, capital 100% protected when momentum paused. Zero loss."
+                    elif "30M_STAGNANT" in outcome or "TIMEOUT" in outcome:
+                        forensic_reason = "TIME_SL_TIMEOUT: Momentum stagnated without follow-through. Rule cleanly exited position to prevent option theta decay."
+                    elif outcome == "SL_HIT":
+                        if is_idx:
+                            forensic_reason = "SL_HIT (INDEX): Stop loss reached (-25 spot pts). ATM option barrier/absorption or sudden macro impulse. Needed Correction: Enforce 2nd candle confirmation if index opening ATR > 200 pts."
+                        else:
+                            forensic_reason = "SL_HIT (STOCK): Stop loss reached (-10 spot pts). Opening bar wick trap or Sector/Index divergence. Needed Correction: Require 2nd bar delta confirmation on high-ATR (>Rs 100) stocks and check sector sync."
+                    else:
+                        forensic_reason = f"EXIT_{outcome}: EOD or session closure. Capital preserved."
+
                     df.at[idx, 'Trade_Outcome'] = outcome
                     df.at[idx, 'Status'] = outcome
+                    df.at[idx, 'Failure_Reason_And_Needed_Correction'] = forensic_reason
                     updated_any = True
 
                     exit_msg = (
