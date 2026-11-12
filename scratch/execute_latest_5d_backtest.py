@@ -718,8 +718,8 @@ if __name__ == "__main__":
         for b_idx in range(len(time_index)):
             curr_t = time_index[b_idx]
             tot_m = curr_t.hour * 60 + curr_t.minute
-            is_m = (570 <= tot_m <= 612)   # 09:30 to 10:12 AM IST
-            is_a = (792 <= tot_m <= 849)   # 01:12 to 02:09 PM IST
+            is_m = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
+            is_a = (795 <= tot_m <= 855)   # 01:15 to 02:15 PM IST
 
             # 1. Update Open Active Trades Concurrently
             for tr in active_trades:

@@ -76,8 +76,8 @@ def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 612)
-    slab2 = (792 <= tot_mins <= 849)
+    slab1 = (570 <= tot_mins <= 615)
+    slab2 = (795 <= tot_mins <= 855)
     return slab1 or slab2
 
 
@@ -242,8 +242,8 @@ def evaluate_common_5pillar_bar_slice(
     target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
     if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
         tot_m = target_bar.name.hour * 60 + target_bar.name.minute
-        is_m = (570 <= tot_m <= 612)   # 09:30 se 10:12 AM IST
-        is_a = (792 <= tot_m <= 849)   # 01:12 se 02:09 PM IST
+        is_m = (570 <= tot_m <= 615)   # 09:30 se 10:15 AM IST
+        is_a = (795 <= tot_m <= 855)   # 01:15 se 02:15 PM IST
         if not (is_m or is_a):
             return None  # Slab ke bahar trade reject karo
     else:
