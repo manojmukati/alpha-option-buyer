@@ -1114,7 +1114,7 @@ class DailyAutonomousScreener:
         """
         return self.run_screener(ignore_window=ignore_window)
 
-    def run_screener(self, ignore_window: bool = False):
+    def run_screener(self, ignore_window: bool = False, send_heartbeat: bool = True):
         ist_now = get_ist_time()
         ist_time_str = ist_now.strftime('%I:%M:%S %p IST')
 
@@ -1226,18 +1226,19 @@ class DailyAutonomousScreener:
 
         if not verified_super_trades:
             print(f"[SCREENER]: 0 signals qualified after separate Index & Stock scan at {ist_time_str}. Capital 100% Protected.")
-            heartbeat_msg = (
-                f"🛡️ <b>ALPHA 5-PILLAR SCANNER STATUS</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"⏰ <b>Execution Time:</b> {ist_time_str}\n"
-                f"📊 <b>Universe Scanned:</b> {len(all_eval_results)} Assets\n"
-                f"🏛️ <b>Index Engine:</b> 4 Indices Evaluated (Slots: {active_slab_index}/{MAX_INDEX_PER_SLAB})\n"
-                f"📈 <b>Stock Engine:</b> {len(symbols_to_scan)} Stocks Evaluated (Slots: {active_slab_stock}/{MAX_STOCKS_PER_SLAB})\n"
-                f"🛡️ <b>Status:</b> Zero 5-Pillar Confluent Breakouts\n"
-                f"🔒 <b>Capital Protection:</b> 100% Active (Zero Forced Trades)\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )
-            self.notifier.send_broadcast_message(heartbeat_msg, is_trade_signal=False)
+            if send_heartbeat:
+                heartbeat_msg = (
+                    f"🛡️ <b>ALPHA 5-PILLAR SCANNER STATUS</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏰ <b>Execution Time:</b> {ist_time_str}\n"
+                    f"📊 <b>Universe Scanned:</b> {len(all_eval_results)} Assets\n"
+                    f"🏛️ <b>Index Engine:</b> 4 Indices Evaluated (Slots: {active_slab_index}/{MAX_INDEX_PER_SLAB})\n"
+                    f"📈 <b>Stock Engine:</b> {len(symbols_to_scan)} Stocks Evaluated (Slots: {active_slab_stock}/{MAX_STOCKS_PER_SLAB})\n"
+                    f"🛡️ <b>Status:</b> Zero 5-Pillar Confluent Breakouts\n"
+                    f"🔒 <b>Capital Protection:</b> 100% Active (Zero Forced Trades)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                self.notifier.send_broadcast_message(heartbeat_msg, is_trade_signal=False)
             return
 
         print(f"[SCREENER]: Verified {len(verified_super_trades)} INSTITUTIONAL SUPER TRADE(S)! Dispatching...")
@@ -1541,9 +1542,10 @@ class DailyAutonomousScreener:
                 break
 
             print(f"\n>>> [SLAB CYCLE #{cycle}] Active Scan & Position Management at {ist_now.strftime('%I:%M:%S %p IST')}...")
+            should_send_hb = (cycle == 1 or cycle == 8)
             try:
                 self.update_open_paper_trades()
-                self.run_screener(ignore_window=True)
+                self.run_screener(ignore_window=True, send_heartbeat=should_send_hb)
             except Exception as e:
                 print(f"[SLAB ERROR in Cycle #{cycle}]: {e}")
 
@@ -1558,6 +1560,26 @@ class DailyAutonomousScreener:
 
             print(f">>> Sleeping {interval_seconds}s (3 mins) until next 5-pillar scan...")
             time.sleep(interval_seconds)
+
+        # Dispatch Slab Conclusion Status to Owner Chatbot (Never to Group)
+        try:
+            ist_end = get_ist_time()
+            end_time_str = ist_end.strftime('%I:%M:%S %p IST')
+            slab_name = "Morning Prime Slab (09:30 - 10:15 AM)" if ist_end.hour < 12 else "Afternoon Prime Slab (01:15 - 02:15 PM)"
+            closing_msg = (
+                f"🏁 <b>ALPHA 5-PILLAR SLAB MONITORING COMPLETE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏛️ <b>Trading Session:</b> {slab_name}\n"
+                f"⏰ <b>Session End Time:</b> {end_time_str}\n"
+                f"🔄 <b>Autonomous 3m Cycles Completed:</b> {cycle - 1}\n"
+                f"📊 <b>Universe Monitored:</b> 224 F&O Assets\n"
+                f"🛡️ <b>Capital Protection Status:</b> 100% Active (Zero False Trades Forced)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔒 <i>Delivered strictly to Owner Chatbot. Group silence maintained.</i>"
+            )
+            self.notifier.send_broadcast_message(closing_msg, is_trade_signal=False)
+        except Exception as e:
+            print(f"[SLAB CONCLUDING ALERT ERROR]: {e}")
 
 
     def run_live_slab_loop(self):
@@ -1662,18 +1684,32 @@ class DailyAutonomousScreener:
         report_text = "\n".join(report_lines)
         self.notifier.send_broadcast_message(report_text, is_trade_signal=False)
 
-        caption = (
+        caption_daily = (
             f"📊 <b>DAILY OFFICIAL LIVE PAPER TRADING JOURNAL</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📅 <b>DATE:</b> {ist_date_str}\n"
             f"⏰ <b>DISPATCH TIME:</b> {ist_time_str}\n"
-            f"🎯 <b>MODE:</b> EOD Official Paper Trading Ledger\n"
+            f"🎯 <b>MODE:</b> Daily Official Paper Trading Ledger\n"
             f"🔒 <b>SECURITY:</b> Strictly Confidential (Owner Private DM Only)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
-        res = self.notifier.send_document_to_owner_with_approval_prompt(daily_xl, caption=caption)
-        print(f"[EOD AUDIT & DISPATCH]: Delivered daily analysis & journal to Owner DM. Result: {res.get('ok')}")
-        return res
+        res_d = self.notifier.send_document_to_owner_with_approval_prompt(daily_xl, caption=caption_daily)
+        print(f"[EOD AUDIT & DISPATCH]: Delivered daily analysis & journal to Owner DM. Result: {res_d.get('ok')}")
+
+        monthly_xl = os.path.join(CURRENT_DIR, 'Alpha_Monthly_Paper_Trading_Journal.xlsx')
+        if os.path.exists(monthly_xl):
+            caption_monthly = (
+                f"📈 <b>MONTHLY CUMULATIVE PAPER TRADING JOURNAL</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 <b>MONTH:</b> {ist_now.strftime('%B %Y')}\n"
+                f"⏰ <b>DISPATCH TIME:</b> {ist_time_str}\n"
+                f"🎯 <b>MODE:</b> Monthly Master Paper Trading Ledger (All Slabs & Failed Diagnostics)\n"
+                f"🔒 <b>SECURITY:</b> Strictly Confidential (Owner Private DM Only)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            res_m = self.notifier.send_document_to_owner_with_approval_prompt(monthly_xl, caption=caption_monthly)
+            print(f"[EOD AUDIT & DISPATCH]: Delivered monthly master journal to Owner DM. Result: {res_m.get('ok')}")
+        return res_d
 
     def send_eod_journal_to_owner(self):
         """Compatibility alias for EOD dispatch."""
