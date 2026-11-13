@@ -63,7 +63,7 @@ MIN_STOCK_ATR = 20.0
 MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
 MAX_INDEX_PER_SLAB = 1
-MAX_STOCKS_PER_SLAB = 1
+MAX_STOCKS_PER_SLAB = 3
 SCORE_THRESHOLD = 80.0  # Aladdin-Level Pure 5-Pillar Score Qualification Threshold
 
 # Pure dynamic asset handling: Zero hardcoded stock names. Only indices are fixed.
@@ -1136,15 +1136,28 @@ class DailyAutonomousScreener:
         stock_candidates = []
         all_eval_results = []
 
+        import concurrent.futures
+
+        # 1. Evaluate 4 Indices
         for idx in INDEX_NAMES:
             res = self.evaluate_index_engine(idx, live_q=bulk.get(idx))
             all_eval_results.append(res)
             if res.get('passed', False):
                 index_candidates.append(res)
 
+        # 2. High-Speed Concurrent Stock Evaluation across all 216 F&O Stocks (Completes in ~25-35s)
         symbols_to_scan = [item['symbol'] if isinstance(item, dict) else item for item in self.universe if (item['symbol'] if isinstance(item, dict) else item) not in INDEX_NAMES]
-        for sym in symbols_to_scan:
-            res = self.evaluate_stock_engine(sym, live_q=bulk.get(sym), nifty_context=regime)
+        
+        def scan_stock_worker(sym):
+            try:
+                return self.evaluate_stock_engine(sym, live_q=bulk.get(sym), nifty_context=regime)
+            except Exception as e:
+                return {'symbol': sym, 'passed': False, 'failed_gate': f'EXCEPTION_{str(e)[:30]}', 'is_index': False}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=14) as executor:
+            stock_results = list(executor.map(scan_stock_worker, symbols_to_scan))
+
+        for res in stock_results:
             all_eval_results.append(res)
             if res.get('passed', False):
                 stock_candidates.append(res)
@@ -1152,75 +1165,64 @@ class DailyAutonomousScreener:
         print(f"[DISCOVERY COMPLETE]: Scanned {len(all_eval_results)} assets ({len(INDEX_NAMES)} Indices, {len(symbols_to_scan)} Stocks).")
         print(f"[QUALIFIED DISCOVERY]: {len(index_candidates)} Index candidate(s), {len(stock_candidates)} Stock candidate(s).")
 
-        index_candidates.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-        stock_candidates.sort(key=lambda x: x.get('score', 0.0), reverse=True)
+        # Stage 2: Option Chain & Symmetric OI Runway Verification across ALL Candidates
+        all_stage2_candidates = []
+        stage2_rejections = {}
+
+        for cand in (index_candidates + stock_candidates):
+            sym = cand['symbol']
+            is_idx = cand.get('is_index', False)
+            if self.is_already_dispatched(sym):
+                stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
+                continue
+
+            spot = cand['spot_price']
+            direction = cand['direction']
+            stock_atr = float(cand.get('stock_atr') or (120.0 if is_idx else 45.0))
+            if is_idx:
+                target_dist = 140.0 if sym == 'BANKNIFTY' else 90.0
+            else:
+                target_dist = max(40.0, min(65.0, 0.85 * stock_atr))
+            target_price = (spot + target_dist) if direction == 'CALL' else (spot - target_dist)
+
+            opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym, target_price=target_price, is_index=is_idx)
+            if not opt or not opt.get('is_liquid', False):
+                stage2_rejections[sym] = f"OPTION_PRICING_FAIL_CLOSED: {opt.get('rejected_reason') if opt else 'CHAIN_UNAVAILABLE'}"
+                continue
+
+            cand['verified_opt'] = opt
+            oi_score = float(opt.get('oi_score', 12.0))
+            cand['score'] = round(cand.get('prelim_score', cand.get('score', 60.0)) + oi_score, 2)
+            if cand['score'] < SCORE_THRESHOLD:
+                stage2_rejections[sym] = f"SCORE_BELOW_THRESHOLD ({cand['score']:.1f} < {SCORE_THRESHOLD})"
+                continue
+
+            all_stage2_candidates.append(cand)
+
+        # Strict Win Probability Ranking: Highest score first (e.g. 90 first, then 85, then 80)
+        all_stage2_candidates.sort(key=lambda x: x.get('score', 0.0), reverse=True)
 
         verified_super_trades = []
         active_slab_index = 0
         active_slab_stock = 0
-        stage2_rejections = {}
 
-        # Stage 2: Option Chain & Symmetric OI Runway Verification
-        for cand in index_candidates:
-            if active_slab_index >= MAX_INDEX_PER_SLAB:
-                stage2_rejections[cand['symbol']] = "MAX_INDEX_SLAB_CAP_REACHED"
+        for cand in all_stage2_candidates:
+            if len(verified_super_trades) >= MAX_SLAB_TRADES:
+                stage2_rejections[cand['symbol']] = "MAX_SLAB_TOTAL_CAP_REACHED"
                 continue
-            sym = cand['symbol']
-            if self.is_already_dispatched(sym):
-                stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
-                continue
+            is_idx = cand.get('is_index', False)
+            if is_idx:
+                if active_slab_index >= MAX_INDEX_PER_SLAB:
+                    stage2_rejections[cand['symbol']] = "MAX_INDEX_SLAB_CAP_REACHED"
+                    continue
+                active_slab_index += 1
+            else:
+                if active_slab_stock >= MAX_STOCKS_PER_SLAB:
+                    stage2_rejections[cand['symbol']] = "MAX_STOCK_SLAB_CAP_REACHED"
+                    continue
+                active_slab_stock += 1
 
-            spot = cand['spot_price']
-            direction = cand['direction']
-            stock_atr = float(cand.get('stock_atr') or 120.0)
-            idx_target_dist = 140.0 if sym == 'BANKNIFTY' else 90.0
-            target_price = (spot + idx_target_dist) if direction == 'CALL' else (spot - idx_target_dist)
-            opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym, target_price=target_price, is_index=True)
-            if not opt or not opt.get('is_liquid', False):
-                stage2_rejections[sym] = f"OPTION_PRICING_FAIL_CLOSED: {opt.get('rejected_reason') if opt else 'CHAIN_UNAVAILABLE'}"
-                continue
-
-            cand['verified_opt'] = opt
-            oi_score = float(opt.get('oi_score', 12.0))
-            cand['score'] = round(cand.get('prelim_score', cand.get('score', 60.0)) + oi_score, 2)
-            if cand['score'] < 80.0:
-                stage2_rejections[sym] = f"SCORE_BELOW_THRESHOLD ({cand['score']:.1f} < {SCORE_THRESHOLD})"
-                continue
             verified_super_trades.append(cand)
-            active_slab_index += 1
-
-        for cand in stock_candidates:
-            if active_slab_stock >= MAX_STOCKS_PER_SLAB:
-                stage2_rejections[cand['symbol']] = "MAX_STOCK_SLAB_CAP_REACHED"
-                continue
-            sym = cand['symbol']
-            if self.is_already_dispatched(sym):
-                stage2_rejections[sym] = "ALREADY_DISPATCHED_TODAY"
-                continue
-
-            dispatched_syms = [t['symbol'] for t in verified_super_trades if not t.get('is_index', False)]
-            if sym in dispatched_syms:
-                stage2_rejections[sym] = "DUPLICATE_SYMBOL_SLOT_CAP"
-                continue
-
-            spot = cand['spot_price']
-            direction = cand['direction']
-            stock_atr = float(cand.get('stock_atr') or 45.0)
-            stk_target_dist = max(40.0, min(65.0, 0.85 * stock_atr))
-            target_price = (spot + stk_target_dist) if direction == 'CALL' else (spot - stk_target_dist)
-            opt = self.data_feed.compute_option_pricing(spot, direction=direction, symbol=sym, target_price=target_price, is_index=False)
-            if not opt or not opt.get('is_liquid', False):
-                stage2_rejections[sym] = f"OPTION_PRICING_FAIL_CLOSED: {opt.get('rejected_reason') if opt else 'CHAIN_UNAVAILABLE'}"
-                continue
-
-            cand['verified_opt'] = opt
-            oi_score = float(opt.get('oi_score', 12.0))
-            cand['score'] = round(cand.get('prelim_score', cand.get('score', 60.0)) + oi_score, 2)
-            if cand['score'] < 80.0:
-                stage2_rejections[sym] = f"SCORE_BELOW_THRESHOLD ({cand['score']:.1f} < {SCORE_THRESHOLD})"
-                continue
-            verified_super_trades.append(cand)
-            active_slab_stock += 1
 
         self._log_rejection_audit(ist_now, all_eval_results, verified_super_trades, stage2_rejections)
 
