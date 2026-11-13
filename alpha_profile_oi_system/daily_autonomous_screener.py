@@ -1347,6 +1347,9 @@ class DailyAutonomousScreener:
 
         try:
             df = pd.read_csv(csv_path)
+            for str_col in ['Exit_Time_IST', 'Trade_Outcome', 'Status', 'Failure_Reason_And_Needed_Correction', 'Holding_Time', 'Option_Action', 'Option_Contract']:
+                if str_col in df.columns:
+                    df[str_col] = df[str_col].astype('object')
             if df.empty or 'Status' not in df.columns:
                 return
 
@@ -1414,7 +1417,7 @@ class DailyAutonomousScreener:
                 elif est_opt_price <= opt_sl:
                     exit_price = opt_sl
                     outcome = "SL_HIT"
-                elif tot_mins_now >= 920:
+                elif (str(row.get('Date', '')).strip() != ist_now.strftime('%d-%b-%Y')) or tot_mins_now >= 920:
                     exit_price = current_bid if current_bid > 0 else est_opt_price
                     outcome = "EOD_SQUARE_OFF"
                 else:
@@ -1490,13 +1493,70 @@ class DailyAutonomousScreener:
         self.logger.info(f"[AUDIT SUMMARY]: Evaluated {len(all_eval_results)} assets at {ts_str} -> {len(qual_syms)} qualified, {rej_count} rejected.")
 
     def run_live_slab_session(self, interval_seconds: int = 180):
-        print(f"[SLAB RUNNER]: Initializing 3-minute autonomous screening loop...")
+        """
+        Runs an autonomous 3-minute screening loop throughout the current active trading slab:
+        - Morning Slab: 09:30 AM to 10:15 AM IST (exits automatically at 10:15 AM IST)
+        - Afternoon Slab: 01:15 PM to 02:15 PM IST (exits automatically at 02:15 PM IST)
+        - Checks & updates trailing stop-loss / targets for open paper trades every cycle.
+        - Safely exits when the slab concludes, enabling clean GitHub Actions commit and push.
+        """
+        ist_start = get_ist_time()
+        print(f"=======================================================")
+        print(f"  ALPHA CONTINUOUS SLAB SESSION INITIALIZED")
+        print(f"  Session Start Time: {ist_start.strftime('%d-%b-%Y %I:%M:%S %p IST')}")
+        print(f"=======================================================")
+
+        tot_m = ist_start.hour * 60 + ist_start.minute
+        # If triggered slightly before slab (e.g. 09:28 AM), wait for 09:30 AM
+        if 565 <= tot_m < 570:
+            wait_s = (570 - tot_m) * 60
+            print(f"[PRE-SLAB WARMUP]: Waiting {wait_s}s until 09:30 AM IST...")
+            time.sleep(wait_s)
+        elif 790 <= tot_m < 795:
+            wait_s = (795 - tot_m) * 60
+            print(f"[PRE-SLAB WARMUP]: Waiting {wait_s}s until 01:15 PM IST...")
+            time.sleep(wait_s)
+
+        cycle = 1
+        max_duration_seconds = 70 * 60  # safety timeout 70 mins (slab 1 is 45m, slab 2 is 60m)
+        start_ts = time.time()
+
         while True:
+            ist_now = get_ist_time()
+            now_m = ist_now.hour * 60 + ist_now.minute
+
+            # Check if within designated slabs:
+            # Morning Slab: 09:30 AM to 10:15 AM IST (570 to 615 mins)
+            # Afternoon Slab: 01:15 PM to 02:15 PM IST (795 to 855 mins)
+            is_m_slab = (570 <= now_m <= 615)
+            is_a_slab = (795 <= now_m <= 855)
+
+            if not (is_m_slab or is_a_slab):
+                print(f"\n[SLAB CONCLUDED]: Current time {ist_now.strftime('%I:%M:%S %p IST')} is outside active slabs (09:30-10:15 & 13:15-14:15).")
+                print(f"[SLAB RUNNER]: Session complete after {cycle - 1} cycles. Exiting cleanly.")
+                break
+
+            if (time.time() - start_ts) > max_duration_seconds:
+                print(f"\n[SESSION TIMEOUT]: Max duration of 70m reached. Exiting cleanly.")
+                break
+
+            print(f"\n>>> [SLAB CYCLE #{cycle}] Active Scan & Position Management at {ist_now.strftime('%I:%M:%S %p IST')}...")
             try:
                 self.update_open_paper_trades()
-                self.run_screener(ignore_window=False)
+                self.run_screener(ignore_window=True)
             except Exception as e:
-                print(f"[SLAB RUNNER ERROR]: {e}")
+                print(f"[SLAB ERROR in Cycle #{cycle}]: {e}")
+
+            cycle += 1
+
+            # Check if next scan would still be within the slab
+            ist_next = get_ist_time()
+            next_m = (ist_next.hour * 60 + ist_next.minute) + (interval_seconds // 60)
+            if not ((570 <= next_m <= 616) or (795 <= next_m <= 856)):
+                print(f"\n[SLAB CONCLUDED]: Next cycle falls outside slab window. Completed {cycle - 1} cycles at {ist_next.strftime('%I:%M:%S %p IST')}. Exiting.")
+                break
+
+            print(f">>> Sleeping {interval_seconds}s (3 mins) until next 5-pillar scan...")
             time.sleep(interval_seconds)
 
 
@@ -2453,7 +2513,19 @@ if __name__ == '__main__':
         screener.run_live_slab_loop()
     elif '--eod-audit' in sys.argv or '--send-journal' in sys.argv:
         screener.run_eod_analysis_and_dispatch()
-    else:
+    elif '--single-pass' in sys.argv:
         ignore_win = ('--ignore-window' in sys.argv)
         screener.run_screener(ignore_window=ignore_win)
+    elif '--slab-session' in sys.argv:
+        screener.run_live_slab_session(interval_seconds=180)
+    else:
+        # Default entrypoint for Cloud Cron (cron-job.org / GitHub Actions / Local Runner):
+        # If triggered within an active trading slab (09:30-10:15 AM or 01:15-02:15 PM IST),
+        # automatically run the continuous 3-minute session throughout the slab!
+        ist_now = get_ist_time()
+        if is_in_active_trading_slab(ist_now):
+            screener.run_live_slab_session(interval_seconds=180)
+        else:
+            ignore_win = ('--ignore-window' in sys.argv)
+            screener.run_screener(ignore_window=ignore_win)
 
