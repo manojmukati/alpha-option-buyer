@@ -289,12 +289,12 @@ def evaluate_index_call_slice(
     profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
-    # PILLAR 5: Remaining ATR Fuel
+    # PILLAR 5: Remaining ATR Fuel & Active Expansion Velocity (Index Call)
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr):
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 12.5)), 2)
+    if remaining_atr > (0.25 * atr) and pct_change >= 0.20:
+        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (pct_change / 1.5) * 3.0)), 2)
     else:
         p5_score = 4.0
 
@@ -456,12 +456,12 @@ def evaluate_index_put_slice(
     profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
-    # PILLAR 5: Remaining ATR Fuel
+    # PILLAR 5: Remaining ATR Fuel & Active Expansion Velocity (Index Put)
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr):
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 12.5)), 2)
+    if remaining_atr > (0.25 * atr) and pct_change <= -0.20:
+        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 1.5) * 3.0)), 2)
     else:
         p5_score = 4.0
 
@@ -553,10 +553,14 @@ def evaluate_stock_call_slice(
     else:
         pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
-    if pct_change < 0.35 or pct_change > 4.20:
+    if pct_change < 0.75 or pct_change > 4.20:
         return None
 
     atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
+
+    # Strict Candle Range Lock (Minimum 35% of 3m slot ATR to reject micro-candles)
+    if bar_rng < (0.35 * atr / 13.0):
+        return None
 
     target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
     if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
@@ -641,12 +645,12 @@ def evaluate_stock_call_slice(
     profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
-    # PILLAR 5: Remaining ATR Fuel
+    # PILLAR 5: Remaining ATR Fuel & Active Expansion Velocity (Stock Call)
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr):
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 12.5)), 2)
+    if remaining_atr > (0.25 * atr) and pct_change >= 0.75:
+        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (pct_change / 3.0) * 3.0)), 2)
     else:
         p5_score = 4.0
 
@@ -738,10 +742,14 @@ def evaluate_stock_put_slice(
     else:
         pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
-    if pct_change > -0.35 or pct_change < -4.20:
+    if pct_change > -0.75 or pct_change < -4.20:
         return None
 
     atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
+
+    # Strict Candle Range Lock (Minimum 35% of 3m slot ATR to reject micro-candles)
+    if bar_rng < (0.35 * atr / 13.0):
+        return None
 
     target_bar = live_bar if (hasattr(live_bar, 'name') and hasattr(live_bar.name, 'hour')) else eval_bar
     if hasattr(target_bar, 'name') and hasattr(target_bar.name, 'hour'):
@@ -826,12 +834,12 @@ def evaluate_stock_put_slice(
     profile_pts = 10.0
     p3_score = round(compression_pts + profile_pts, 2)
 
-    # PILLAR 5: Remaining ATR Fuel
+    # PILLAR 5: Remaining ATR Fuel & Active Expansion Velocity (Stock Put)
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr):
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 12.5)), 2)
+    if remaining_atr > (0.25 * atr) and pct_change <= -0.75:
+        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 3.0) * 3.0)), 2)
     else:
         p5_score = 4.0
 
@@ -2006,20 +2014,20 @@ _BHAV_CACHE = {}
 def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: str, target_price: Optional[float] = None, is_index: bool = False) -> Dict[str, Any]:
     bhav_files = glob.glob(os.path.join(CURRENT_DIR, 'bhavcopy_cache', '*.parquet'))
     if not bhav_files:
-        return {'confluent': True, 'score': 16.0, 'reason': 'CLEAR_RUNWAY_DEFAULT'}
+        return {'confluent': True, 'score': 4.0, 'reason': 'CLEAR_RUNWAY_DEFAULT'}
     d = date_obj if isinstance(date_obj, datetime.date) else (date_obj.date() if hasattr(date_obj, 'date') else pd.to_datetime(date_obj).date())
     candidates = [f for f in bhav_files if parse_bhav_date(f) < d]
     if not candidates:
         candidates = [f for f in bhav_files if parse_bhav_date(f) <= d]
     bhav_match = max(candidates, key=parse_bhav_date) if candidates else None
     if not bhav_match:
-        return {'confluent': True, 'score': 16.0, 'reason': 'CLEAR_RUNWAY_DEFAULT'}
+        return {'confluent': True, 'score': 4.0, 'reason': 'CLEAR_RUNWAY_DEFAULT'}
     if bhav_match not in _BHAV_CACHE:
         _BHAV_CACHE[bhav_match] = pd.read_parquet(bhav_match)
     df_bhav = _BHAV_CACHE[bhav_match]
     sub = df_bhav[df_bhav['TckrSymb'] == sym]
     if sub.empty:
-        return {'confluent': True, 'score': 16.0, 'reason': 'CLEAR_RUNWAY_NO_BHAV_ROW'}
+        return {'confluent': True, 'score': 4.0, 'reason': 'CLEAR_RUNWAY_NO_BHAV_ROW'}
     cur_exp = sub['XpryDt'].min()
     exp_df = sub[sub['XpryDt'] == cur_exp]
     lot_size = float(exp_df['NewBrdLotQty'].iloc[0]) if ('NewBrdLotQty' in exp_df.columns and float(exp_df['NewBrdLotQty'].iloc[0]) > 0) else (25.0 if is_index else 250.0)
@@ -2043,20 +2051,26 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
 
     sorted_strikes = sorted([s for s in strike_data.keys() if pd.notna(s) and s > 0])
     if len(sorted_strikes) < 9:
-        return {'confluent': True, 'score': 16.0, 'reason': 'INSUFFICIENT_STRIKES'}
+        return {'confluent': True, 'score': 4.0, 'reason': 'INSUFFICIENT_STRIKES'}
     atm_strike = min(sorted_strikes, key=lambda s: abs(s - spot))
     atm_idx = sorted_strikes.index(atm_strike)
     lower_4 = sorted_strikes[max(0, atm_idx - 4):atm_idx]
     upper_4 = sorted_strikes[atm_idx + 1:min(len(sorted_strikes), atm_idx + 5)]
     atm_info = strike_data[atm_strike]
 
-    score = 12.0
+    score = 4.0
+    min_unwind = 5000.0 if is_index else 150.0
+    min_write = 10000.0 if is_index else 250.0
     immediate_target_dist = 60.0 if (is_index and sym == 'BANKNIFTY') else (50.0 if is_index else 15.0)
     if direction == 'CALL':
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
-        if tot_lower_pe_chg > 0: score += 4.0
-        if atm_info.get('ce_chg_oi', 0.0) < 0 or tot_upper_ce_chg < 0: score += 4.0
+        if tot_lower_pe_chg >= min_write and tot_lower_pe_chg >= 1.5 * max(50.0, tot_upper_ce_chg):
+            score += 5.0
+            if tot_lower_pe_chg >= 2.0 * min_write: score += 3.0
+        if (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind or tot_upper_ce_chg <= -min_unwind):
+            score += 5.0
+            if tot_upper_ce_chg <= -(2.0 * min_unwind): score += 3.0
         immediate_upper = [s for s in upper_4 if (s - spot) <= immediate_target_dist]
         if immediate_upper:
             max_imm_ce = max([strike_data[s]['ce_oi'] for s in immediate_upper], default=0.0)
@@ -2064,13 +2078,17 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
             if max_imm_ce > wall_thresh:
                 w_s = [s for s in immediate_upper if strike_data[s]['ce_oi'] == max_imm_ce][0]
                 if strike_data[w_s]['ce_oi'] > 4.0 * max(10.0, strike_data[w_s]['pe_oi']) and strike_data[w_s]['ce_vol'] < 0.3 * max_imm_ce:
-                    return {'confluent': True, 'score': 6.0, 'reason': f'CALL_WALL_RESISTANCE_AT_{int(w_s)}'}
+                    return {'confluent': True, 'score': 2.0, 'reason': f'CALL_WALL_RESISTANCE_AT_{int(w_s)}'}
         return {'confluent': True, 'score': min(20.0, score), 'reason': 'CLEAR_RUNWAY'}
     else:
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
-        if tot_upper_ce_chg > 0: score += 4.0
-        if atm_info.get('pe_chg_oi', 0.0) < 0 or tot_lower_pe_chg < 0: score += 4.0
+        if tot_upper_ce_chg >= min_write and tot_upper_ce_chg >= 1.5 * max(50.0, tot_lower_pe_chg):
+            score += 5.0
+            if tot_upper_ce_chg >= 2.0 * min_write: score += 3.0
+        if (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind or tot_lower_pe_chg <= -min_unwind):
+            score += 5.0
+            if tot_lower_pe_chg <= -(2.0 * min_unwind): score += 3.0
         immediate_lower = [s for s in lower_4 if (spot - s) <= immediate_target_dist]
         if immediate_lower:
             max_imm_pe = max([strike_data[s]['pe_oi'] for s in immediate_lower], default=0.0)
@@ -2078,7 +2096,7 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
             if max_imm_pe > wall_thresh:
                 w_s = [s for s in immediate_lower if strike_data[s]['pe_oi'] == max_imm_pe][0]
                 if strike_data[w_s]['pe_oi'] > 4.0 * max(10.0, strike_data[w_s]['ce_oi']) and strike_data[w_s]['pe_vol'] < 0.3 * max_imm_pe:
-                    return {'confluent': True, 'score': 6.0, 'reason': f'PUT_WALL_RESISTANCE_AT_{int(w_s)}'}
+                    return {'confluent': True, 'score': 2.0, 'reason': f'PUT_WALL_RESISTANCE_AT_{int(w_s)}'}
         return {'confluent': True, 'score': min(20.0, score), 'reason': 'CLEAR_RUNWAY'}
 
 def load_resampled_3m_data() -> tuple[Dict[str, pd.DataFrame], List[str]]:

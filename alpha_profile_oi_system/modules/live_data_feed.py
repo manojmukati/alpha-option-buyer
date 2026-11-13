@@ -884,16 +884,23 @@ class LiveMarketDataFeed:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
             # Precision Institutional OI Scoring (Support Base + Unwinding Velocity)
-            score = 12.0
-            if tot_lower_pe_chg > 0:
-                score += 4.0  # Put writing adding support floor below spot
-            if atm_info.get('pe_chg_oi', 0.0) > 0:
-                score += 2.0  # ATM put support building
-            if tot_upper_ce_chg < 0:
-                score += 4.0  # Call unwinding on resistance strikes (Short covering follow-through)
-            if atm_info.get('ce_chg_oi', 0.0) < 0:
-                score += 3.0  # ATM call writers actively fleeing/covering
-            score = round(min(25.0, score), 2)
+            # Strict Pillar 4 Tightening: Zero free gift baseline. Requires real institutional volume.
+            score = 4.0
+            min_unwind_contracts = 10000.0 if is_index else 150.0
+            min_write_contracts = 15000.0 if is_index else 250.0
+
+            # 1. Real Call Unwinding on Resistance Strikes
+            if tot_upper_ce_chg <= -min_unwind_contracts or atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_contracts:
+                score += 5.0
+                if tot_upper_ce_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+                    score += 3.0
+
+            # 2. Aggressive Put Writing Dominance (Floor Defence)
+            if tot_lower_pe_chg >= min_write_contracts and tot_lower_pe_chg >= 1.5 * max(50.0, tot_upper_ce_chg):
+                score += 5.0
+                if atm_info.get('pe_chg_oi', 0.0) >= (0.5 * min_write_contracts):
+                    score += 3.0
+            score = round(min(20.0, score), 2)
 
             return {
                 'confluent': True,
@@ -946,16 +953,23 @@ class LiveMarketDataFeed:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
             # Precision Institutional OI Scoring (Resistance Ceiling + Unwinding Velocity)
-            score = 12.0
-            if tot_upper_ce_chg > 0:
-                score += 4.0  # Call writing capping resistance above spot
-            if atm_info.get('ce_chg_oi', 0.0) > 0:
-                score += 2.0  # ATM call resistance building
-            if tot_lower_pe_chg < 0:
-                score += 4.0  # Put unwinding on support strikes (Long unwinding collapse)
-            if atm_info.get('pe_chg_oi', 0.0) < 0:
-                score += 3.0  # ATM put writers actively fleeing/unwinding
-            score = round(min(25.0, score), 2)
+            # Strict Pillar 4 Tightening: Zero free gift baseline. Requires real institutional volume.
+            score = 4.0
+            min_unwind_contracts = 10000.0 if is_index else 150.0
+            min_write_contracts = 15000.0 if is_index else 250.0
+
+            # 1. Real Put Unwinding on Support Strikes
+            if tot_lower_pe_chg <= -min_unwind_contracts or atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_contracts:
+                score += 5.0
+                if tot_lower_pe_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+                    score += 3.0
+
+            # 2. Aggressive Call Writing Dominance (Ceiling Pressure)
+            if tot_upper_ce_chg >= min_write_contracts and tot_upper_ce_chg >= 1.5 * max(50.0, tot_lower_pe_chg):
+                score += 5.0
+                if atm_info.get('ce_chg_oi', 0.0) >= (0.5 * min_write_contracts):
+                    score += 3.0
+            score = round(min(20.0, score), 2)
 
             return {
                 'confluent': True,
