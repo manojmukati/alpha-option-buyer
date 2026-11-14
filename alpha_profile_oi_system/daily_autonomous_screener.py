@@ -978,6 +978,39 @@ class DailyAutonomousScreener:
         self.dispatched_today[sym_clean] = time.time()
         self._save_dispatched_cache()
 
+    def is_eod_journal_dispatched_today(self) -> bool:
+        today_str = get_ist_time().strftime('%Y-%m-%d')
+        if os.path.exists(self.dispatched_cache_file):
+            try:
+                with open(self.dispatched_cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if data.get('date') == today_str and data.get('eod_journal_dispatched', False):
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def mark_eod_journal_dispatched(self):
+        today_str = get_ist_time().strftime('%Y-%m-%d')
+        ist_time_str = get_ist_time().strftime('%I:%M:%S %p IST')
+        current_data = {'date': today_str, 'dispatched': self.dispatched_today}
+        if os.path.exists(self.dispatched_cache_file):
+            try:
+                with open(self.dispatched_cache_file, 'r', encoding='utf-8') as f:
+                    current_data = json.load(f)
+            except Exception:
+                pass
+        current_data['date'] = today_str
+        current_data['dispatched'] = self.dispatched_today
+        current_data['eod_journal_dispatched'] = True
+        current_data['eod_dispatched_time'] = ist_time_str
+        try:
+            os.makedirs(os.path.dirname(self.dispatched_cache_file), exist_ok=True)
+            with open(self.dispatched_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(current_data, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Error saving EOD dispatched state: {e}")
+
     def get_stock_atr(self, symbol: str, q: Optional[Dict[str, Any]] = None) -> float:
         return self.data_feed.get_wilder_daily_atr(symbol)
 
@@ -1634,6 +1667,24 @@ class DailyAutonomousScreener:
         ist_date_str = ist_now.strftime('%d-%b-%Y')
         daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
 
+        # -------------------------------------------------------------------------
+        # LOCK 1: STRICT 03:30 - 04:30 PM IST DELIVERY WINDOW GUARD
+        # Prevents delayed GitHub Actions queue runs from delivering journals at night.
+        # -------------------------------------------------------------------------
+        tot_mins = ist_now.hour * 60 + ist_now.minute
+        is_force = ('--force-journal' in sys.argv or '--force-dispatch' in sys.argv)
+        if not is_force and not (930 <= tot_mins <= 990):
+            print(f"[EOD DISPATCH BLOCKED]: Current time {ist_time_str} is outside 03:30 - 04:30 PM IST window. Delayed night ghost trigger rejected.")
+            return
+
+        # -------------------------------------------------------------------------
+        # LOCK 2: STRICT ONE-TIME-PER-DAY DISPATCH DEDUPLICATION GUARD
+        # Ensures that once the journal is delivered at 03:35 PM, duplicate runs are blocked.
+        # -------------------------------------------------------------------------
+        if not is_force and self.is_eod_journal_dispatched_today():
+            print(f"[EOD DISPATCH BLOCKED]: Today's EOD Journal for {ist_date_str} was ALREADY delivered to Owner Chatbot. Duplicate delivery blocked.")
+            return
+
         if not os.path.exists(daily_xl):
             print(f"[EOD ERROR]: Excel file {daily_xl} not found.")
             return
@@ -1719,6 +1770,7 @@ class DailyAutonomousScreener:
             )
             res_m = self.notifier.send_document_to_owner_with_approval_prompt(monthly_xl, caption=caption_monthly)
             print(f"[EOD AUDIT & DISPATCH]: Delivered monthly master journal to Owner DM. Result: {res_m.get('ok')}")
+        self.mark_eod_journal_dispatched()
         return res_d
 
     def send_eod_journal_to_owner(self):
