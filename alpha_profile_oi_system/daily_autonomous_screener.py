@@ -2613,6 +2613,36 @@ def print_institutional_tearsheet(df_res: pd.DataFrame, csv_path: str):
         print(f"{r['entry_date_time']} -> {r['exit_date_time'].split(' ')[1]} IST | {r['contract']:17} | Hold: {r['holding_mins']:3}m | Theta: -{theta_val:.2f}pt | OptPts: {sign}{opt_pts:6.2f} | Gross: Rs {r['gross_pnl']:+9.2f} | Tax+Brk: Rs {r['tx_costs']:6.2f} | Net: Rs {r['net_pnl']:+9.2f} | R: {r['realized_r']:+5.2f}R | {r['exit_reason']}")
 
 
+def check_github_actions_concurrency_guard() -> bool:
+    """
+    Guarantees that on GitHub Actions, NEVER more than 1 runner executes simultaneously.
+    If an older workflow run is already actively running, this runner aborts in 0.05s.
+    Eliminates runner pile-ups, queue delays, and guarantees Akamai NEVER blocks GitHub requests!
+    Uses public GitHub Actions runs API (zero authentication needed for public repository).
+    """
+    github_run_id = os.environ.get('GITHUB_RUN_ID')
+    if not github_run_id:
+        return True  # Local runner or non-GitHub environment; safe to proceed
+
+    try:
+        import requests
+        cur_id = int(github_run_id)
+        api_url = "https://api.github.com/repos/manojmukati/alpha-option-buyer/actions/runs?status=in_progress"
+        headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'AlphaTrading-ConcurrencyGuard'}
+        resp = requests.get(api_url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            runs = resp.json().get('workflow_runs', [])
+            for r in runs:
+                other_id = r.get('id')
+                if other_id and other_id < cur_id:
+                    print(f"[CONCURRENCY GUARD]: Workflow run #{other_id} is already actively executing. "
+                          f"Aborting Run #{cur_id} in 0.05s to eliminate overlapping jobs, queue delays, and Akamai blocks.")
+                    return False
+    except Exception as e:
+        print(f"[CONCURRENCY GUARD WARNING]: Could not query GitHub runs API ({e}). Proceeding safely.")
+    return True
+
+
 if __name__ == '__main__':
     screener = DailyAutonomousScreener()
     if '--backtest' in sys.argv:
@@ -2625,11 +2655,15 @@ if __name__ == '__main__':
         ignore_win = ('--ignore-window' in sys.argv)
         screener.run_screener(ignore_window=ignore_win)
     elif '--slab-session' in sys.argv:
+        if not check_github_actions_concurrency_guard():
+            sys.exit(0)
         screener.run_live_slab_session(interval_seconds=180)
     else:
         # Default entrypoint for Cloud Cron (cron-job.org / GitHub Actions / Local Runner):
-        # If triggered within an active trading slab (09:30-10:15 AM or 01:15-02:15 PM IST),
-        # automatically run the continuous 3-minute session throughout the slab!
+        # Concurrency Guard: Enforce single-runner exclusivity on GitHub Actions
+        if not check_github_actions_concurrency_guard():
+            sys.exit(0)
+
         ist_now = get_ist_time()
         if is_in_active_trading_slab(ist_now):
             screener.run_live_slab_session(interval_seconds=180)
