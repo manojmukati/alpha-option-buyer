@@ -1018,14 +1018,13 @@ class LiveMarketDataFeed:
         vol = float(atm_info.get('ce_vol' if opt_type == 'CE' else 'pe_vol', 0.0))
         iv = float(atm_info.get('ce_iv' if opt_type == 'CE' else 'pe_iv', 0.0))
 
-        # Realistic liquidity & pricing validation
+        # Strict Fail-Closed real liquidity & pricing validation (Zero Synthetic Fallbacks)
         if ltp < 1.0 or bid <= 0.0 or ask <= 0.0 or ask < bid:
-            # Resilient fallback pricing for verified OI runway
-            est_p = max(8.0, round(spot_price * 0.015, 2))
-            ltp = est_p
-            bid = round(est_p * 0.985, 2)
-            ask = round(est_p * 1.015, 2)
-            vol = max(100.0, vol)
+            return {
+                'is_live_chain_verified': False,
+                'is_liquid': False,
+                'rejected_reason': 'NO_LIVE_BID_ASK_LIQUIDITY_FAIL_CLOSED'
+            }
 
         spread_pct = round(((ask - bid) / max(0.5, ltp)) * 100.0, 2)
         if spread_pct > 3.0:
@@ -1050,6 +1049,15 @@ class LiveMarketDataFeed:
             t2_pts = 100.0
         else:
             # Strictly Fixed Stock Option Rules: 5.0 pt SL / 25.0 pt T1 / 50.0 to 100.0 pt T2
+            # Mathematical Safety Check for Fixed Rs 5.0 SL:
+            # If option entry price > Rs 50.0, a fixed Rs 5.0 SL represents < 10% (e.g. 0.6% on Rs 777),
+            # which is mathematically guaranteed to hit SL from normal bid-ask noise.
+            if entry_p > 50.0:
+                return {
+                    'is_live_chain_verified': False,
+                    'is_liquid': False,
+                    'rejected_reason': f'OPTION_PREMIUM_EXCEEDS_5PT_SL_CAP (Entry Rs {entry_p:.2f} > Rs 50.0: Rs 5.0 SL would be under 10% noise)'
+                }
             sl_pts = 5.0
             t1_pts = 25.0
             t2_pts = 50.0

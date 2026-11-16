@@ -58,6 +58,7 @@ CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
 MIN_STOCK_PRICE = 500.0
+MAX_STOCK_PRICE = 3500.0  # Caps spot to prevent illiquid mega-heavyweights (PAGEIND, MRF) from distorting Rs 5 SL
 MIN_STOCK_ATR = 20.0
 
 MAX_DAILY_SUPER_TRADES = 8
@@ -595,7 +596,7 @@ def evaluate_stock_call_slice(
 
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.2 or turnover_cr < 1.0:
+    if eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
         return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0
@@ -786,7 +787,7 @@ def evaluate_stock_put_slice(
 
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.2 or turnover_cr < 1.0:
+    if eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
         return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0
@@ -1130,6 +1131,8 @@ class DailyAutonomousScreener:
         atr = self.get_stock_atr(sym_clean, live_q)
         regime = nifty_context or self.get_nifty_market_regime()
         live_spot = float(live_q.get('live_spot', df['close'].iloc[-1])) if live_q else float(df['close'].iloc[-1])
+        if live_spot < MIN_STOCK_PRICE or live_spot > MAX_STOCK_PRICE:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'SPOT_OUTSIDE_SL_RANGE_{MIN_STOCK_PRICE}_{MAX_STOCK_PRICE}', 'is_index': False}
         pct_change = float(live_q['pct_change']) if (live_q and live_q.get('pct_change') is not None) else None
 
         # Dedicated 4-Function Stock Evaluation (Call then Put)
