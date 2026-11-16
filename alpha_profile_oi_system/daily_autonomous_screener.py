@@ -553,7 +553,7 @@ def evaluate_stock_call_slice(
     else:
         pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
-    if pct_change < 0.75 or pct_change > 4.20:
+    if pct_change < 0.35 or pct_change > 4.20:
         return None
 
     atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
@@ -649,7 +649,9 @@ def evaluate_stock_call_slice(
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr) and pct_change >= 0.75:
+    if fuel_ratio < 0.20:
+        return None  # Profit-booking exhaustion ceiling: VETO if remaining fuel < 20%
+    if remaining_atr > (0.25 * atr) and pct_change >= 0.35:
         p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (pct_change / 3.0) * 3.0)), 2)
     else:
         p5_score = 4.0
@@ -742,7 +744,7 @@ def evaluate_stock_put_slice(
     else:
         pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
-    if pct_change > -0.75 or pct_change < -4.20:
+    if pct_change > -0.35 or pct_change < -4.20:
         return None
 
     atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
@@ -838,7 +840,9 @@ def evaluate_stock_put_slice(
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr) and pct_change <= -0.75:
+    if fuel_ratio < 0.20:
+        return None  # Profit-booking exhaustion ceiling: VETO if remaining fuel < 20%
+    if remaining_atr > (0.25 * atr) and pct_change <= -0.35:
         p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 3.0) * 3.0)), 2)
     else:
         p5_score = 4.0
@@ -1169,6 +1173,9 @@ class DailyAutonomousScreener:
         print(f"  Rule: Spot >= {MIN_STOCK_PRICE} INR Floor for Stock Options")
         print(f"=======================================================")
 
+        # Always synchronize and monitor open paper positions before running screener
+        self.update_open_paper_trades()
+
         bulk = fetch_bulk_nse_snapshot(force_refresh=True)
         regime = self.get_nifty_market_regime(force_refresh=True)
         print(f"[MACRO REGIME]: {regime['reason']} | Nifty Spot: {regime.get('nifty_spot', 0.0):.1f} | Move: {regime.get('move_pts', 0.0):+.1f} pts")
@@ -1305,7 +1312,7 @@ class DailyAutonomousScreener:
         opt_sl = float(opt['sl_price'])
         opt_tgt1 = float(opt['target_1'])
         opt_tgt2 = float(opt['target_2'])
-        fixed_spot_sl_str = "25.0 Pts" if is_idx else "10.0 Pts"
+        fixed_spot_sl_str = "18.0 Pts SL" if is_idx else "5.0 Pts SL"
 
         pure_signal_msg = (
             f"🚀 <b>ALPHA 5-PILLAR INSTITUTIONAL TRADE</b>\n"
@@ -1314,7 +1321,7 @@ class DailyAutonomousScreener:
             f"⚡ <b>ACTION:</b> <b>{opt_action}</b>\n"
             f"📌 <b>CONTRACT:</b> <code>{contract}</code>\n"
             f"💵 <b>BUYING PRICE:</b> <b>Rs. {opt_entry:,.2f}</b>\n"
-            f"🛡️ <b>STOP LOSS:</b> <b>Rs. {opt_sl:,.2f} (Spot SL: {fixed_spot_sl_str})</b>\n"
+            f"🛡️ <b>STOP LOSS:</b> <b>Rs. {opt_sl:,.2f} ({fixed_spot_sl_str})</b>\n"
             f"🎯 <b>TARGET 1 (Lock Profit):</b> <b>Rs. {opt_tgt1:,.2f}</b>\n"
             f"🏆 <b>TARGET 2 (Jackpot):</b> <b>Rs. {opt_tgt2:,.2f}</b>\n"
             f"⏱️ <b>15-MIN TIMEOUT SL:</b> <b>{time_sl_time} (Cut if Stagnant/Red)</b>\n"
@@ -1382,7 +1389,7 @@ class DailyAutonomousScreener:
         except Exception as e:
             print(f"[EXCEL JOURNAL ERROR]: {e}")
 
-    def update_open_paper_trades(self):
+    def update_open_paper_trades(self, force_slab_close: bool = False):
         csv_path = os.path.join(CURRENT_DIR, 'Live_Paper_Trading_Journal.csv')
         daily_xl = os.path.join(CURRENT_DIR, 'Alpha_5Pillar_Live_Paper_Trading_Journal.xlsx')
         monthly_xl = os.path.join(CURRENT_DIR, 'Alpha_Monthly_Paper_Trading_Journal.xlsx')
@@ -1451,8 +1458,13 @@ class DailyAutonomousScreener:
 
                 exit_price = 0.0
                 outcome = ""
+                is_old_day_trade = (str(row.get('Date', '')).strip() != ist_now.strftime('%d-%b-%Y'))
 
-                if est_opt_price >= opt_t2:
+                if is_old_day_trade:
+                    # Old day trade: Silently archive in ledger without Telegram spam!
+                    exit_price = current_bid if current_bid > 0 else est_opt_price
+                    outcome = "EOD_SQUARE_OFF"
+                elif est_opt_price >= opt_t2:
                     exit_price = opt_t2
                     outcome = "TARGET_2_HIT (JACKPOT)"
                 elif trail_sl > opt_entry and est_opt_price <= trail_sl:
@@ -1461,18 +1473,21 @@ class DailyAutonomousScreener:
                 elif est_opt_price <= opt_sl:
                     exit_price = opt_sl
                     outcome = "SL_HIT"
-                elif (str(row.get('Date', '')).strip() != ist_now.strftime('%d-%b-%Y')) or tot_mins_now >= 920:
-                    exit_price = current_bid if current_bid > 0 else est_opt_price
-                    outcome = "EOD_SQUARE_OFF"
                 else:
                     entry_ts = pd.to_numeric(row.get('Signal_Timestamp_Epoch'), errors='coerce')
-                    if pd.notna(entry_ts) and entry_ts > 0:
-                        elapsed_mins = (now_ts - float(entry_ts)) / 60.0
-                        opt_risk = opt_entry - opt_sl
-                        # [LINE 14] 30-Minute Stagnant Scratch: 30+ mins pure hone ke baad hi stagnant exit check hoga (No 9-min/15-min premature cut)
-                        if elapsed_mins >= 30.0 and est_opt_price < opt_t1 and trail_sl <= opt_entry and est_opt_price <= (opt_entry - opt_risk * 0.25):
-                            exit_price = current_bid if current_bid > 0 else est_opt_price
-                            outcome = "30M_STAGNANT_EXIT"
+                    elapsed_mins = ((now_ts - float(entry_ts)) / 60.0) if (pd.notna(entry_ts) and entry_ts > 0) else 0.0
+
+                    # 1. Strict 15-Minute Time SL for Option Buyer (Prevent Theta Decay)
+                    if elapsed_mins >= 15.0 and est_opt_price < opt_t1:
+                        exit_price = current_bid if current_bid > 0 else est_opt_price
+                        outcome = "15M_TIMEOUT_SL"
+                    # 2. End of slab or EOD intraday square-off on the same day
+                    elif force_slab_close or tot_mins_now >= 920:
+                        exit_price = current_bid if current_bid > 0 else est_opt_price
+                        outcome = "EOD_SQUARE_OFF"
+                    elif (615 <= tot_mins_now < 795) or (tot_mins_now >= 855):
+                        exit_price = current_bid if current_bid > 0 else est_opt_price
+                        outcome = "SLOT_END_CLOSE"
 
                 if outcome:
                     pts_cap = round(exit_price - opt_entry, 2)
@@ -1493,32 +1508,40 @@ class DailyAutonomousScreener:
                         forensic_reason = "SUCCESS_T1_PROFIT: Target 1 achieved; 70% trail profit lock executed cleanly."
                     elif "BREAKEVEN" in outcome:
                         forensic_reason = "BREAKEVEN_SHIELD: Initial +1.0R burst achieved, capital 100% protected when momentum paused. Zero loss."
-                    elif "30M_STAGNANT" in outcome or "TIMEOUT" in outcome:
-                        forensic_reason = "TIME_SL_TIMEOUT: Momentum stagnated without follow-through. Rule cleanly exited position to prevent option theta decay."
+                    elif "15M_TIMEOUT" in outcome or "TIMEOUT" in outcome:
+                        forensic_reason = "15M_TIMEOUT_SL: Momentum stagnated without achieving Target 1 within 15 minutes. Position cleanly squared off to prevent option theta decay."
+                    elif "SLOT_END" in outcome:
+                        forensic_reason = "SLOT_END_CLOSE: Trading slab session concluded. Clean intraday settlement on same day."
                     elif outcome == "SL_HIT":
                         if is_idx:
-                            forensic_reason = "SL_HIT (INDEX): Stop loss reached (-25 spot pts). ATM option barrier/absorption or sudden macro impulse. Needed Correction: Enforce 2nd candle confirmation if index opening ATR > 200 pts."
+                            forensic_reason = "SL_HIT (INDEX): Stop loss reached (-18 opt pts). Barrier/absorption or sudden macro impulse."
                         else:
-                            forensic_reason = "SL_HIT (STOCK): Stop loss reached (-10 spot pts). Opening bar wick trap or Sector/Index divergence. Needed Correction: Require 2nd bar delta confirmation on high-ATR (>Rs 100) stocks and check sector sync."
+                            forensic_reason = "SL_HIT (STOCK): Stop loss reached (-5 opt pts). Opening bar wick trap or divergence."
+                    elif is_old_day_trade:
+                        forensic_reason = "OLD_DAY_SILENT_CLOSE: Prior day position archived silently. Zero Telegram broadcast."
                     else:
-                        forensic_reason = f"EXIT_{outcome}: EOD or session closure. Capital preserved."
+                        forensic_reason = f"EXIT_{outcome}: Session closure. Capital preserved."
 
                     df.at[idx, 'Trade_Outcome'] = outcome
                     df.at[idx, 'Status'] = outcome
                     df.at[idx, 'Failure_Reason_And_Needed_Correction'] = forensic_reason
                     updated_any = True
 
-                    exit_msg = (
-                        f"🏁 <b>ALPHA PAPER POSITION CLOSED</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📌 <b>CONTRACT:</b> <code>{contract}</code>\n"
-                        f"🎯 <b>OUTCOME:</b> <b>{outcome}</b>\n"
-                        f"💵 <b>ENTRY:</b> Rs. {opt_entry:.2f} | <b>EXIT:</b> Rs. {exit_price:.2f}\n"
-                        f"📈 <b>POINTS:</b> <b>{pts_cap:+.2f} pts</b>\n"
-                        f"💰 <b>NET P&L:</b> <b>Rs. {net_pnl:+,.2f}</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    )
-                    self.notifier.send_broadcast_message(exit_msg, is_trade_signal=True)
+                    # STRICT ZERO NEXT-DAY SPAM RULE: Broadcast to Telegram ONLY for same-day trades!
+                    if not is_old_day_trade:
+                        exit_msg = (
+                            f"🏁 <b>ALPHA PAPER POSITION CLOSED</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📌 <b>CONTRACT:</b> <code>{contract}</code>\n"
+                            f"🎯 <b>OUTCOME:</b> <b>{outcome}</b>\n"
+                            f"💵 <b>ENTRY:</b> Rs. {opt_entry:.2f} | <b>EXIT:</b> Rs. {exit_price:.2f}\n"
+                            f"📈 <b>POINTS:</b> <b>{pts_cap:+.2f} pts</b>\n"
+                            f"💰 <b>NET P&L:</b> <b>Rs. {net_pnl:+,.2f}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        self.notifier.send_broadcast_message(exit_msg, is_trade_signal=True)
+                    else:
+                        print(f"[POSITION MANAGER]: Silently archived old-day position {contract} from {row.get('Date')} without Telegram alert.")
 
             if updated_any:
                 df.to_csv(csv_path, index=False)
@@ -1603,6 +1626,12 @@ class DailyAutonomousScreener:
 
             print(f">>> Sleeping {interval_seconds}s (3 mins) until next 5-pillar scan...")
             time.sleep(interval_seconds)
+
+        # Force square-off of any remaining open intraday positions on same day at slab conclusion
+        try:
+            self.update_open_paper_trades(force_slab_close=True)
+        except Exception as e:
+            print(f"[SLAB FINAL CLOSE ERROR]: {e}")
 
         # Dispatch Slab Conclusion Status to Owner Chatbot (Never to Group)
         try:

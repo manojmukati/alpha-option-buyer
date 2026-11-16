@@ -95,18 +95,18 @@ _SESSION_LOCK = threading.Lock()
 _NSE_RATE_LOCK = threading.Lock()
 _NSE_CALL_TIMESTAMPS: collections.deque = collections.deque()
 _LAST_NSE_CALL_TIME: float = 0.0
-_MIN_NSE_REQUEST_GAP: float = 15.0       # Strict 15.0s minimum gap between ANY two outbound calls to nseindia.com
-_MAX_CALLS_PER_MINUTE: int = 3          # Strict ceiling: max 3 requests per 60-second rolling window (Akamai block is ~5/min in live market)
+_MIN_NSE_REQUEST_GAP: float = 10.0       # Strict 10.0s minimum gap between ANY two outbound calls to nseindia.com
+_MAX_CALLS_PER_MINUTE: int = 6          # Strict ceiling: max 6 requests per 60-second rolling window (60s / 10s = 6 calls/min)
 _AKAMAI_BACKOFF_UNTIL: float = 0.0      # Timestamp if Akamai 429/403 triggers 120s cooldown
 _GLOBAL_SESSION = None
 _LAST_COOKIE_TIME = 0.0
 _COOKIE_TTL = 300.0                     # Reusable session lifespan (5 minutes)
 
-def _acquire_nse_request_slot(timeout: float = 30.0) -> bool:
+def _acquire_nse_request_slot(timeout: float = 120.0) -> bool:
     """
     Hardware-Enforced NSE Rate Gatekeeper:
-    - Guarantees minimum 15.0s between any consecutive calls to nseindia.com.
-    - Limits outbound requests to <= 3 per rolling 60s window (Akamai block threshold is ~5/min in live market).
+    - Guarantees minimum 10.0s between any consecutive calls to nseindia.com.
+    - Limits outbound requests to <= 6 per rolling 60s window (Akamai safety threshold).
     - Checks 120s Akamai backoff circuit breaker; bypasses to fallback immediately if active.
     - Thread-safe across all concurrent threads.
     """
@@ -205,7 +205,7 @@ def _get_active_session() -> requests.Session:
             sess.headers.update(base_headers)
             try:
                 # Priming Handshake: Acquire 1 slot for the session creation
-                if _acquire_nse_request_slot(timeout=15.0):
+                if _acquire_nse_request_slot(timeout=120.0):
                     r1 = sess.get(NSE_HOME_URL, timeout=10)
                     if r1.status_code == 200:
                         time.sleep(0.4)
@@ -235,8 +235,8 @@ def _safe_nse_fetch(url: str, origin_url: str = NSE_OC_PAGE_URL, max_retries: in
 
     for attempt in range(max_retries):
         session = _get_active_session()
-        if not _acquire_nse_request_slot(timeout=35.0):
-            logger.warning("[AKAMAI SHIELD] Rate limiter slot wait timed out. Falling back to offline Bhavcopy cache.")
+        if not _acquire_nse_request_slot(timeout=120.0):
+            logger.warning("[AKAMAI SHIELD] Rate limiter slot wait timed out. Live NSE fetch rejected.")
             return None
 
         headers = _get_next_headers()
@@ -806,15 +806,9 @@ class LiveMarketDataFeed:
                         'pe_iv': clean_num(pe.get('impliedVolatility', 0.0)),
                     }
 
-        # 2. Resilient Fallback to offline official Bhavcopy parquet cache if live NSE API is blocked/unavailable
+        # 2. Strict Fail-Closed Rule: Never generate live trading signals on offline stale Bhavcopy cache!
         if not strike_data:
-            bhav_fb = _get_bhavcopy_oi_fallback(sym_clean, is_index=is_index)
-            if bhav_fb and bhav_fb.get('strike_data'):
-                strike_data = bhav_fb['strike_data']
-                active_expiry = bhav_fb['active_expiry']
-
-        if not strike_data:
-            return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LIVE_AND_BHAVCOPY_OPTION_CHAIN_UNAVAILABLE'}
+            return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LIVE_NSE_OPTION_CHAIN_UNAVAILABLE_FAIL_CLOSED'}
 
         sorted_strikes = sorted(strike_data.keys())
         if len(sorted_strikes) < 9:
@@ -885,22 +879,29 @@ class LiveMarketDataFeed:
 
             # Precision Institutional OI Scoring (Support Base + Unwinding Velocity)
             # Strict Pillar 4 Tightening: Zero free gift baseline. Requires real institutional volume.
-            score = 4.0
+            score = 0.0
             min_unwind_contracts = 10000.0 if is_index else 150.0
             min_write_contracts = 15000.0 if is_index else 250.0
 
-            # 1. Real Call Unwinding on Resistance Strikes
-            if tot_upper_ce_chg <= -min_unwind_contracts or atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_contracts:
-                score += 5.0
-                if tot_upper_ce_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
-                    score += 3.0
+            has_unwind = (tot_upper_ce_chg <= -min_unwind_contracts) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_contracts)
+            has_support = (tot_lower_pe_chg >= min_write_contracts and tot_lower_pe_chg >= 1.5 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.5 * min_write_contracts))
 
-            # 2. Aggressive Put Writing Dominance (Floor Defence)
-            if tot_lower_pe_chg >= min_write_contracts and tot_lower_pe_chg >= 1.5 * max(50.0, tot_upper_ce_chg):
-                score += 5.0
-                if atm_info.get('pe_chg_oi', 0.0) >= (0.5 * min_write_contracts):
-                    score += 3.0
-            score = round(min(20.0, score), 2)
+            # Hard Gate: If neither institutional Call Unwinding nor Put Writing support is present, veto the trade!
+            if not has_unwind and not has_support:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_UNWINDING_OR_PUT_SUPPORT'}
+
+            # 1. Real Call Unwinding on Resistance Strikes (+10 pts, +2 pts extra for heavy)
+            if has_unwind:
+                score += 10.0
+                if tot_upper_ce_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+                    score += 2.0
+
+            # 2. Aggressive Put Writing Dominance (Floor Defence) (+8 pts, +2 pts extra for heavy ATM)
+            if has_support:
+                score += 8.0
+                if atm_info.get('pe_chg_oi', 0.0) >= min_write_contracts:
+                    score += 2.0
+            score = round(min(20.0, max(8.0, score)), 2)
 
             return {
                 'confluent': True,
@@ -954,22 +955,29 @@ class LiveMarketDataFeed:
 
             # Precision Institutional OI Scoring (Resistance Ceiling + Unwinding Velocity)
             # Strict Pillar 4 Tightening: Zero free gift baseline. Requires real institutional volume.
-            score = 4.0
+            score = 0.0
             min_unwind_contracts = 10000.0 if is_index else 150.0
             min_write_contracts = 15000.0 if is_index else 250.0
 
-            # 1. Real Put Unwinding on Support Strikes
-            if tot_lower_pe_chg <= -min_unwind_contracts or atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_contracts:
-                score += 5.0
-                if tot_lower_pe_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
-                    score += 3.0
+            has_unwind = (tot_lower_pe_chg <= -min_unwind_contracts) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_contracts)
+            has_resistance = (tot_upper_ce_chg >= min_write_contracts and tot_upper_ce_chg >= 1.5 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.5 * min_write_contracts))
 
-            # 2. Aggressive Call Writing Dominance (Ceiling Pressure)
-            if tot_upper_ce_chg >= min_write_contracts and tot_upper_ce_chg >= 1.5 * max(50.0, tot_lower_pe_chg):
-                score += 5.0
-                if atm_info.get('ce_chg_oi', 0.0) >= (0.5 * min_write_contracts):
-                    score += 3.0
-            score = round(min(20.0, score), 2)
+            # Hard Gate: If neither institutional Put Unwinding nor Call Writing ceiling is present, veto the trade!
+            if not has_unwind and not has_resistance:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_UNWINDING_OR_CALL_PRESSURE'}
+
+            # 1. Real Put Unwinding on Support Strikes (+10 pts, +2 pts extra for heavy)
+            if has_unwind:
+                score += 10.0
+                if tot_lower_pe_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+                    score += 2.0
+
+            # 2. Aggressive Call Writing Dominance (Ceiling Pressure) (+8 pts, +2 pts extra for heavy ATM)
+            if has_resistance:
+                score += 8.0
+                if atm_info.get('ce_chg_oi', 0.0) >= min_write_contracts:
+                    score += 2.0
+            score = round(min(20.0, max(8.0, score)), 2)
 
             return {
                 'confluent': True,
@@ -1036,21 +1044,15 @@ class LiveMarketDataFeed:
         # Executable pricing: Entry at ask, monitoring at bid
         entry_p = ask
         if is_index:
-            # Strictly Fixed 25.0 Points Spot Stop Loss on Index
-            spot_sl = 25.0
-            spot_t1 = 50.0 if sym_clean == 'BANKNIFTY' else 45.0
-            spot_t2 = 140.0 if sym_clean == 'BANKNIFTY' else 90.0
-            sl_pts = round(max(8.0, spot_sl * 0.50), 2)   # ~12.5 pts Option SL
-            t1_pts = round(spot_t1 * 0.55, 2)
-            t2_pts = round(spot_t2 * 0.65, 2)
+            # Strictly Fixed Index Option Rules: 18.0 pt SL / 45.0 pt T1 / 100.0 pt T2
+            sl_pts = 18.0
+            t1_pts = 45.0
+            t2_pts = 100.0
         else:
-            # Strictly Fixed 10.0 Points Spot Stop Loss on Stocks
-            spot_sl = 10.0
-            spot_t1 = 12.0
-            spot_t2 = 25.0
-            sl_pts = round(max(1.5, spot_sl * 0.50), 2)   # ~5.0 pts Option SL
-            t1_pts = round(spot_t1 * 0.55, 2)
-            t2_pts = round(spot_t2 * 0.65, 2)
+            # Strictly Fixed Stock Option Rules: 5.0 pt SL / 25.0 pt T1 / 50.0 to 100.0 pt T2
+            sl_pts = 5.0
+            t1_pts = 25.0
+            t2_pts = 50.0
 
         opt_sl = round(max(0.5, entry_p - sl_pts), 2)
         opt_t1 = round(entry_p + t1_pts, 2)
