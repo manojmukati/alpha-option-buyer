@@ -58,7 +58,6 @@ CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
 
 MIN_STOCK_PRICE = 500.0
-MAX_STOCK_PRICE = 3500.0  # Caps spot to prevent illiquid mega-heavyweights (PAGEIND, MRF) from distorting Rs 5 SL
 MIN_STOCK_ATR = 20.0
 
 MAX_DAILY_SUPER_TRADES = 8
@@ -66,6 +65,21 @@ MAX_SLAB_TRADES = 3
 MAX_INDEX_PER_SLAB = 1
 MAX_STOCKS_PER_SLAB = 3
 SCORE_THRESHOLD = 80.0  # Aladdin-Level Pure 5-Pillar Score Qualification Threshold
+
+# Load F&O Lot Size Map dynamically from modules/fno_universe_cache.json
+_LOT_MAP_PATH = os.path.join(CURRENT_DIR, 'modules', 'fno_universe_cache.json')
+_LOT_MAP = {}
+if os.path.exists(_LOT_MAP_PATH):
+    try:
+        with open(_LOT_MAP_PATH, 'r', encoding='utf-8') as f:
+            _raw = json.load(f)
+            _LOT_MAP = {x['symbol']: int(x.get('lot', 250)) for x in _raw if isinstance(x, dict) and 'symbol' in x}
+    except Exception:
+        pass
+
+def get_symbol_lot_size(sym: str) -> int:
+    sym_clean = sym.upper().replace('.NS', '').replace('^', '').strip()
+    return _LOT_MAP.get(sym_clean, 250)
 
 # Pure dynamic asset handling: Zero hardcoded stock names. Only indices are fixed.
 
@@ -594,9 +608,17 @@ def evaluate_stock_call_slice(
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
 
+    lot_size = get_symbol_lot_size(sym_clean)
+    contracts_in_bar = round(eval_vol / max(1.0, lot_size), 1)
+
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
+    # Data-Driven Institutional Volume Gate:
+    # 1. At least 25 F&O contracts traded in 3m bar (eliminates 15-lot retail noise on high-priced stocks)
+    # 2. Minimum 1,500 shares floor
+    # 3. Relative volume >= 1.2x
+    # 4. Turnover >= 1.0 Crore
+    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
         return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0
@@ -785,9 +807,17 @@ def evaluate_stock_put_slice(
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
 
+    lot_size = get_symbol_lot_size(sym_clean)
+    contracts_in_bar = round(eval_vol / max(1.0, lot_size), 1)
+
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
+    # Data-Driven Institutional Volume Gate:
+    # 1. At least 25 F&O contracts traded in 3m bar (eliminates 15-lot retail noise on high-priced stocks)
+    # 2. Minimum 1,500 shares floor
+    # 3. Relative volume >= 1.2x
+    # 4. Turnover >= 1.0 Crore
+    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
         return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0
@@ -1131,8 +1161,8 @@ class DailyAutonomousScreener:
         atr = self.get_stock_atr(sym_clean, live_q)
         regime = nifty_context or self.get_nifty_market_regime()
         live_spot = float(live_q.get('live_spot', df['close'].iloc[-1])) if live_q else float(df['close'].iloc[-1])
-        if live_spot < MIN_STOCK_PRICE or live_spot > MAX_STOCK_PRICE:
-            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'SPOT_OUTSIDE_SL_RANGE_{MIN_STOCK_PRICE}_{MAX_STOCK_PRICE}', 'is_index': False}
+        if live_spot < MIN_STOCK_PRICE:
+            return {'symbol': sym_clean, 'passed': False, 'failed_gate': f'SPOT_BELOW_MIN_FLOOR_{MIN_STOCK_PRICE}', 'is_index': False}
         pct_change = float(live_q['pct_change']) if (live_q and live_q.get('pct_change') is not None) else None
 
         # Dedicated 4-Function Stock Evaluation (Call then Put)

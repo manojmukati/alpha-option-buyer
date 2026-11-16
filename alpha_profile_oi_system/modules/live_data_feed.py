@@ -1026,7 +1026,17 @@ class LiveMarketDataFeed:
                 'rejected_reason': 'NO_LIVE_BID_ASK_LIQUIDITY_FAIL_CLOSED'
             }
 
-        spread_pct = round(((ask - bid) / max(0.5, ltp)) * 100.0, 2)
+        # Order Book Data Spread Lock:
+        # Spread cannot exceed 3.0% and for stocks cannot exceed Rs 1.50 (30% of Rs 5.0 SL)
+        spread_abs = round(ask - bid, 2)
+        spread_pct = round((spread_abs / max(0.5, ltp)) * 100.0, 2)
+        max_allowed_spread = 5.0 if is_index else 1.50
+        if spread_abs > max_allowed_spread:
+            return {
+                'is_live_chain_verified': False,
+                'is_liquid': False,
+                'rejected_reason': f'WIDE_BID_ASK_SPREAD (Spread Rs {spread_abs:.2f} > Rs {max_allowed_spread:.2f} max allowed for risk budget)'
+            }
         if spread_pct > 3.0:
             return {'is_live_chain_verified': False, 'is_liquid': False, 'rejected_reason': f'WIDE_BID_ASK_SPREAD ({spread_pct:.2f}% > 3.0%)'}
 
