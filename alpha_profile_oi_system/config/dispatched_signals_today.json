@@ -1,5 +1,7 @@
 {
-  "date": "2026-11-14",
-  "dispatched": {},
-  "eod_journal_dispatched": false
+  "date": "2026-11-16",
+  "dispatched": {
+    "ATHERENERG": 1794803231.5819929,
+    "RADICO": 1794803489.321601
+  }
 }
