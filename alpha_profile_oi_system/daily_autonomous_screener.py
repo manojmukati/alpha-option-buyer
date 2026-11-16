@@ -1159,7 +1159,7 @@ class DailyAutonomousScreener:
         """
         return self.run_screener(ignore_window=ignore_window)
 
-    def run_screener(self, ignore_window: bool = False, send_heartbeat: bool = True):
+    def run_screener(self, ignore_window: bool = False, send_heartbeat: bool = True, cycle_num: Optional[int] = None):
         ist_now = get_ist_time()
         ist_time_str = ist_now.strftime('%I:%M:%S %p IST')
 
@@ -1277,8 +1277,9 @@ class DailyAutonomousScreener:
         if not verified_super_trades:
             print(f"[SCREENER]: 0 signals qualified after separate Index & Stock scan at {ist_time_str}. Capital 100% Protected.")
             if send_heartbeat:
+                cycle_str = f" (Cycle #{cycle_num})" if cycle_num else ""
                 heartbeat_msg = (
-                    f"🛡️ <b>ALPHA 5-PILLAR SCANNER STATUS</b>\n"
+                    f"🛡️ <b>ALPHA 5-PILLAR SCANNER STATUS{cycle_str}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⏰ <b>Execution Time:</b> {ist_time_str}\n"
                     f"📊 <b>Universe Scanned:</b> {len(all_eval_results)} Assets\n"
@@ -1286,7 +1287,9 @@ class DailyAutonomousScreener:
                     f"📈 <b>Stock Engine:</b> {len(symbols_to_scan)} Stocks Evaluated (Slots: {active_slab_stock}/{MAX_STOCKS_PER_SLAB})\n"
                     f"🛡️ <b>Status:</b> Zero 5-Pillar Confluent Breakouts\n"
                     f"🔒 <b>Capital Protection:</b> 100% Active (Zero Forced Trades)\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    f"🔄 <b>Autonomous 3m Loop:</b> Active (Continuous Live Scan)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔒 <i>Delivered strictly to Owner Chatbot. Group silence maintained.</i>"
                 )
                 self.notifier.send_broadcast_message(heartbeat_msg, is_trade_signal=False)
             return
@@ -1608,10 +1611,10 @@ class DailyAutonomousScreener:
                 break
 
             print(f"\n>>> [SLAB CYCLE #{cycle}] Active Scan & Position Management at {ist_now.strftime('%I:%M:%S %p IST')}...")
-            should_send_hb = (cycle == 1 or cycle == 8)
+            should_send_hb = True  # Send continuous 3-minute live scan heartbeat to Owner Chatbot on EVERY cycle
             try:
                 self.update_open_paper_trades()
-                self.run_screener(ignore_window=True, send_heartbeat=should_send_hb)
+                self.run_screener(ignore_window=True, send_heartbeat=should_send_hb, cycle_num=cycle)
             except Exception as e:
                 print(f"[SLAB ERROR in Cycle #{cycle}]: {e}")
 
