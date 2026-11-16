@@ -1467,14 +1467,12 @@ class DailyAutonomousScreener:
                 cur_spot = float(q.get('live_spot', q.get('close', spot_entry))) if q else spot_entry
 
                 opt_quote = self.data_feed.get_option_quote(sym, contract_identifier=contract)
-                if opt_quote and opt_quote.get('valid') and opt_quote.get('ltp', 0.0) > 0:
-                    est_opt_price = opt_quote['ltp']
-                    current_bid = opt_quote['bid']
-                else:
-                    delta = 0.52 if is_idx else 0.50
-                    spot_gain = (cur_spot - spot_entry) if ('CE' in contract or 'CALL' in opt_action) else (spot_entry - cur_spot)
-                    est_opt_price = round(max(0.5, opt_entry + (spot_gain * delta)), 2)
-                    current_bid = est_opt_price
+                if not (opt_quote and opt_quote.get('valid') and opt_quote.get('ltp', 0.0) > 0):
+                    # Strict Real Data Rule: If real live NSE option quote is not available, do not synthesize via delta.
+                    # Skip trailing update until real live quote arrives.
+                    continue
+                est_opt_price = opt_quote['ltp']
+                current_bid = opt_quote['bid']
 
                 t1_locked_floor = round(opt_entry + max((opt_t1 - opt_entry) * 0.68, (est_opt_price - opt_entry) * 0.70), 2)
                 be_shield_floor = round(opt_entry + (opt_entry - opt_sl) * 0.35, 2)
