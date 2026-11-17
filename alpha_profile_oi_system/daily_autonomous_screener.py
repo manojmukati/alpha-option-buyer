@@ -594,9 +594,9 @@ def evaluate_stock_call_slice(
     if not (eval_close > comp_high and eval_close > eval_open):
         return None
 
-    # 2. Breakout Body Thrust
+    # 2. Breakout Body Thrust (Ultra-Confirmation >= 0.70)
     candle_thrust = (eval_close - eval_low) / bar_rng
-    if candle_thrust < 0.65:
+    if candle_thrust < 0.70:
         return None
 
     # 3. Macro Nifty Alignment
@@ -613,12 +613,12 @@ def evaluate_stock_call_slice(
 
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    # Data-Driven Institutional Volume Gate:
+    # Ultra-Confirmed Institutional Volume Gate:
     # 1. At least 25 F&O contracts traded in 3m bar (eliminates 15-lot retail noise on high-priced stocks)
     # 2. Minimum 1,500 shares floor
-    # 3. Relative volume >= 1.2x
+    # 3. Relative volume >= 1.5x (Ultra-Confirmation)
     # 4. Turnover >= 1.0 Crore
-    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
+    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.5 or turnover_cr < 1.0:
         return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0
@@ -793,9 +793,9 @@ def evaluate_stock_put_slice(
     if not (eval_close < comp_low and eval_close < eval_open):
         return None
 
-    # 2. Breakdown Body Thrust
+    # 2. Breakdown Body Thrust (Ultra-Confirmation >= 0.70)
     candle_thrust = (eval_high - eval_close) / bar_rng
-    if candle_thrust < 0.65:
+    if candle_thrust < 0.70:
         return None
 
     # 3. Macro Nifty Alignment
@@ -812,12 +812,12 @@ def evaluate_stock_put_slice(
 
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    # Data-Driven Institutional Volume Gate:
+    # Ultra-Confirmed Institutional Volume Gate:
     # 1. At least 25 F&O contracts traded in 3m bar (eliminates 15-lot retail noise on high-priced stocks)
     # 2. Minimum 1,500 shares floor
-    # 3. Relative volume >= 1.2x
+    # 3. Relative volume >= 1.5x (Ultra-Confirmation)
     # 4. Turnover >= 1.0 Crore
-    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.2 or turnover_cr < 1.0:
+    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.5 or turnover_cr < 1.0:
         return None
     if real_rvol >= 2.2: rvol_pts = 15.0
     elif real_rvol >= 1.6: rvol_pts = 12.0

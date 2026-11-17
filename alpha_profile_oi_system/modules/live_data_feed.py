@@ -994,15 +994,7 @@ class LiveMarketDataFeed:
             t2_pts = 100.0
         else:
             # Strictly Fixed Stock Option Rules: 5.0 pt SL / 25.0 pt T1 / 50.0 to 100.0 pt T2
-            # Mathematical Safety Check for Fixed Rs 5.0 SL:
-            # If option entry price > Rs 50.0, a fixed Rs 5.0 SL represents < 10% (e.g. 0.6% on Rs 777),
-            # which is mathematically guaranteed to hit SL from normal bid-ask noise.
-            if entry_p > 50.0:
-                return {
-                    'is_live_chain_verified': False,
-                    'is_liquid': False,
-                    'rejected_reason': f'OPTION_PREMIUM_EXCEEDS_5PT_SL_CAP (Entry Rs {entry_p:.2f} > Rs 50.0: Rs 5.0 SL would be under 10% noise)'
-                }
+            # Protected by Ultra-Confirmation: Spread <= Rs 1.50, Contracts >= 25 lots, RVOL >= 1.5x, Thrust >= 0.70
             sl_pts = 5.0
             t1_pts = 25.0
             t2_pts = 50.0
