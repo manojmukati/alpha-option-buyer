@@ -181,6 +181,215 @@ def compute_bvc_cvd(df_bars: pd.DataFrame) -> Dict[str, Any]:
     return compute_bar_delta_proxy(df_bars)
 
 
+def verify_multi_candle_momentum(
+    df_slice: pd.DataFrame,
+    direction: str,
+    comp_bars: pd.DataFrame,
+    daily_atr: float,
+    lot_size: float,
+    sym_clean: str,
+    nifty_regime: Optional[Dict[str, Any]] = None,
+    is_index: bool = False
+) -> Tuple[bool, str, float]:
+    """
+    3-TIER INSTITUTIONAL MULTI-CANDLE CONFIRMATION ENGINE (1, 2, or 3 Candles):
+    Applies strictly to BOTH Index and Stock Engines.
+    ----------------------------------------------------------------------------------------
+    Tier 1 (Ultra-Confirmation in 1 Candle):
+        - Breakthrough Initiation on current eval_bar (iloc[-2]).
+        - If Stock: RVOL >= 2.5x, Volume >= 40 F&O lots (or >= 2,500 shares), Turnover >= 2.0 Crore.
+        - If Index: Range RVOL >= 2.2x (spot volume on index is zero).
+        - Marubozu Thrust >= 0.85 (Close within extreme 15% edge, Wick <= 15%).
+        - Pre-Breakout Coil: Prior 3-bar range compression NR3 <= 0.50 * (daily_atr / 13.0).
+        -> IF PASS: Immediate 1-Candle Entry! (2 and 3 candles avoided).
+
+    Tier 2 (2-Candle Follow-Through Confirmation):
+        - Initiation on bar0 (iloc[-3]) and Follow-Through on bar1 (iloc[-2]).
+        - Bar0 broke out past comp_bars with regular momentum (RVOL >= 1.3x, Thrust >= 0.65).
+        - Bar1 MUST expand in trade direction:
+            CALL: bar1['close'] > bar0['close'] and bar1['high'] >= bar0['high'] and bar1['close'] > bar1['open']
+            PUT: bar1['close'] < bar0['close'] and bar1['low'] <= bar0['low'] and bar1['close'] < bar1['open']
+        - Bar1 Volume/Range Continuation:
+            Stock: bar1['volume'] >= 0.55 * bar0['volume'] (No volume collapse!).
+            Index: bar1_rng >= 0.55 * bar0_rng.
+        - Bar1 Thrust >= 0.60.
+        -> IF PASS: 2-Candle Confirmation Locked!
+
+    Tier 3 (3-Candle Retest & Expansion Confirmation):
+        - Initiation on bar_init (iloc[-4]), Pause/Pullback on bar_pb (iloc[-3]), Expansion on bar_exp (iloc[-2]).
+        - Bar_init broke out past comp_bars with RVOL >= 1.3x.
+        - Bar_pb: Shallow pullback holding above 50% midpoint of bar_init for CALL, below 50% for PUT;
+            Stock: pullback volume <= 1.1x bar_init['volume'].
+            Index: pullback range <= 1.2x bar_init_rng.
+        - Bar_exp (iloc[-2]): Fresh expansion breakout:
+            CALL: bar_exp['close'] > max(bi_high, bp_high) and bar_exp['close'] > bar_exp['open']
+            PUT: bar_exp['close'] < min(bi_low, bp_low) and bar_exp['close'] < bar_exp['open']
+        - Bar_exp Expansion:
+            Stock: RVOL >= 1.6x on bar_exp, thrust >= 0.65.
+            Index: Range RVOL >= 1.4x on bar_exp, thrust >= 0.65.
+        -> IF PASS: 3-Candle Confirmation Locked!
+
+    If NONE of Tier 1, Tier 2, or Tier 3 pass:
+        -> Return (False, 'NO_MULTI_CANDLE_CONFIRMATION', 0.0)
+    """
+    if df_slice is None or len(df_slice) < 7:
+        return False, 'INSUFFICIENT_BARS', 0.0
+
+    eval_bar = df_slice.iloc[-2]
+    eval_close = float(eval_bar['close'])
+    eval_open = float(eval_bar['open'])
+    eval_high = float(eval_bar['high'])
+    eval_low = float(eval_bar['low'])
+    bar_rng = max(0.01, eval_high - eval_low)
+
+    comp_high = float(comp_bars['high'].max())
+    comp_low = float(comp_bars['low'].min())
+
+    # Range RVOL (used for index and as baseline)
+    comp_rngs = comp_bars['high'] - comp_bars['low']
+    median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
+    range_rvol = round(bar_rng / max(0.5, median_rng), 2)
+
+    # Pre-breakout NR3 compression calculation
+    prior_3 = comp_bars.tail(3)
+    nr3_rng = float((prior_3['high'] - prior_3['low']).max()) if len(prior_3) >= 3 else bar_rng
+    is_pre_coiled = (nr3_rng <= 0.50 * (daily_atr / 13.0)) if daily_atr > 0 else True
+
+    if not is_index:
+        eval_vol = float(eval_bar.get('volume', 0.0))
+        turnover_cr = (eval_close * eval_vol) / 1e7
+        contracts_in_bar = eval_vol / max(1.0, lot_size)
+        comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
+        hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
+        base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
+        real_rvol = eval_vol / max(1.0, base_vol)
+
+    # -------------------------------------------------------------
+    # TIER 1: ULTRA-CONFIRMATION ON 1 CANDLE (Monster Institutional Thrust)
+    # -------------------------------------------------------------
+    if direction == 'CALL':
+        thrust_1 = (eval_close - eval_low) / bar_rng
+        is_breakout_1 = (eval_close > comp_high and eval_close > eval_open)
+        if is_breakout_1 and thrust_1 >= 0.85 and is_pre_coiled:
+            if is_index and range_rvol >= 2.2:
+                return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
+            elif (not is_index) and real_rvol >= 2.5 and contracts_in_bar >= 40.0 and turnover_cr >= 2.0:
+                return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
+    else:  # PUT
+        thrust_1 = (eval_high - eval_close) / bar_rng
+        is_breakdown_1 = (eval_close < comp_low and eval_close < eval_open)
+        if is_breakdown_1 and thrust_1 >= 0.85 and is_pre_coiled:
+            if is_index and range_rvol >= 2.2:
+                return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
+            elif (not is_index) and real_rvol >= 2.5 and contracts_in_bar >= 40.0 and turnover_cr >= 2.0:
+                return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
+
+    # -------------------------------------------------------------
+    # TIER 2: 2-CANDLE FOLLOW-THROUGH CONFIRMATION (Breakout + Expansion)
+    # -------------------------------------------------------------
+    if len(df_slice) >= 8:
+        bar0 = df_slice.iloc[-3]  # Breakout Initiation Bar
+        bar1 = df_slice.iloc[-2]  # Follow-Through Bar
+        b0_close, b0_open = float(bar0['close']), float(bar0['open'])
+        b0_high, b0_low = float(bar0['high']), float(bar0['low'])
+        b0_rng = max(0.01, b0_high - b0_low)
+
+        b1_close, b1_open = float(bar1['close']), float(bar1['open'])
+        b1_high, b1_low = float(bar1['high']), float(bar1['low'])
+        b1_rng = max(0.01, b1_high - b1_low)
+
+        base_comp = df_slice.iloc[:-3].tail(min(8, len(df_slice) - 3))
+        base_h = float(base_comp['high'].max())
+        base_l = float(base_comp['low'].min())
+
+        if is_index:
+            base_rngs = base_comp['high'] - base_comp['low']
+            base_med_rng = float(base_rngs.median()) if len(base_rngs) > 0 else 15.0
+            b0_rvol = b0_rng / max(0.5, base_med_rng)
+            vol_continuation = (b1_rng >= 0.55 * b0_rng)
+        else:
+            b0_vol = float(bar0.get('volume', 0.0))
+            b1_vol = float(bar1.get('volume', 0.0))
+            b0_rvol = b0_vol / max(1.0, float(base_comp['volume'].median())) if 'volume' in base_comp else 1.0
+            vol_continuation = (b1_vol >= 0.55 * b0_vol)
+
+        if direction == 'CALL':
+            b0_thrust = (b0_close - b0_low) / b0_rng
+            b0_valid = (b0_close > base_h and b0_close > b0_open and b0_thrust >= 0.65 and b0_rvol >= 1.3)
+            b1_thrust = (b1_close - b1_low) / b1_rng
+            b1_valid = (b1_close > b0_close and b1_high >= b0_high and b1_close > b1_open and
+                        b1_thrust >= 0.60 and vol_continuation)
+            if b0_valid and b1_valid:
+                return True, 'TIER_2_TWO_CANDLE_FOLLOW_THROUGH_CONFIRMED', 23.0
+        else:  # PUT
+            b0_thrust = (b0_high - b0_close) / b0_rng
+            b0_valid = (b0_close < base_l and b0_close < b0_open and b0_thrust >= 0.65 and b0_rvol >= 1.3)
+            b1_thrust = (b1_high - b1_close) / b1_rng
+            b1_valid = (b1_close < b0_close and b1_low <= b0_low and b1_close < b1_open and
+                        b1_thrust >= 0.60 and vol_continuation)
+            if b0_valid and b1_valid:
+                return True, 'TIER_2_TWO_CANDLE_FOLLOW_THROUGH_CONFIRMED', 23.0
+
+    # -------------------------------------------------------------
+    # TIER 3: 3-CANDLE RETEST & EXPANSION CONFIRMATION (Breakout + Pause + Blast)
+    # -------------------------------------------------------------
+    if len(df_slice) >= 9:
+        bar_init = df_slice.iloc[-4] # Bar 1: Breakout
+        bar_pb = df_slice.iloc[-3]   # Bar 2: Shallow Pullback / Pause
+        bar_exp = df_slice.iloc[-2]  # Bar 3: Expansion & Resume
+
+        bi_close, bi_open = float(bar_init['close']), float(bar_init['open'])
+        bi_high, bi_low = float(bar_init['high']), float(bar_init['low'])
+        bi_rng = max(0.01, bi_high - bi_low)
+
+        bp_close, bp_open = float(bar_pb['close']), float(bar_pb['open'])
+        bp_high, bp_low = float(bar_pb['high']), float(bar_pb['low'])
+        bp_rng = max(0.01, bp_high - bp_low)
+
+        be_close, be_open = float(bar_exp['close']), float(bar_exp['open'])
+        be_high, be_low = float(bar_exp['high']), float(bar_exp['low'])
+        be_rng = max(0.01, be_high - be_low)
+
+        base_comp3 = df_slice.iloc[:-4].tail(min(8, len(df_slice) - 4))
+        b3_h = float(base_comp3['high'].max())
+        b3_l = float(base_comp3['low'].min())
+
+        if is_index:
+            base_rngs3 = base_comp3['high'] - base_comp3['low']
+            med_rng3 = float(base_rngs3.median()) if len(base_rngs3) > 0 else 15.0
+            bi_rvol = bi_rng / max(0.5, med_rng3)
+            be_rvol = be_rng / max(0.5, med_rng3)
+            pb_low_volume = (bp_rng <= 1.2 * bi_rng)
+            req_exp_rvol = 1.4
+        else:
+            bi_vol = float(bar_init.get('volume', 0.0))
+            bp_vol = float(bar_pb.get('volume', 0.0))
+            be_vol = float(bar_exp.get('volume', 0.0))
+            bi_rvol = bi_vol / max(1.0, float(base_comp3['volume'].median())) if 'volume' in base_comp3 else 1.0
+            be_rvol = be_vol / max(1.0, float(base_comp3['volume'].median())) if 'volume' in base_comp3 else 1.0
+            pb_low_volume = (bp_vol <= 1.1 * bi_vol)
+            req_exp_rvol = 1.6
+
+        if direction == 'CALL':
+            bi_valid = (bi_close > b3_h and bi_close > bi_open and bi_rvol >= 1.3)
+            midpoint = bi_low + 0.50 * bi_rng
+            bp_holds = (bp_close >= midpoint and pb_low_volume)
+            be_thrust = (be_close - be_low) / be_rng
+            be_valid = (be_close > max(bi_high, bp_high) and be_close > be_open and be_thrust >= 0.65 and be_rvol >= req_exp_rvol)
+            if bi_valid and bp_holds and be_valid:
+                return True, 'TIER_3_THREE_CANDLE_RETEST_EXPANSION_CONFIRMED', 21.0
+        else:  # PUT
+            bi_valid = (bi_close < b3_l and bi_close < bi_open and bi_rvol >= 1.3)
+            midpoint = bi_high - 0.50 * bi_rng
+            bp_holds = (bp_close <= midpoint and pb_low_volume)
+            be_thrust = (be_high - be_close) / be_rng
+            be_valid = (be_close < min(bi_low, bp_low) and be_close < be_open and be_thrust >= 0.65 and be_rvol >= req_exp_rvol)
+            if bi_valid and bp_holds and be_valid:
+                return True, 'TIER_3_THREE_CANDLE_RETEST_EXPANSION_CONFIRMED', 21.0
+
+    return False, 'NO_MULTI_CANDLE_CONFIRMATION', 0.0
+
+
 def evaluate_index_call_slice(
     symbol: str,
     df_slice: pd.DataFrame,
@@ -245,28 +454,27 @@ def evaluate_index_call_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # 1. Breakout Trigger
-    if not (eval_close > comp_high and eval_close > eval_open):
-        return None
-
-    # 2. Breakout Body Thrust
-    candle_thrust = (eval_close - eval_low) / bar_rng
-    if candle_thrust < 0.65:
-        return None
-
-    # 3. Macro Nifty Alignment
+    # 1. Macro Nifty Alignment
     if not nifty_regime.get('allow_call', True):
         return None
 
-    # PILLAR 1: Range-Expansion RVOL
+    # PILLAR 1: 3-TIER MULTI-CANDLE MOMENTUM VERIFICATION (Index Call)
+    is_valid_mom, tier_reason, p1_score = verify_multi_candle_momentum(
+        df_slice=df_slice,
+        direction='CALL',
+        comp_bars=comp_bars,
+        daily_atr=atr,
+        lot_size=0.0,
+        sym_clean=sym_clean,
+        nifty_regime=nifty_regime,
+        is_index=True
+    )
+    if not is_valid_mom:
+        return None
+
     comp_rngs = comp_bars['high'] - comp_bars['low']
     median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
     idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
-    if idx_rvol < 1.2:
-        return None
-    if idx_rvol >= 2.0: p1_score = 25.0
-    elif idx_rvol >= 1.5: p1_score = 21.0
-    else: p1_score = 17.0
 
     # PILLAR 2: True Range Delta & Multi-Bar CVD Flow
     bars_5 = df_slice.iloc[-6:-1]
@@ -316,7 +524,6 @@ def evaluate_index_call_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
-    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -414,28 +621,27 @@ def evaluate_index_put_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # 1. Breakdown Trigger
-    if not (eval_close < comp_low and eval_close < eval_open):
-        return None
-
-    # 2. Breakdown Body Thrust
-    candle_thrust = (eval_high - eval_close) / bar_rng
-    if candle_thrust < 0.65:
-        return None
-
-    # 3. Macro Nifty Alignment
+    # 1. Macro Nifty Alignment
     if not nifty_regime.get('allow_put', True):
         return None
 
-    # PILLAR 1: Range-Expansion RVOL
+    # PILLAR 1: 3-TIER MULTI-CANDLE MOMENTUM VERIFICATION (Index Put)
+    is_valid_mom, tier_reason, p1_score = verify_multi_candle_momentum(
+        df_slice=df_slice,
+        direction='PUT',
+        comp_bars=comp_bars,
+        daily_atr=atr,
+        lot_size=0.0,
+        sym_clean=sym_clean,
+        nifty_regime=nifty_regime,
+        is_index=True
+    )
+    if not is_valid_mom:
+        return None
+
     comp_rngs = comp_bars['high'] - comp_bars['low']
     median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
     idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
-    if idx_rvol < 1.2:
-        return None
-    if idx_rvol >= 2.0: p1_score = 25.0
-    elif idx_rvol >= 1.5: p1_score = 21.0
-    else: p1_score = 17.0
 
     # PILLAR 2: True Range Delta & Multi-Bar CVD Flow
     bars_5 = df_slice.iloc[-6:-1]
@@ -485,7 +691,6 @@ def evaluate_index_put_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
-    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -517,176 +722,6 @@ def evaluate_index_put_slice(
         'tier_reason': tier_reason,
         'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
     }
-
-
-def verify_multi_candle_momentum(
-    df_slice: pd.DataFrame,
-    direction: str,
-    comp_bars: pd.DataFrame,
-    daily_atr: float,
-    lot_size: float,
-    sym_clean: str,
-    nifty_regime: Optional[Dict[str, Any]] = None
-) -> Tuple[bool, str, float]:
-    """
-    3-TIER INSTITUTIONAL MULTI-CANDLE CONFIRMATION ENGINE (1, 2, or 3 Candles):
-    ----------------------------------------------------------------------------------------
-    Tier 1 (Ultra-Confirmation in 1 Candle):
-        - Breakthrough Initiation on current eval_bar (iloc[-2]).
-        - RVOL >= 2.5x (Monster institutional turnover).
-        - Volume >= 40 F&O lots (or >= 2,500 shares), Turnover >= 2.0 Crore.
-        - Marubozu Thrust >= 0.85 (Close within extreme 15% edge, Wick <= 15%).
-        - Pre-Breakout Coil: Prior 3-bar range compression NR3 <= 0.45 * (daily_atr / 13.0).
-        -> IF PASS: Immediate 1-Candle Entry! (2 and 3 candles avoided).
-
-    Tier 2 (2-Candle Follow-Through Confirmation):
-        - Initiation on bar0 (iloc[-3]) and Follow-Through on bar1 (iloc[-2]).
-        - Bar0 broke out past comp_bars with regular momentum (RVOL >= 1.3x, Thrust >= 0.65).
-        - Bar1 MUST expand in trade direction:
-            CALL: bar1['close'] > bar0['close'] and bar1['high'] >= bar0['high'] and bar1['close'] > bar0['open']
-            PUT: bar1['close'] < bar0['close'] and bar1['low'] <= bar0['low'] and bar1['close'] < bar0['open']
-        - Bar1 Volume Continuation: bar1['volume'] >= 0.55 * bar0['volume'] (No volume collapse!).
-        - Bar1 Thrust >= 0.60.
-        -> IF PASS: 2-Candle Confirmation Locked!
-
-    Tier 3 (3-Candle Retest & Expansion Confirmation):
-        - Initiation on bar_init (iloc[-4]), Pause/Pullback on bar_pb (iloc[-3]), Expansion on bar_exp (iloc[-2]).
-        - Bar_init broke out past comp_bars with RVOL >= 1.3x.
-        - Bar_pb: Shallow pullback holding above 50% midpoint of bar_init for CALL, below 50% for PUT; pullback volume <= 1.1x bar_init['volume'].
-        - Bar_exp (iloc[-2]): Fresh expansion breakout:
-            CALL: bar_exp['close'] > max(bar_init['high'], bar_pb['high']) and bar_exp['close'] > bar_exp['open']
-            PUT: bar_exp['close'] < min(bar_init['low'], bar_pb['low']) and bar_exp['close'] < bar_exp['open']
-        - Bar_exp Volume Expansion: RVOL >= 1.6x on bar_exp, thrust >= 0.65.
-        -> IF PASS: 3-Candle Confirmation Locked!
-
-    If NONE of Tier 1, Tier 2, or Tier 3 pass:
-        -> Return (False, 'NO_MULTI_CANDLE_CONFIRMATION', 0.0)
-    """
-    if df_slice is None or len(df_slice) < 7:
-        return False, 'INSUFFICIENT_BARS', 0.0
-
-    eval_bar = df_slice.iloc[-2]
-    eval_close = float(eval_bar['close'])
-    eval_open = float(eval_bar['open'])
-    eval_high = float(eval_bar['high'])
-    eval_low = float(eval_bar['low'])
-    eval_vol = float(eval_bar.get('volume', 0.0))
-    bar_rng = max(0.01, eval_high - eval_low)
-    turnover_cr = (eval_close * eval_vol) / 1e7
-    contracts_in_bar = eval_vol / max(1.0, lot_size)
-
-    comp_high = float(comp_bars['high'].max())
-    comp_low = float(comp_bars['low'].min())
-    comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
-    hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
-    base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
-    real_rvol = eval_vol / max(1.0, base_vol)
-
-    # Pre-breakout NR3 compression calculation
-    prior_3 = comp_bars.tail(3)
-    nr3_rng = float((prior_3['high'] - prior_3['low']).max()) if len(prior_3) >= 3 else bar_rng
-    is_pre_coiled = (nr3_rng <= 0.50 * (daily_atr / 13.0)) if daily_atr > 0 else True
-
-    # -------------------------------------------------------------
-    # TIER 1: ULTRA-CONFIRMATION ON 1 CANDLE (Monster Institutional Thrust)
-    # -------------------------------------------------------------
-    if direction == 'CALL':
-        thrust_1 = (eval_close - eval_low) / bar_rng
-        is_breakout_1 = (eval_close > comp_high and eval_close > eval_open)
-        if (is_breakout_1 and thrust_1 >= 0.85 and real_rvol >= 2.5 and 
-            contracts_in_bar >= 40.0 and turnover_cr >= 2.0 and is_pre_coiled):
-            return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
-    else:  # PUT
-        thrust_1 = (eval_high - eval_close) / bar_rng
-        is_breakdown_1 = (eval_close < comp_low and eval_close < eval_open)
-        if (is_breakdown_1 and thrust_1 >= 0.85 and real_rvol >= 2.5 and 
-            contracts_in_bar >= 40.0 and turnover_cr >= 2.0 and is_pre_coiled):
-            return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
-
-    # -------------------------------------------------------------
-    # TIER 2: 2-CANDLE FOLLOW-THROUGH CONFIRMATION (Breakout + Expansion)
-    # -------------------------------------------------------------
-    if len(df_slice) >= 8:
-        bar0 = df_slice.iloc[-3]  # Breakout Initiation Bar
-        bar1 = df_slice.iloc[-2]  # Follow-Through Bar
-        b0_close, b0_open = float(bar0['close']), float(bar0['open'])
-        b0_high, b0_low = float(bar0['high']), float(bar0['low'])
-        b0_vol = float(bar0.get('volume', 0.0))
-        b0_rng = max(0.01, b0_high - b0_low)
-
-        b1_close, b1_open = float(bar1['close']), float(bar1['open'])
-        b1_high, b1_low = float(bar1['high']), float(bar1['low'])
-        b1_vol = float(bar1.get('volume', 0.0))
-        b1_rng = max(0.01, b1_high - b1_low)
-
-        base_comp = df_slice.iloc[:-3].tail(min(8, len(df_slice) - 3))
-        base_h = float(base_comp['high'].max())
-        base_l = float(base_comp['low'].min())
-        b0_rvol = b0_vol / max(1.0, float(base_comp['volume'].median())) if 'volume' in base_comp else 1.0
-
-        if direction == 'CALL':
-            b0_thrust = (b0_close - b0_low) / b0_rng
-            b0_valid = (b0_close > base_h and b0_close > b0_open and b0_thrust >= 0.65 and b0_rvol >= 1.3)
-            b1_thrust = (b1_close - b1_low) / b1_rng
-            b1_valid = (b1_close > b0_close and b1_high >= b0_high and b1_close > b1_open and
-                        b1_thrust >= 0.60 and b1_vol >= 0.55 * b0_vol)
-            if b0_valid and b1_valid:
-                return True, 'TIER_2_TWO_CANDLE_FOLLOW_THROUGH_CONFIRMED', 23.0
-        else:  # PUT
-            b0_thrust = (b0_high - b0_close) / b0_rng
-            b0_valid = (b0_close < base_l and b0_close < b0_open and b0_thrust >= 0.65 and b0_rvol >= 1.3)
-            b1_thrust = (b1_high - b1_close) / b1_rng
-            b1_valid = (b1_close < b0_close and b1_low <= b0_low and b1_close < b1_open and
-                        b1_thrust >= 0.60 and b1_vol >= 0.55 * b0_vol)
-            if b0_valid and b1_valid:
-                return True, 'TIER_2_TWO_CANDLE_FOLLOW_THROUGH_CONFIRMED', 23.0
-
-    # -------------------------------------------------------------
-    # TIER 3: 3-CANDLE RETEST & EXPANSION CONFIRMATION (Breakout + Pause + Blast)
-    # -------------------------------------------------------------
-    if len(df_slice) >= 9:
-        bar_init = df_slice.iloc[-4] # Bar 1: Breakout
-        bar_pb = df_slice.iloc[-3]   # Bar 2: Shallow Pullback / Pause
-        bar_exp = df_slice.iloc[-2]  # Bar 3: Expansion & Resume
-
-        bi_close, bi_open = float(bar_init['close']), float(bar_init['open'])
-        bi_high, bi_low = float(bar_init['high']), float(bar_init['low'])
-        bi_vol = float(bar_init.get('volume', 0.0))
-        bi_rng = max(0.01, bi_high - bi_low)
-
-        bp_close, bp_open = float(bar_pb['close']), float(bar_pb['open'])
-        bp_high, bp_low = float(bar_pb['high']), float(bar_pb['low'])
-        bp_vol = float(bar_pb.get('volume', 0.0))
-
-        be_close, be_open = float(bar_exp['close']), float(bar_exp['open'])
-        be_high, be_low = float(bar_exp['high']), float(bar_exp['low'])
-        be_vol = float(bar_exp.get('volume', 0.0))
-        be_rng = max(0.01, be_high - be_low)
-
-        base_comp3 = df_slice.iloc[:-4].tail(min(8, len(df_slice) - 4))
-        b3_h = float(base_comp3['high'].max())
-        b3_l = float(base_comp3['low'].min())
-        bi_rvol = bi_vol / max(1.0, float(base_comp3['volume'].median())) if 'volume' in base_comp3 else 1.0
-        be_rvol = be_vol / max(1.0, float(base_comp3['volume'].median())) if 'volume' in base_comp3 else 1.0
-
-        if direction == 'CALL':
-            bi_valid = (bi_close > b3_h and bi_close > bi_open and bi_rvol >= 1.3)
-            midpoint = bi_low + 0.50 * bi_rng
-            bp_holds = (bp_close >= midpoint and bp_vol <= 1.1 * bi_vol)
-            be_thrust = (be_close - be_low) / be_rng
-            be_valid = (be_close > max(bi_high, bp_high) and be_close > be_open and be_thrust >= 0.65 and be_rvol >= 1.6)
-            if bi_valid and bp_holds and be_valid:
-                return True, 'TIER_3_THREE_CANDLE_RETEST_EXPANSION_CONFIRMED', 21.0
-        else:  # PUT
-            bi_valid = (bi_close < b3_l and bi_close < bi_open and bi_rvol >= 1.3)
-            midpoint = bi_high - 0.50 * bi_rng
-            bp_holds = (bp_close <= midpoint and bp_vol <= 1.1 * bi_vol)
-            be_thrust = (be_high - be_close) / be_rng
-            be_valid = (be_close < min(bi_low, bp_low) and be_close < be_open and be_thrust >= 0.65 and be_rvol >= 1.6)
-            if bi_valid and bp_holds and be_valid:
-                return True, 'TIER_3_THREE_CANDLE_RETEST_EXPANSION_CONFIRMED', 21.0
-
-    return False, 'NO_MULTI_CANDLE_CONFIRMATION', 0.0
 
 
 def evaluate_stock_call_slice(
@@ -841,7 +876,6 @@ def evaluate_stock_call_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
-    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -1027,7 +1061,6 @@ def evaluate_stock_put_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
-    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -2331,46 +2364,113 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
     upper_4 = sorted_strikes[atm_idx + 1:min(len(sorted_strikes), atm_idx + 5)]
     atm_info = strike_data[atm_strike]
 
-    score = 4.0
     min_unwind = 5000.0 if is_index else 150.0
     min_write = 10000.0 if is_index else 250.0
     immediate_target_dist = 60.0 if (is_index and sym == 'BANKNIFTY') else (50.0 if is_index else 15.0)
+    ambush_min_chg = 15000.0 if is_index else 400.0
+    min_wall_oi = 50000.0 if is_index else 2500.0
+
     if direction == 'CALL':
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
-        if tot_lower_pe_chg >= min_write and tot_lower_pe_chg >= 1.5 * max(50.0, tot_upper_ce_chg):
-            score += 5.0
-            if tot_lower_pe_chg >= 2.0 * min_write: score += 3.0
-        if (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind or tot_upper_ce_chg <= -min_unwind):
-            score += 5.0
-            if tot_upper_ce_chg <= -(2.0 * min_unwind): score += 3.0
+        tot_upper_ce_vol = sum(strike_data[s].get('ce_vol', 0.0) for s in upper_4)
+
+        # Check 1: Upper OTM Call Ambush
+        is_buying_squeeze = (tot_upper_ce_vol >= 2.0 * max(1.0, tot_upper_ce_chg))
+        if not is_buying_squeeze and tot_upper_ce_chg >= ambush_min_chg and tot_upper_ce_chg > 2.0 * max(100.0, tot_lower_pe_chg):
+            return {'confluent': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
+
+        # Check 2: Immediate Active Call Resistance Wall
         immediate_upper = [s for s in upper_4 if (s - spot) <= immediate_target_dist]
-        if immediate_upper:
-            max_imm_ce = max([strike_data[s]['ce_oi'] for s in immediate_upper], default=0.0)
-            wall_thresh = 50000.0 if is_index else 2500.0
-            if max_imm_ce > wall_thresh:
-                w_s = [s for s in immediate_upper if strike_data[s]['ce_oi'] == max_imm_ce][0]
-                if strike_data[w_s]['ce_oi'] > 4.0 * max(10.0, strike_data[w_s]['pe_oi']) and strike_data[w_s]['ce_vol'] < 0.3 * max_imm_ce:
-                    return {'confluent': True, 'score': 2.0, 'reason': f'CALL_WALL_RESISTANCE_AT_{int(w_s)}'}
-        return {'confluent': True, 'score': min(20.0, score), 'reason': 'CLEAR_RUNWAY'}
-    else:
+        for s in immediate_upper:
+            s_ce = strike_data[s]['ce_oi']
+            s_pe = strike_data[s]['pe_oi']
+            s_ce_chg = strike_data[s]['ce_chg_oi']
+            s_ce_vol = strike_data[s].get('ce_vol', 0.0)
+            if s_ce >= min_wall_oi and s_ce_chg >= 0:
+                if (s_ce > 1.35 * max(50.0, s_pe)) or (s_ce_chg > 1.5 * max(20.0, strike_data[s]['pe_chg_oi'])):
+                    if s_ce_vol >= 2.5 * s_ce:
+                        continue
+                    return {'confluent': False, 'score': 0.0, 'reason': f'CALL_WALL_RESISTANCE_AT_{int(s)}'}
+
+        # Check 3: ATM Call Writer Dominance
+        if atm_info.get('ce_chg_oi', 0.0) > 1.5 * max(50.0, atm_info.get('pe_chg_oi', 0.0)) and atm_info.get('ce_chg_oi', 0.0) > 0:
+            return {'confluent': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
+
+        # 1. Mandatory Call Unwinding on ATM or OTM Resistance strikes
+        has_unwind = (tot_upper_ce_chg <= -min_unwind) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind)
+        if not has_unwind:
+            return {'confluent': False, 'score': 0.0, 'reason': 'NO_CALL_UNWINDING_MANDATORY_FAIL'}
+
+        # 2. Mandatory Put Support Writing on ATM or OTM Support strikes
+        has_support = (tot_lower_pe_chg >= min_write and tot_lower_pe_chg >= 1.2 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write))
+        if not has_support:
+            return {'confluent': False, 'score': 0.0, 'reason': 'NO_PUT_SUPPORT_WRITING_FAIL'}
+
+        # 3. Call Buyer Volume Presence
+        atm_ce_vol = atm_info.get('ce_vol', 0.0)
+        if atm_ce_vol < min_unwind:
+            return {'confluent': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
+
+        score = 10.0
+        if tot_upper_ce_chg <= -(2.0 * min_unwind) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind):
+            score += 2.0
+        score += 6.0
+        if atm_info.get('pe_chg_oi', 0.0) >= min_write:
+            score += 2.0
+        score = round(min(20.0, max(8.0, score)), 2)
+        return {'confluent': True, 'score': score, 'reason': 'CLEAR_CALL_RUNWAY_AND_SUPPORT_WALL'}
+
+    else:  # PUT
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
-        if tot_upper_ce_chg >= min_write and tot_upper_ce_chg >= 1.5 * max(50.0, tot_lower_pe_chg):
-            score += 5.0
-            if tot_upper_ce_chg >= 2.0 * min_write: score += 3.0
-        if (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind or tot_lower_pe_chg <= -min_unwind):
-            score += 5.0
-            if tot_lower_pe_chg <= -(2.0 * min_unwind): score += 3.0
+        tot_lower_pe_vol = sum(strike_data[s].get('pe_vol', 0.0) for s in lower_4)
+
+        # Check 1: Lower OTM Put Ambush
+        is_buying_squeeze = (tot_lower_pe_vol >= 2.0 * max(1.0, tot_lower_pe_chg))
+        if not is_buying_squeeze and tot_lower_pe_chg >= ambush_min_chg and tot_lower_pe_chg > 2.0 * max(100.0, tot_upper_ce_chg):
+            return {'confluent': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
+
+        # Check 2: Immediate Active Put Support Wall
         immediate_lower = [s for s in lower_4 if (spot - s) <= immediate_target_dist]
-        if immediate_lower:
-            max_imm_pe = max([strike_data[s]['pe_oi'] for s in immediate_lower], default=0.0)
-            wall_thresh = 50000.0 if is_index else 2500.0
-            if max_imm_pe > wall_thresh:
-                w_s = [s for s in immediate_lower if strike_data[s]['pe_oi'] == max_imm_pe][0]
-                if strike_data[w_s]['pe_oi'] > 4.0 * max(10.0, strike_data[w_s]['ce_oi']) and strike_data[w_s]['pe_vol'] < 0.3 * max_imm_pe:
-                    return {'confluent': True, 'score': 2.0, 'reason': f'PUT_WALL_RESISTANCE_AT_{int(w_s)}'}
-        return {'confluent': True, 'score': min(20.0, score), 'reason': 'CLEAR_RUNWAY'}
+        for s in immediate_lower:
+            s_pe = strike_data[s]['pe_oi']
+            s_ce = strike_data[s]['ce_oi']
+            s_pe_chg = strike_data[s]['pe_chg_oi']
+            s_pe_vol = strike_data[s].get('pe_vol', 0.0)
+            if s_pe >= min_wall_oi and s_pe_chg >= 0:
+                if (s_pe > 1.35 * max(50.0, s_ce)) or (s_pe_chg > 1.5 * max(20.0, strike_data[s]['ce_chg_oi'])):
+                    if s_pe_vol >= 2.5 * s_pe:
+                        continue
+                    return {'confluent': False, 'score': 0.0, 'reason': f'PUT_WALL_RESISTANCE_AT_{int(s)}'}
+
+        # Check 3: ATM Put Writer Dominance
+        if atm_info.get('pe_chg_oi', 0.0) > 1.5 * max(50.0, atm_info.get('ce_chg_oi', 0.0)) and atm_info.get('pe_chg_oi', 0.0) > 0:
+            return {'confluent': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
+
+        # 1. Mandatory Put Unwinding on ATM or OTM Support strikes
+        has_unwind = (tot_lower_pe_chg <= -min_unwind) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind)
+        if not has_unwind:
+            return {'confluent': False, 'score': 0.0, 'reason': 'NO_PUT_UNWINDING_MANDATORY_FAIL'}
+
+        # 2. Mandatory Call Resistance Writing on ATM or OTM Resistance strikes
+        has_resistance = (tot_upper_ce_chg >= min_write and tot_upper_ce_chg >= 1.2 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write))
+        if not has_resistance:
+            return {'confluent': False, 'score': 0.0, 'reason': 'NO_CALL_RESISTANCE_WRITING_FAIL'}
+
+        # 3. Put Buyer Volume Presence
+        atm_pe_vol = atm_info.get('pe_vol', 0.0)
+        if atm_pe_vol < min_unwind:
+            return {'confluent': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
+
+        score = 10.0
+        if tot_lower_pe_chg <= -(2.0 * min_unwind) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind):
+            score += 2.0
+        score += 6.0
+        if atm_info.get('ce_chg_oi', 0.0) >= min_write:
+            score += 2.0
+        score = round(min(20.0, max(8.0, score)), 2)
+        return {'confluent': True, 'score': score, 'reason': 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL'}
 
 def load_resampled_3m_data() -> tuple[Dict[str, pd.DataFrame], List[str]]:
     cache_dirs = [
@@ -2540,7 +2640,9 @@ class ActiveOptionTrade:
         self.contract_name = f"{self.sym} {stk_str} {self.opt_type}"
         self.lot_size = lot_map.get(self.sym, (25 if self.is_idx else 250))
         self.opt_entry_premium = max(6.0, round(self.spot_sl * 2.00, 2))
-        self.opt_sl_pts = round(max(1.5, self.spot_sl * 0.50), 2)
+        self.opt_sl_pts = 18.0 if self.is_idx else 5.0
+        self.opt_t1_pts = 45.0 if self.is_idx else 25.0
+        self.opt_t2_pts = 100.0 if self.is_idx else 50.0
 
     def update(self, b_high: float, b_low: float, b_close: float, ts):
         if self.is_closed:
@@ -2662,7 +2764,7 @@ class ActiveOptionTrade:
         theta_decay_pts = round(theta_per_min * holding_mins, 2)
 
         if "SL_HIT" in self.exit_reason:
-            opt_pts = gross_opt_pts
+            opt_pts = -self.opt_sl_pts
         else:
             opt_pts = round(gross_opt_pts - theta_decay_pts, 2)
 
