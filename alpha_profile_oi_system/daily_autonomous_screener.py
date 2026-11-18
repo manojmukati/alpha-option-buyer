@@ -64,7 +64,9 @@ MAX_DAILY_SUPER_TRADES = 8
 MAX_SLAB_TRADES = 3
 MAX_INDEX_PER_SLAB = 1
 MAX_STOCKS_PER_SLAB = 3
-SCORE_THRESHOLD = 80.0  # Aladdin-Level Pure 5-Pillar Score Qualification Threshold
+INDEX_SCORE_THRESHOLD = 60.0  # Institutionally Calibrated Threshold for Macro Indices (NIFTY/BANKNIFTY)
+STOCK_SCORE_THRESHOLD = 80.0  # Aladdin-Level Pure 5-Pillar Score Qualification Threshold for Equities
+SCORE_THRESHOLD = STOCK_SCORE_THRESHOLD
 
 # Load F&O Lot Size Map dynamically from modules/fno_universe_cache.json
 _LOT_MAP_PATH = os.path.join(CURRENT_DIR, 'modules', 'fno_universe_cache.json')
@@ -1274,8 +1276,9 @@ class DailyAutonomousScreener:
             cand['verified_opt'] = opt
             oi_score = float(opt.get('oi_score', 12.0))
             cand['score'] = round(cand.get('prelim_score', cand.get('score', 60.0)) + oi_score, 2)
-            if cand['score'] < SCORE_THRESHOLD:
-                stage2_rejections[sym] = f"SCORE_BELOW_THRESHOLD ({cand['score']:.1f} < {SCORE_THRESHOLD})"
+            req_threshold = INDEX_SCORE_THRESHOLD if is_idx else STOCK_SCORE_THRESHOLD
+            if cand['score'] < req_threshold:
+                stage2_rejections[sym] = f"SCORE_BELOW_THRESHOLD ({cand['score']:.1f} < {req_threshold:.1f})"
                 continue
 
             all_stage2_candidates.append(cand)
@@ -1983,7 +1986,7 @@ class DailyAutonomousScreener:
                             sig['oi_confluent'] = True
                             oi_score = float(oi_res.get('score', 12.0))
                             total_score = round(sig['prelim_score'] + oi_score, 2)
-                            if total_score >= SCORE_THRESHOLD:
+                            if total_score >= INDEX_SCORE_THRESHOLD:
                                 sig['score'] = total_score
                                 candidates.append(sig)
 
@@ -2014,7 +2017,7 @@ class DailyAutonomousScreener:
                             sig['oi_confluent'] = True
                             oi_score = float(oi_res.get('score', 12.0))
                             total_score = round(sig['prelim_score'] + oi_score, 2)
-                            if total_score >= SCORE_THRESHOLD:
+                            if total_score >= STOCK_SCORE_THRESHOLD:
                                 sig['score'] = total_score
                                 candidates.append(sig)
 

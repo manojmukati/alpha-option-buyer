@@ -812,30 +812,32 @@ class LiveMarketDataFeed:
             if atm_info['ce_chg_oi'] > 1.5 * max(500.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
-            # Precision Institutional OI Scoring (Support Base + Unwinding Velocity)
-            # Strict Pillar 4 Tightening: Zero free gift baseline. Requires real institutional volume.
+            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Support + 4-Strike Runway)
             score = 0.0
-            min_unwind_contracts = 10000.0 if is_index else 150.0
-            min_write_contracts = 15000.0 if is_index else 250.0
+            min_unwind_contracts = 5000.0 if is_index else 150.0
+            min_write_contracts = 10000.0 if is_index else 250.0
 
+            # 1. Mandatory Call Unwinding on ATM or OTM Resistance strikes
             has_unwind = (tot_upper_ce_chg <= -min_unwind_contracts) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_contracts)
-            has_support = (tot_lower_pe_chg >= min_write_contracts and tot_lower_pe_chg >= 1.5 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.5 * min_write_contracts))
+            if not has_unwind:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_UNWINDING_MANDATORY_FAIL'}
 
-            # Hard Gate: If neither institutional Call Unwinding nor Put Writing support is present, veto the trade!
-            if not has_unwind and not has_support:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_UNWINDING_OR_PUT_SUPPORT'}
+            # 2. Mandatory Put Support Writing on ATM or OTM Support strikes
+            has_support = (tot_lower_pe_chg >= min_write_contracts and tot_lower_pe_chg >= 1.2 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write_contracts))
+            if not has_support:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_SUPPORT_WRITING_FAIL'}
 
-            # 1. Real Call Unwinding on Resistance Strikes (+10 pts, +2 pts extra for heavy)
-            if has_unwind:
-                score += 10.0
-                if tot_upper_ce_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
-                    score += 2.0
+            # 3. Call Buyer Volume Presence
+            atm_ce_vol = atm_info.get('ce_vol', 0.0)
+            if atm_ce_vol < min_unwind_contracts:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
 
-            # 2. Aggressive Put Writing Dominance (Floor Defence) (+8 pts, +2 pts extra for heavy ATM)
-            if has_support:
-                score += 8.0
-                if atm_info.get('pe_chg_oi', 0.0) >= min_write_contracts:
-                    score += 2.0
+            score += 10.0
+            if tot_upper_ce_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+                score += 2.0
+            score += 6.0
+            if atm_info.get('pe_chg_oi', 0.0) >= min_write_contracts:
+                score += 2.0
             score = round(min(20.0, max(8.0, score)), 2)
 
             return {
@@ -888,30 +890,32 @@ class LiveMarketDataFeed:
             if atm_info['pe_chg_oi'] > 1.5 * max(500.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
-            # Precision Institutional OI Scoring (Resistance Ceiling + Unwinding Velocity)
-            # Strict Pillar 4 Tightening: Zero free gift baseline. Requires real institutional volume.
+            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Resistance + 4-Strike Runway)
             score = 0.0
-            min_unwind_contracts = 10000.0 if is_index else 150.0
-            min_write_contracts = 15000.0 if is_index else 250.0
+            min_unwind_contracts = 5000.0 if is_index else 150.0
+            min_write_contracts = 10000.0 if is_index else 250.0
 
+            # 1. Mandatory Put Unwinding on ATM or OTM Support strikes
             has_unwind = (tot_lower_pe_chg <= -min_unwind_contracts) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_contracts)
-            has_resistance = (tot_upper_ce_chg >= min_write_contracts and tot_upper_ce_chg >= 1.5 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.5 * min_write_contracts))
+            if not has_unwind:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_UNWINDING_MANDATORY_FAIL'}
 
-            # Hard Gate: If neither institutional Put Unwinding nor Call Writing ceiling is present, veto the trade!
-            if not has_unwind and not has_resistance:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_UNWINDING_OR_CALL_PRESSURE'}
+            # 2. Mandatory Call Resistance Writing on ATM or OTM Resistance strikes
+            has_resistance = (tot_upper_ce_chg >= min_write_contracts and tot_upper_ce_chg >= 1.2 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write_contracts))
+            if not has_resistance:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_RESISTANCE_WRITING_FAIL'}
 
-            # 1. Real Put Unwinding on Support Strikes (+10 pts, +2 pts extra for heavy)
-            if has_unwind:
-                score += 10.0
-                if tot_lower_pe_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
-                    score += 2.0
+            # 3. Put Buyer Volume Presence
+            atm_pe_vol = atm_info.get('pe_vol', 0.0)
+            if atm_pe_vol < min_unwind_contracts:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
 
-            # 2. Aggressive Call Writing Dominance (Ceiling Pressure) (+8 pts, +2 pts extra for heavy ATM)
-            if has_resistance:
-                score += 8.0
-                if atm_info.get('ce_chg_oi', 0.0) >= min_write_contracts:
-                    score += 2.0
+            score += 10.0
+            if tot_lower_pe_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+                score += 2.0
+            score += 6.0
+            if atm_info.get('ce_chg_oi', 0.0) >= min_write_contracts:
+                score += 2.0
             score = round(min(20.0, max(8.0, score)), 2)
 
             return {
