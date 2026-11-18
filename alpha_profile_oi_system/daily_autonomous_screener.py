@@ -37,7 +37,7 @@ import urllib.request
 import glob
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
@@ -316,6 +316,7 @@ def evaluate_index_call_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -344,6 +345,7 @@ def evaluate_index_call_slice(
         'score': prelim_score,
         'stock_atr': atr,
         'pct_change': pct_change,
+        'tier_reason': tier_reason,
         'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
     }
 
@@ -483,6 +485,7 @@ def evaluate_index_put_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -511,8 +514,179 @@ def evaluate_index_put_slice(
         'score': prelim_score,
         'stock_atr': atr,
         'pct_change': pct_change,
+        'tier_reason': tier_reason,
         'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
     }
+
+
+def verify_multi_candle_momentum(
+    df_slice: pd.DataFrame,
+    direction: str,
+    comp_bars: pd.DataFrame,
+    daily_atr: float,
+    lot_size: float,
+    sym_clean: str,
+    nifty_regime: Optional[Dict[str, Any]] = None
+) -> Tuple[bool, str, float]:
+    """
+    3-TIER INSTITUTIONAL MULTI-CANDLE CONFIRMATION ENGINE (1, 2, or 3 Candles):
+    ----------------------------------------------------------------------------------------
+    Tier 1 (Ultra-Confirmation in 1 Candle):
+        - Breakthrough Initiation on current eval_bar (iloc[-2]).
+        - RVOL >= 2.5x (Monster institutional turnover).
+        - Volume >= 40 F&O lots (or >= 2,500 shares), Turnover >= 2.0 Crore.
+        - Marubozu Thrust >= 0.85 (Close within extreme 15% edge, Wick <= 15%).
+        - Pre-Breakout Coil: Prior 3-bar range compression NR3 <= 0.45 * (daily_atr / 13.0).
+        -> IF PASS: Immediate 1-Candle Entry! (2 and 3 candles avoided).
+
+    Tier 2 (2-Candle Follow-Through Confirmation):
+        - Initiation on bar0 (iloc[-3]) and Follow-Through on bar1 (iloc[-2]).
+        - Bar0 broke out past comp_bars with regular momentum (RVOL >= 1.3x, Thrust >= 0.65).
+        - Bar1 MUST expand in trade direction:
+            CALL: bar1['close'] > bar0['close'] and bar1['high'] >= bar0['high'] and bar1['close'] > bar0['open']
+            PUT: bar1['close'] < bar0['close'] and bar1['low'] <= bar0['low'] and bar1['close'] < bar0['open']
+        - Bar1 Volume Continuation: bar1['volume'] >= 0.55 * bar0['volume'] (No volume collapse!).
+        - Bar1 Thrust >= 0.60.
+        -> IF PASS: 2-Candle Confirmation Locked!
+
+    Tier 3 (3-Candle Retest & Expansion Confirmation):
+        - Initiation on bar_init (iloc[-4]), Pause/Pullback on bar_pb (iloc[-3]), Expansion on bar_exp (iloc[-2]).
+        - Bar_init broke out past comp_bars with RVOL >= 1.3x.
+        - Bar_pb: Shallow pullback holding above 50% midpoint of bar_init for CALL, below 50% for PUT; pullback volume <= 1.1x bar_init['volume'].
+        - Bar_exp (iloc[-2]): Fresh expansion breakout:
+            CALL: bar_exp['close'] > max(bar_init['high'], bar_pb['high']) and bar_exp['close'] > bar_exp['open']
+            PUT: bar_exp['close'] < min(bar_init['low'], bar_pb['low']) and bar_exp['close'] < bar_exp['open']
+        - Bar_exp Volume Expansion: RVOL >= 1.6x on bar_exp, thrust >= 0.65.
+        -> IF PASS: 3-Candle Confirmation Locked!
+
+    If NONE of Tier 1, Tier 2, or Tier 3 pass:
+        -> Return (False, 'NO_MULTI_CANDLE_CONFIRMATION', 0.0)
+    """
+    if df_slice is None or len(df_slice) < 7:
+        return False, 'INSUFFICIENT_BARS', 0.0
+
+    eval_bar = df_slice.iloc[-2]
+    eval_close = float(eval_bar['close'])
+    eval_open = float(eval_bar['open'])
+    eval_high = float(eval_bar['high'])
+    eval_low = float(eval_bar['low'])
+    eval_vol = float(eval_bar.get('volume', 0.0))
+    bar_rng = max(0.01, eval_high - eval_low)
+    turnover_cr = (eval_close * eval_vol) / 1e7
+    contracts_in_bar = eval_vol / max(1.0, lot_size)
+
+    comp_high = float(comp_bars['high'].max())
+    comp_low = float(comp_bars['low'].min())
+    comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
+    hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
+    base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
+    real_rvol = eval_vol / max(1.0, base_vol)
+
+    # Pre-breakout NR3 compression calculation
+    prior_3 = comp_bars.tail(3)
+    nr3_rng = float((prior_3['high'] - prior_3['low']).max()) if len(prior_3) >= 3 else bar_rng
+    is_pre_coiled = (nr3_rng <= 0.50 * (daily_atr / 13.0)) if daily_atr > 0 else True
+
+    # -------------------------------------------------------------
+    # TIER 1: ULTRA-CONFIRMATION ON 1 CANDLE (Monster Institutional Thrust)
+    # -------------------------------------------------------------
+    if direction == 'CALL':
+        thrust_1 = (eval_close - eval_low) / bar_rng
+        is_breakout_1 = (eval_close > comp_high and eval_close > eval_open)
+        if (is_breakout_1 and thrust_1 >= 0.85 and real_rvol >= 2.5 and 
+            contracts_in_bar >= 40.0 and turnover_cr >= 2.0 and is_pre_coiled):
+            return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
+    else:  # PUT
+        thrust_1 = (eval_high - eval_close) / bar_rng
+        is_breakdown_1 = (eval_close < comp_low and eval_close < eval_open)
+        if (is_breakdown_1 and thrust_1 >= 0.85 and real_rvol >= 2.5 and 
+            contracts_in_bar >= 40.0 and turnover_cr >= 2.0 and is_pre_coiled):
+            return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
+
+    # -------------------------------------------------------------
+    # TIER 2: 2-CANDLE FOLLOW-THROUGH CONFIRMATION (Breakout + Expansion)
+    # -------------------------------------------------------------
+    if len(df_slice) >= 8:
+        bar0 = df_slice.iloc[-3]  # Breakout Initiation Bar
+        bar1 = df_slice.iloc[-2]  # Follow-Through Bar
+        b0_close, b0_open = float(bar0['close']), float(bar0['open'])
+        b0_high, b0_low = float(bar0['high']), float(bar0['low'])
+        b0_vol = float(bar0.get('volume', 0.0))
+        b0_rng = max(0.01, b0_high - b0_low)
+
+        b1_close, b1_open = float(bar1['close']), float(bar1['open'])
+        b1_high, b1_low = float(bar1['high']), float(bar1['low'])
+        b1_vol = float(bar1.get('volume', 0.0))
+        b1_rng = max(0.01, b1_high - b1_low)
+
+        base_comp = df_slice.iloc[:-3].tail(min(8, len(df_slice) - 3))
+        base_h = float(base_comp['high'].max())
+        base_l = float(base_comp['low'].min())
+        b0_rvol = b0_vol / max(1.0, float(base_comp['volume'].median())) if 'volume' in base_comp else 1.0
+
+        if direction == 'CALL':
+            b0_thrust = (b0_close - b0_low) / b0_rng
+            b0_valid = (b0_close > base_h and b0_close > b0_open and b0_thrust >= 0.65 and b0_rvol >= 1.3)
+            b1_thrust = (b1_close - b1_low) / b1_rng
+            b1_valid = (b1_close > b0_close and b1_high >= b0_high and b1_close > b1_open and
+                        b1_thrust >= 0.60 and b1_vol >= 0.55 * b0_vol)
+            if b0_valid and b1_valid:
+                return True, 'TIER_2_TWO_CANDLE_FOLLOW_THROUGH_CONFIRMED', 23.0
+        else:  # PUT
+            b0_thrust = (b0_high - b0_close) / b0_rng
+            b0_valid = (b0_close < base_l and b0_close < b0_open and b0_thrust >= 0.65 and b0_rvol >= 1.3)
+            b1_thrust = (b1_high - b1_close) / b1_rng
+            b1_valid = (b1_close < b0_close and b1_low <= b0_low and b1_close < b1_open and
+                        b1_thrust >= 0.60 and b1_vol >= 0.55 * b0_vol)
+            if b0_valid and b1_valid:
+                return True, 'TIER_2_TWO_CANDLE_FOLLOW_THROUGH_CONFIRMED', 23.0
+
+    # -------------------------------------------------------------
+    # TIER 3: 3-CANDLE RETEST & EXPANSION CONFIRMATION (Breakout + Pause + Blast)
+    # -------------------------------------------------------------
+    if len(df_slice) >= 9:
+        bar_init = df_slice.iloc[-4] # Bar 1: Breakout
+        bar_pb = df_slice.iloc[-3]   # Bar 2: Shallow Pullback / Pause
+        bar_exp = df_slice.iloc[-2]  # Bar 3: Expansion & Resume
+
+        bi_close, bi_open = float(bar_init['close']), float(bar_init['open'])
+        bi_high, bi_low = float(bar_init['high']), float(bar_init['low'])
+        bi_vol = float(bar_init.get('volume', 0.0))
+        bi_rng = max(0.01, bi_high - bi_low)
+
+        bp_close, bp_open = float(bar_pb['close']), float(bar_pb['open'])
+        bp_high, bp_low = float(bar_pb['high']), float(bar_pb['low'])
+        bp_vol = float(bar_pb.get('volume', 0.0))
+
+        be_close, be_open = float(bar_exp['close']), float(bar_exp['open'])
+        be_high, be_low = float(bar_exp['high']), float(bar_exp['low'])
+        be_vol = float(bar_exp.get('volume', 0.0))
+        be_rng = max(0.01, be_high - be_low)
+
+        base_comp3 = df_slice.iloc[:-4].tail(min(8, len(df_slice) - 4))
+        b3_h = float(base_comp3['high'].max())
+        b3_l = float(base_comp3['low'].min())
+        bi_rvol = bi_vol / max(1.0, float(base_comp3['volume'].median())) if 'volume' in base_comp3 else 1.0
+        be_rvol = be_vol / max(1.0, float(base_comp3['volume'].median())) if 'volume' in base_comp3 else 1.0
+
+        if direction == 'CALL':
+            bi_valid = (bi_close > b3_h and bi_close > bi_open and bi_rvol >= 1.3)
+            midpoint = bi_low + 0.50 * bi_rng
+            bp_holds = (bp_close >= midpoint and bp_vol <= 1.1 * bi_vol)
+            be_thrust = (be_close - be_low) / be_rng
+            be_valid = (be_close > max(bi_high, bp_high) and be_close > be_open and be_thrust >= 0.65 and be_rvol >= 1.6)
+            if bi_valid and bp_holds and be_valid:
+                return True, 'TIER_3_THREE_CANDLE_RETEST_EXPANSION_CONFIRMED', 21.0
+        else:  # PUT
+            bi_valid = (bi_close < b3_l and bi_close < bi_open and bi_rvol >= 1.3)
+            midpoint = bi_high - 0.50 * bi_rng
+            bp_holds = (bp_close <= midpoint and bp_vol <= 1.1 * bi_vol)
+            be_thrust = (be_high - be_close) / be_rng
+            be_valid = (be_close < min(bi_low, bp_low) and be_close < be_open and be_thrust >= 0.65 and be_rvol >= 1.6)
+            if bi_valid and bp_holds and be_valid:
+                return True, 'TIER_3_THREE_CANDLE_RETEST_EXPANSION_CONFIRMED', 21.0
+
+    return False, 'NO_MULTI_CANDLE_CONFIRMATION', 0.0
 
 
 def evaluate_stock_call_slice(
@@ -592,44 +766,29 @@ def evaluate_stock_call_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # 1. Breakout Trigger
-    if not (eval_close > comp_high and eval_close > eval_open):
-        return None
-
-    # 2. Breakout Body Thrust (Ultra-Confirmation >= 0.70)
-    candle_thrust = (eval_close - eval_low) / bar_rng
-    if candle_thrust < 0.70:
-        return None
-
-    # 3. Macro Nifty Alignment
+    # 1. Macro Nifty Alignment
     if not nifty_regime.get('allow_stock_call', True):
         return None
 
-    # PILLAR 1: Real Institutional Cash RVOL & Smart Money Turnover
+    # PILLAR 1: 3-TIER MULTI-CANDLE MOMENTUM VERIFICATION (1-Candle Ultra OR 2-Candle Follow-Through OR 3-Candle Retest)
+    lot_size = get_symbol_lot_size(sym_clean)
+    is_valid_mom, tier_reason, p1_score = verify_multi_candle_momentum(
+        df_slice=df_slice,
+        direction='CALL',
+        comp_bars=comp_bars,
+        daily_atr=atr,
+        lot_size=lot_size,
+        sym_clean=sym_clean,
+        nifty_regime=nifty_regime
+    )
+    if not is_valid_mom:
+        return None
+
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
-
-    lot_size = get_symbol_lot_size(sym_clean)
-    contracts_in_bar = round(eval_vol / max(1.0, lot_size), 1)
-
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    # Ultra-Confirmed Institutional Volume Gate:
-    # 1. At least 25 F&O contracts traded in 3m bar (eliminates 15-lot retail noise on high-priced stocks)
-    # 2. Minimum 1,500 shares floor
-    # 3. Relative volume >= 1.5x (Ultra-Confirmation)
-    # 4. Turnover >= 1.0 Crore
-    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.5 or turnover_cr < 1.0:
-        return None
-    if real_rvol >= 2.2: rvol_pts = 15.0
-    elif real_rvol >= 1.6: rvol_pts = 12.0
-    else: rvol_pts = 8.0
-
-    if turnover_cr >= 2.5: turn_pts = 10.0
-    elif turnover_cr >= 1.2: turn_pts = 7.0
-    else: turn_pts = 4.0
-    p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
 
     # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD Flow
     bars_5 = df_slice.iloc[-6:-1]
@@ -682,6 +841,7 @@ def evaluate_stock_call_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -710,6 +870,7 @@ def evaluate_stock_call_slice(
         'score': prelim_score,
         'stock_atr': atr,
         'pct_change': pct_change,
+        'tier_reason': tier_reason,
         'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
     }
 
@@ -791,44 +952,29 @@ def evaluate_stock_put_slice(
     comp_low = float(comp_bars['low'].min())
     comp_width = comp_high - comp_low
 
-    # 1. Breakdown Trigger
-    if not (eval_close < comp_low and eval_close < eval_open):
-        return None
-
-    # 2. Breakdown Body Thrust (Ultra-Confirmation >= 0.70)
-    candle_thrust = (eval_high - eval_close) / bar_rng
-    if candle_thrust < 0.70:
-        return None
-
-    # 3. Macro Nifty Alignment
+    # 1. Macro Nifty Alignment
     if not nifty_regime.get('allow_stock_put', True):
         return None
 
-    # PILLAR 1: Real Institutional Cash RVOL & Smart Money Turnover
+    # PILLAR 1: 3-TIER MULTI-CANDLE MOMENTUM VERIFICATION (1-Candle Ultra OR 2-Candle Follow-Through OR 3-Candle Retest)
+    lot_size = get_symbol_lot_size(sym_clean)
+    is_valid_mom, tier_reason, p1_score = verify_multi_candle_momentum(
+        df_slice=df_slice,
+        direction='PUT',
+        comp_bars=comp_bars,
+        daily_atr=atr,
+        lot_size=lot_size,
+        sym_clean=sym_clean,
+        nifty_regime=nifty_regime
+    )
+    if not is_valid_mom:
+        return None
+
     hist_slot_vol = float(eval_bar.get('hist_slot_vol', 0.0))
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
-
-    lot_size = get_symbol_lot_size(sym_clean)
-    contracts_in_bar = round(eval_vol / max(1.0, lot_size), 1)
-
     turnover_cr = (eval_close * eval_vol) / 1e7
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    # Ultra-Confirmed Institutional Volume Gate:
-    # 1. At least 25 F&O contracts traded in 3m bar (eliminates 15-lot retail noise on high-priced stocks)
-    # 2. Minimum 1,500 shares floor
-    # 3. Relative volume >= 1.5x (Ultra-Confirmation)
-    # 4. Turnover >= 1.0 Crore
-    if contracts_in_bar < 25.0 or eval_vol < 1500 or real_rvol < 1.5 or turnover_cr < 1.0:
-        return None
-    if real_rvol >= 2.2: rvol_pts = 15.0
-    elif real_rvol >= 1.6: rvol_pts = 12.0
-    else: rvol_pts = 8.0
-
-    if turnover_cr >= 2.5: turn_pts = 10.0
-    elif turnover_cr >= 1.2: turn_pts = 7.0
-    else: turn_pts = 4.0
-    p1_score = round(min(25.0, rvol_pts + turn_pts), 2)
 
     # PILLAR 2: True BVC Volume Delta & Multi-Bar CVD Flow
     bars_5 = df_slice.iloc[-6:-1]
@@ -881,6 +1027,7 @@ def evaluate_stock_put_slice(
         p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+    tier_reason = 'INDEX_CALL_EXPANSION'
 
     return {
         'symbol': sym_clean,
@@ -909,6 +1056,7 @@ def evaluate_stock_put_slice(
         'score': prelim_score,
         'stock_atr': atr,
         'pct_change': pct_change,
+        'tier_reason': tier_reason,
         'eval_time': target_bar.name if hasattr(target_bar, 'name') else None
     }
 
@@ -1104,10 +1252,17 @@ class DailyAutonomousScreener:
         is_nifty_bearish = (cur_close < tp_vwap and move_pts <= -35.0)
 
         is_runaway_bull = (move_pts >= 40.0)
-        allow_stock_call = not is_nifty_bearish
-        allow_stock_put = not is_runaway_bull
-        allow_index_call = is_nifty_bullish and not is_chop
-        allow_index_put = is_nifty_bearish and not is_chop
+
+        # Live Micro-Swing Counter-Trend Filter (Last 4 bars / 12 mins)
+        n_recent_low = float(df_nifty['low'].iloc[-4:].min()) if len(df_nifty) >= 4 else cur_close
+        n_recent_high = float(df_nifty['high'].iloc[-4:].max()) if len(df_nifty) >= 4 else cur_close
+        is_nifty_counter_bouncing = (cur_close - n_recent_low >= 25.0)  # Sharp +25pt bounce from low
+        is_nifty_counter_pulling = (n_recent_high - cur_close >= 25.0)   # Sharp -25pt dip from high
+
+        allow_stock_call = not is_nifty_bearish and not is_nifty_counter_pulling
+        allow_stock_put = not is_runaway_bull and not is_nifty_counter_bouncing
+        allow_index_call = is_nifty_bullish and not is_chop and not is_nifty_counter_pulling
+        allow_index_put = is_nifty_bearish and not is_chop and not is_nifty_counter_bouncing
 
         regime_desc = "NEUTRAL"
         if is_chop:
