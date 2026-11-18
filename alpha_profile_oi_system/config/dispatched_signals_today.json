@@ -1,11 +1,7 @@
 {
-  "date": "2026-11-17",
+  "date": "2026-11-18",
   "dispatched": {
-    "TCS": 1794889537.8894918,
-    "AXISBANK": 1794889539.4522932,
-    "PREMIERENE": 1794890468.807493,
-    "ADANIENT": 1794903910.5921116
-  },
-  "eod_journal_dispatched": true,
-  "eod_dispatched_time": "03:35:54 PM IST"
+    "KAYNES": 1794974969.874005,
+    "LTM": 1794976584.9512208
+  }
 }
