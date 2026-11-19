@@ -812,6 +812,7 @@ class LiveMarketDataFeed:
                 s_ce = strike_data[s]['ce_oi']
                 s_pe = strike_data[s]['pe_oi']
                 s_ce_chg = strike_data[s]['ce_chg_oi']
+                s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0)
                 
                 # Active Resistance Wall requires s_ce_chg >= 0 (Call Writing active)
@@ -904,6 +905,7 @@ class LiveMarketDataFeed:
                 s_pe = strike_data[s]['pe_oi']
                 s_ce = strike_data[s]['ce_oi']
                 s_pe_chg = strike_data[s]['pe_chg_oi']
+                s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0)
                 
                 # Active Support Wall requires s_pe_chg >= 0 (Put Writing active)
