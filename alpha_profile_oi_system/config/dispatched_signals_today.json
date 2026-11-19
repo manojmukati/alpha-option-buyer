@@ -1,10 +1,6 @@
 {
-  "date": "2026-11-18",
+  "date": "2026-11-19",
   "dispatched": {
-    "KAYNES": 1794974969.874005,
-    "LTM": 1794976584.9512208,
-    "HEROMOTOCO": 1794989740.4351974
-  },
-  "eod_journal_dispatched": true,
-  "eod_dispatched_time": "03:35:45 PM IST"
+    "PIIND": 1795061478.3362193
+  }
 }
