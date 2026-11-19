@@ -15,7 +15,11 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from alpha_profile_oi_system.daily_autonomous_screener import DailyAutonomousScreener
+from alpha_profile_oi_system.alpha_institutional_swapped_screener import AlphaInstitutionalSwappedScreener
 
 if __name__ == '__main__':
-    screener = DailyAutonomousScreener()
+    if '--legacy' in sys.argv:
+        screener = DailyAutonomousScreener()
+    else:
+        screener = AlphaInstitutionalSwappedScreener()
     screener.run_authoritative_5day_backtest()
