@@ -255,6 +255,7 @@ def verify_multi_candle_momentum(
     nr3_rng = float((prior_3['high'] - prior_3['low']).max()) if len(prior_3) >= 3 else bar_rng
     is_pre_coiled = (nr3_rng <= 0.50 * (daily_atr / 13.0)) if daily_atr > 0 else True
 
+    turnover_15m = 0.0
     if not is_index:
         eval_vol = float(eval_bar.get('volume', 0.0))
         turnover_cr = (eval_close * eval_vol) / 1e7
@@ -264,24 +265,48 @@ def verify_multi_candle_momentum(
         base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
         real_rvol = eval_vol / max(1.0, base_vol)
 
+        # 15-minute rolling turnover (last 5 bars)
+        bars_5_turnover = []
+        for idx_b in range(max(0, len(df_slice) - 6), len(df_slice) - 1):
+            b_item = df_slice.iloc[idx_b]
+            b_c = float(b_item.get('close', 0.0))
+            b_v = float(b_item.get('volume', 0.0))
+            bars_5_turnover.append((b_c * b_v) / 1e7)
+        turnover_15m = float(sum(bars_5_turnover)) if bars_5_turnover else turnover_cr
+
+        # Strict Institutional Liquidity Depth Veto:
+        # A stock MUST have sustained rolling turnover >= Rs 10 Cr (eliminates dead order books like PIIND)
+        if turnover_15m < 10.0:
+            return False, 'INSUFFICIENT_15M_TURNOVER_DEPTH', 0.0
+
+        # Anti-Illiquid Spike Decay Veto:
+        # If eval_bar had a single spike but subsequent bar volume collapsed by > 65%, reject as thin-book trap
+        last_bar = df_slice.iloc[-1]
+        last_vol = float(last_bar.get('volume', 0.0))
+        if last_vol > 0 and eval_vol > 0 and (last_vol < 0.35 * eval_vol) and (last_vol * float(last_bar['close']) / 1e7 < 0.50):
+            return False, 'ILLIQUID_SPIKE_DECAY_VETO', 0.0
+
     # -------------------------------------------------------------
     # TIER 1: ULTRA-CONFIRMATION ON 1 CANDLE (Monster Institutional Thrust)
     # -------------------------------------------------------------
     if direction == 'CALL':
         thrust_1 = (eval_close - eval_low) / bar_rng
         is_breakout_1 = (eval_close > comp_high and eval_close > eval_open)
-        if is_breakout_1 and thrust_1 >= 0.85 and is_pre_coiled:
+        # Power Opening Drive / Momentum Exception: If turnover_15m >= 25 Cr & real_rvol >= 2.2x & thrust >= 0.75, NR3 coil is waived!
+        is_power_drive = (not is_index) and (turnover_15m >= 25.0) and (real_rvol >= 2.2) and (thrust_1 >= 0.75)
+        if is_breakout_1 and (thrust_1 >= 0.85 or is_power_drive) and (is_pre_coiled or is_power_drive):
             if is_index and range_rvol >= 2.2:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
-            elif (not is_index) and real_rvol >= 2.5 and contracts_in_bar >= 40.0 and turnover_cr >= 2.0:
+            elif (not is_index) and real_rvol >= 2.2 and contracts_in_bar >= 30.0 and turnover_cr >= 2.0:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
     else:  # PUT
         thrust_1 = (eval_high - eval_close) / bar_rng
         is_breakdown_1 = (eval_close < comp_low and eval_close < eval_open)
-        if is_breakdown_1 and thrust_1 >= 0.85 and is_pre_coiled:
+        is_power_drive = (not is_index) and (turnover_15m >= 25.0) and (real_rvol >= 2.2) and (thrust_1 >= 0.75)
+        if is_breakdown_1 and (thrust_1 >= 0.85 or is_power_drive) and (is_pre_coiled or is_power_drive):
             if is_index and range_rvol >= 2.2:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
-            elif (not is_index) and real_rvol >= 2.5 and contracts_in_bar >= 40.0 and turnover_cr >= 2.0:
+            elif (not is_index) and real_rvol >= 2.2 and contracts_in_bar >= 30.0 and turnover_cr >= 2.0:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
 
     # -------------------------------------------------------------
@@ -518,10 +543,18 @@ def evaluate_index_call_slice(
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr) and pct_change >= 0.20:
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (pct_change / 1.5) * 3.0)), 2)
+    is_super_trend = (tier_reason == 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED') or (idx_rvol >= 2.0)
+    if is_super_trend:
+        if fuel_spent > (2.5 * atr):
+            return None  # Super-trend exhaustion ceiling at 2.5x ATR
+        p5_score = round(min(10.0, max(6.0, 7.0 + min(3.0, (pct_change / 1.5)))), 2)
     else:
-        p5_score = 4.0
+        if fuel_ratio < 0.15:
+            return None
+        if remaining_atr > (0.25 * atr) and pct_change >= 0.20:
+            p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (pct_change / 1.5) * 3.0)), 2)
+        else:
+            p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
 
@@ -685,10 +718,18 @@ def evaluate_index_put_slice(
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if remaining_atr > (0.25 * atr) and pct_change <= -0.20:
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 1.5) * 3.0)), 2)
+    is_super_trend = (tier_reason == 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED') or (idx_rvol >= 2.0)
+    if is_super_trend:
+        if fuel_spent > (2.5 * atr):
+            return None  # Super-trend flush ceiling at 2.5x ATR
+        p5_score = round(min(10.0, max(6.0, 7.0 + min(3.0, (abs(pct_change) / 1.5)))), 2)
     else:
-        p5_score = 4.0
+        if fuel_ratio < 0.15:
+            return None
+        if remaining_atr > (0.25 * atr) and pct_change <= -0.20:
+            p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 1.5) * 3.0)), 2)
+        else:
+            p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
 
@@ -868,12 +909,21 @@ def evaluate_stock_call_slice(
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if fuel_ratio < 0.20:
-        return None  # Profit-booking exhaustion ceiling: VETO if remaining fuel < 20%
-    if remaining_atr > (0.25 * atr) and pct_change >= 0.35:
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (pct_change / 3.0) * 3.0)), 2)
+    
+    # Super-Trend Expansion Mode:
+    # On Mega-Trend Days (Maruti +750, M&M +156), stocks expand up to 3.0x ATR!
+    is_super_trend = (tier_reason == 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED') or (real_rvol >= 2.5 and turnover_cr >= 2.5)
+    if is_super_trend:
+        if fuel_spent > (3.0 * atr):
+            return None  # Super-trend exhaustion ceiling at 3.0x ATR
+        p5_score = round(min(10.0, max(6.0, 7.0 + min(3.0, (pct_change / 2.0)))), 2)
     else:
-        p5_score = 4.0
+        if fuel_ratio < 0.15:
+            return None  # Normal day profit-booking exhaustion ceiling: VETO if remaining fuel < 15%
+        if remaining_atr > (0.25 * atr) and pct_change >= 0.35:
+            p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (pct_change / 3.0) * 3.0)), 2)
+        else:
+            p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
 
@@ -1053,12 +1103,20 @@ def evaluate_stock_put_slice(
     fuel_spent = day_high - day_low
     remaining_atr = atr - fuel_spent
     fuel_ratio = remaining_atr / max(1.0, atr)
-    if fuel_ratio < 0.20:
-        return None  # Profit-booking exhaustion ceiling: VETO if remaining fuel < 20%
-    if remaining_atr > (0.25 * atr) and pct_change <= -0.35:
-        p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 3.0) * 3.0)), 2)
+
+    # Super-Trend Panic Flush Mode:
+    is_super_trend = (tier_reason == 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED') or (real_rvol >= 2.5 and turnover_cr >= 2.5)
+    if is_super_trend:
+        if fuel_spent > (3.0 * atr):
+            return None  # Super-trend flush ceiling at 3.0x ATR
+        p5_score = round(min(10.0, max(6.0, 7.0 + min(3.0, (abs(pct_change) / 2.0)))), 2)
     else:
-        p5_score = 4.0
+        if fuel_ratio < 0.15:
+            return None  # Normal day exhaustion ceiling: VETO if remaining fuel < 15%
+        if remaining_atr > (0.25 * atr) and pct_change <= -0.35:
+            p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 3.0) * 3.0)), 2)
+        else:
+            p5_score = 4.0
 
     prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
 
@@ -2412,14 +2470,31 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
         if atm_ce_vol < min_unwind:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
 
+        # 4. Institutional Gamma Squeeze Detection
+        is_gamma_squeeze = False
+        for s in [atm_strike] + upper_4[:2]:
+            s_ce = strike_data[s]['ce_oi']
+            s_ce_vol = strike_data[s].get('ce_vol', 0.0)
+            s_ce_chg = strike_data[s]['ce_chg_oi']
+            if s_ce > 0 and (s_ce_vol / s_ce) >= 2.0 and s_ce_chg < 0:
+                is_gamma_squeeze = True
+                break
+
         score = 10.0
+        if is_gamma_squeeze:
+            score += 4.0
         if tot_upper_ce_chg <= -(2.0 * min_unwind) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind):
             score += 2.0
-        score += 6.0
+        score += 4.0
         if atm_info.get('pe_chg_oi', 0.0) >= min_write:
             score += 2.0
         score = round(min(20.0, max(8.0, score)), 2)
-        return {'confluent': True, 'score': score, 'reason': 'CLEAR_CALL_RUNWAY_AND_SUPPORT_WALL'}
+        return {
+            'confluent': True,
+            'score': score,
+            'reason': 'GAMMA_SQUEEZE_SHORT_COVERING_CONFIRMED' if is_gamma_squeeze else 'CLEAR_CALL_RUNWAY_AND_SUPPORT_WALL',
+            'is_gamma_squeeze': is_gamma_squeeze
+        }
 
     else:  # PUT
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
@@ -2463,19 +2538,37 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
         if atm_pe_vol < min_unwind:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
 
+        # 4. Institutional Panic Squeeze Detection
+        is_panic_squeeze = False
+        for s in [atm_strike] + lower_4[-2:]:
+            s_pe = strike_data[s]['pe_oi']
+            s_pe_vol = strike_data[s].get('pe_vol', 0.0)
+            s_pe_chg = strike_data[s]['pe_chg_oi']
+            if s_pe > 0 and (s_pe_vol / s_pe) >= 2.0 and s_pe_chg < 0:
+                is_panic_squeeze = True
+                break
+
         score = 10.0
+        if is_panic_squeeze:
+            score += 4.0
         if tot_lower_pe_chg <= -(2.0 * min_unwind) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind):
             score += 2.0
-        score += 6.0
+        score += 4.0
         if atm_info.get('ce_chg_oi', 0.0) >= min_write:
             score += 2.0
         score = round(min(20.0, max(8.0, score)), 2)
-        return {'confluent': True, 'score': score, 'reason': 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL'}
+        return {
+            'confluent': True,
+            'score': score,
+            'reason': 'PANIC_SQUEEZE_LONG_UNWINDING_CONFIRMED' if is_panic_squeeze else 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL',
+            'is_panic_squeeze': is_panic_squeeze
+        }
 
 def load_resampled_3m_data() -> tuple[Dict[str, pd.DataFrame], List[str]]:
     cache_dirs = [
         os.path.join(PROJECT_ROOT, "scratch", "data_cache_latest_5d_1m"),
         os.path.join(CURRENT_DIR, "data_cache_latest_5d_1m"),
+        os.path.join(CURRENT_DIR, "3min_cache"),
         os.path.join(CURRENT_DIR, "data")
     ]
     files = []

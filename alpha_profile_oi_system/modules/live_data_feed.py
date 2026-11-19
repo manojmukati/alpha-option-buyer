@@ -771,8 +771,13 @@ class LiveMarketDataFeed:
         avg_pe_oi = np.mean([strike_data[s]['pe_oi'] for s in lower_4 + [atm_strike]])
         avg_ce_oi = np.mean([strike_data[s]['ce_oi'] for s in upper_4 + [atm_strike]])
 
-        min_wall_oi = 2000000.0 if is_index else 25000.0
-        ambush_min_chg = 1000000.0 if is_index else 15000.0
+        # Lot-size aware thresholding
+        meta_lot = 25.0 if is_index else 250.0
+        if _BULK_CACHE and sym_clean in _BULK_CACHE:
+            meta_lot = float(_BULK_CACHE[sym_clean].get('lot_size', meta_lot))
+
+        min_wall_oi = 2000000.0 if is_index else (20.0 * meta_lot)
+        ambush_min_chg = 1000000.0 if is_index else (15.0 * meta_lot)
         strike_step = sorted_strikes[1] - sorted_strikes[0] if len(sorted_strikes) > 1 else 50.0
 
         if direction.upper() == 'CALL':
@@ -783,8 +788,6 @@ class LiveMarketDataFeed:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
             # Check 2: Immediate Active Call Resistance Wall (+1 to Target)
-            # A wall is ONLY a barrier if call writers are actively defending/adding (s_ce_chg >= 0).
-            # If call writers are UNWINDING (s_ce_chg < 0), it is a Short-Covering Squeeze runway!
             call_wall_detected = False
             wall_strike_hit = None
             target_barrier = max(float(target_price), ref_spot + 2.5 * strike_step) if target_price else (ref_spot + 2.5 * strike_step)
@@ -800,8 +803,8 @@ class LiveMarketDataFeed:
                 # Active Resistance Wall requires s_ce_chg >= 0 (Call Writing active)
                 if s_ce >= min_wall_oi and s_ce_chg >= 0:
                     if (s_ce > 1.35 * max(500.0, s_pe)) or (s_ce_chg > 1.5 * max(200.0, s_pe_chg)) or (s_ce >= 2.0 * min_wall_oi and s_ce >= 1.0 * s_pe):
-                        if s_ce_vol >= 2.5 * s_ce:
-                            continue  # Squeeze volume exception
+                        if s_ce_vol >= 2.0 * s_ce:
+                            continue  # Squeeze volume exception (forced short covering)
                         call_wall_detected = True
                         wall_strike_hit = s
                         break
@@ -812,10 +815,10 @@ class LiveMarketDataFeed:
             if atm_info['ce_chg_oi'] > 1.5 * max(500.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
-            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Support + 4-Strike Runway)
+            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Support + Gamma Squeeze)
             score = 0.0
-            min_unwind_contracts = 5000.0 if is_index else 150.0
-            min_write_contracts = 10000.0 if is_index else 250.0
+            min_unwind_contracts = 5000.0 if is_index else max(100.0, 3.0 * meta_lot)
+            min_write_contracts = 10000.0 if is_index else max(200.0, 5.0 * meta_lot)
 
             # 1. Mandatory Call Unwinding on ATM or OTM Resistance strikes
             has_unwind = (tot_upper_ce_chg <= -min_unwind_contracts) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_contracts)
@@ -832,10 +835,22 @@ class LiveMarketDataFeed:
             if atm_ce_vol < min_unwind_contracts:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
 
+            # 4. Institutional Gamma Squeeze Detection (Traded Volume >= 2.0x Strike OI + Short Covering)
+            is_gamma_squeeze = False
+            for s in [atm_strike] + upper_4[:2]:
+                s_ce = strike_data[s]['ce_oi']
+                s_ce_vol = strike_data[s].get('ce_vol', 0.0)
+                s_ce_chg = strike_data[s]['ce_chg_oi']
+                if s_ce > 0 and (s_ce_vol / s_ce) >= 2.0 and s_ce_chg < 0:
+                    is_gamma_squeeze = True
+                    break
+
             score += 10.0
+            if is_gamma_squeeze:
+                score += 4.0
             if tot_upper_ce_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
                 score += 2.0
-            score += 6.0
+            score += 4.0
             if atm_info.get('pe_chg_oi', 0.0) >= min_write_contracts:
                 score += 2.0
             score = round(min(20.0, max(8.0, score)), 2)
@@ -844,7 +859,8 @@ class LiveMarketDataFeed:
                 'confluent': True,
                 'confluence': True,
                 'score': score,
-                'reason': 'CLEAR_CALL_RUNWAY_AND_SUPPORT_WALL',
+                'reason': 'GAMMA_SQUEEZE_SHORT_COVERING_CONFIRMED' if is_gamma_squeeze else 'CLEAR_CALL_RUNWAY_AND_SUPPORT_WALL',
+                'is_gamma_squeeze': is_gamma_squeeze,
                 'atm_strike': atm_strike,
                 'live_spot': ref_spot,
                 'expiry_date': active_expiry,
@@ -861,8 +877,6 @@ class LiveMarketDataFeed:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
             # Check 2: Immediate Active Put Support Wall (-1 to Target)
-            # A support floor is ONLY a barrier if put writers are actively defending/adding (s_pe_chg >= 0).
-            # If put writers are UNWINDING (s_pe_chg < 0), the floor has melted away!
             put_wall_detected = False
             wall_strike_hit = None
             target_barrier = min(float(target_price), ref_spot - 2.5 * strike_step) if target_price else (ref_spot - 2.5 * strike_step)
@@ -878,8 +892,8 @@ class LiveMarketDataFeed:
                 # Active Support Wall requires s_pe_chg >= 0 (Put Writing active)
                 if s_pe >= min_wall_oi and s_pe_chg >= 0:
                     if (s_pe > 1.35 * max(500.0, s_ce)) or (s_pe_chg > 1.5 * max(200.0, s_ce_chg)) or (s_pe >= 2.0 * min_wall_oi and s_pe >= 1.0 * s_ce):
-                        if s_pe_vol >= 2.5 * s_pe:
-                            continue  # Squeeze volume exception
+                        if s_pe_vol >= 2.0 * s_pe:
+                            continue  # Squeeze volume exception (panic breakdown liquidation)
                         put_wall_detected = True
                         wall_strike_hit = s
                         break
@@ -890,10 +904,10 @@ class LiveMarketDataFeed:
             if atm_info['pe_chg_oi'] > 1.5 * max(500.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
-            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Resistance + 4-Strike Runway)
+            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Resistance + Panic Squeeze)
             score = 0.0
-            min_unwind_contracts = 5000.0 if is_index else 150.0
-            min_write_contracts = 10000.0 if is_index else 250.0
+            min_unwind_contracts = 5000.0 if is_index else max(100.0, 3.0 * meta_lot)
+            min_write_contracts = 10000.0 if is_index else max(200.0, 5.0 * meta_lot)
 
             # 1. Mandatory Put Unwinding on ATM or OTM Support strikes
             has_unwind = (tot_lower_pe_chg <= -min_unwind_contracts) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_contracts)
@@ -910,10 +924,22 @@ class LiveMarketDataFeed:
             if atm_pe_vol < min_unwind_contracts:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
 
+            # 4. Institutional Panic Squeeze Detection (Traded Volume >= 2.0x Strike OI + Long Liquidation)
+            is_panic_squeeze = False
+            for s in [atm_strike] + lower_4[-2:]:
+                s_pe = strike_data[s]['pe_oi']
+                s_pe_vol = strike_data[s].get('pe_vol', 0.0)
+                s_pe_chg = strike_data[s]['pe_chg_oi']
+                if s_pe > 0 and (s_pe_vol / s_pe) >= 2.0 and s_pe_chg < 0:
+                    is_panic_squeeze = True
+                    break
+
             score += 10.0
+            if is_panic_squeeze:
+                score += 4.0
             if tot_lower_pe_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
                 score += 2.0
-            score += 6.0
+            score += 4.0
             if atm_info.get('ce_chg_oi', 0.0) >= min_write_contracts:
                 score += 2.0
             score = round(min(20.0, max(8.0, score)), 2)
@@ -922,7 +948,8 @@ class LiveMarketDataFeed:
                 'confluent': True,
                 'confluence': True,
                 'score': score,
-                'reason': 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL',
+                'reason': 'PANIC_SQUEEZE_LONG_UNWINDING_CONFIRMED' if is_panic_squeeze else 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL',
+                'is_panic_squeeze': is_panic_squeeze,
                 'atm_strike': atm_strike,
                 'live_spot': ref_spot,
                 'expiry_date': active_expiry,
@@ -966,10 +993,10 @@ class LiveMarketDataFeed:
             }
 
         # Order Book Data Spread Lock:
-        # Spread cannot exceed 3.0% and for stocks cannot exceed Rs 1.50 (30% of Rs 5.0 SL)
+        # Spread cannot exceed 3.0% and max allowed spread is scaled for high-premium contracts
         spread_abs = round(ask - bid, 2)
         spread_pct = round((spread_abs / max(0.5, ltp)) * 100.0, 2)
-        max_allowed_spread = 5.0 if is_index else 1.50
+        max_allowed_spread = 5.0 if is_index else max(1.50, round(0.015 * ltp, 2))
         if spread_abs > max_allowed_spread:
             return {
                 'is_live_chain_verified': False,
@@ -997,11 +1024,17 @@ class LiveMarketDataFeed:
             t1_pts = 45.0
             t2_pts = 100.0
         else:
-            # Strictly Fixed Stock Option Rules: 5.0 pt SL / 25.0 pt T1 / 50.0 to 100.0 pt T2
-            # Protected by Ultra-Confirmation: Spread <= Rs 1.50, Contracts >= 25 lots, RVOL >= 1.5x, Thrust >= 0.70
-            sl_pts = 5.0
-            t1_pts = 25.0
-            t2_pts = 50.0
+            # Pro-Desk Stock Option Rules: Dynamic SL & Target proportional to Option Price
+            # Normal stock options (entry <= 60): 5.0 pt SL / 25.0 pt T1 / 50.0 pt T2
+            # High premium options (Maruti, UltraTech, etc.): proportional 18% SL (max 25 pts)
+            if entry_p > 60.0:
+                sl_pts = round(max(5.0, min(25.0, 0.18 * entry_p)), 2)
+                t1_pts = round(max(25.0, 0.35 * entry_p), 2)
+                t2_pts = round(max(50.0, 0.70 * entry_p), 2)
+            else:
+                sl_pts = 5.0
+                t1_pts = 25.0
+                t2_pts = 50.0
 
         opt_sl = round(max(0.5, entry_p - sl_pts), 2)
         opt_t1 = round(entry_p + t1_pts, 2)
