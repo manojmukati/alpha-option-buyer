@@ -89,8 +89,12 @@ def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
     return is_morning or is_afternoon
 
 
-def compute_bar_delta_proxy(df_slice: pd.DataFrame) -> Tuple[float, float]:
-    """Computes instant bar delta and cumulative 5-bar volume delta ratio."""
+def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> Tuple[float, float]:
+    """
+    Computes instant bar delta and cumulative 5-bar volume delta ratio.
+    - For Stocks: Uses real traded cash volume weighting.
+    - For Indices: Spot volume is 0 on NSE; uses True Range (High - Low) weighting.
+    """
     if df_slice is None or len(df_slice) < 5:
         return 0.0, 0.0
     bars_5 = df_slice.iloc[-6:-1]
@@ -99,7 +103,8 @@ def compute_bar_delta_proxy(df_slice: pd.DataFrame) -> Tuple[float, float]:
     sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
     bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
     bvc_fraction = np.tanh(bvc_z)
-    weights = bars_5['volume'].values.astype(float) if 'volume' in bars_5.columns else (bars_5['high'] - bars_5['low']).values.astype(float)
+    has_real_volume = (not is_index) and ('volume' in bars_5.columns and float(np.sum(bars_5['volume'].values.astype(float))) > 0.0)
+    weights = bars_5['volume'].values.astype(float) if has_real_volume else (bars_5['high'] - bars_5['low']).values.astype(float)
     bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
     return eval_bvc, bvc_cum_ratio
@@ -163,13 +168,18 @@ def evaluate_institutional_index_engine(
     vol_weights = df_slice['high'] - df_slice['low']
     vwap = float((tp_all * vol_weights).sum() / max(1.0, float(vol_weights.sum()))) if float(vol_weights.sum()) > 0 else float(tp_all.mean())
 
+    # Absolute minimum bar range floor (eliminates fake breakouts during choppy low-vol periods)
+    min_idx_rng = 35.0 if sym_clean == 'BANKNIFTY' else 14.0
+    if bar_rng < min_idx_rng:
+        return None
+
     # Range RVOL
     comp_rngs = comp_bars['high'] - comp_bars['low']
     median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
     idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
 
-    # Range-weighted Delta
-    eval_bvc, bvc_cum_ratio = compute_bar_delta_proxy(df_slice)
+    # Range-weighted Delta (Spot Index Volume is identically 0 on NSE; True Range used)
+    eval_bvc, bvc_cum_ratio = compute_bar_delta_proxy(df_slice, is_index=True)
 
     # Test CALL direction first, then PUT
     directions_to_test = []
@@ -338,8 +348,8 @@ def evaluate_institutional_stock_engine(
     vol_weights = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
     vwap = float((tp_all * vol_weights).sum() / max(1.0, float(vol_weights.sum()))) if float(vol_weights.sum()) > 0 else float(tp_all.mean())
 
-    # Delta Flow Calculation
-    eval_bvc, bvc_cum_ratio = compute_bar_delta_proxy(df_slice)
+    # Delta Flow Calculation (Uses real cash volume weighting for stocks)
+    eval_bvc, bvc_cum_ratio = compute_bar_delta_proxy(df_slice, is_index=False)
 
     # Direction Selection
     directions_to_test = []
