@@ -762,32 +762,47 @@ class LiveMarketDataFeed:
         atm_info = strike_data[atm_strike]
         tot_upper_ce_oi = sum(strike_data[s]['ce_oi'] for s in upper_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
+        tot_upper_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in upper_4)
         max_otm_ce_oi = max((strike_data[s]['ce_oi'] for s in upper_4), default=0.0)
 
         tot_lower_pe_oi = sum(strike_data[s]['pe_oi'] for s in lower_4)
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
+        tot_lower_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in lower_4)
         max_otm_pe_oi = max((strike_data[s]['pe_oi'] for s in lower_4), default=0.0)
 
         avg_pe_oi = np.mean([strike_data[s]['pe_oi'] for s in lower_4 + [atm_strike]])
         avg_ce_oi = np.mean([strike_data[s]['ce_oi'] for s in upper_4 + [atm_strike]])
 
-        # Lot-size aware thresholding
+        # Lot-size aware institutional thresholding
         meta_lot = 25.0 if is_index else 250.0
         if _BULK_CACHE and sym_clean in _BULK_CACHE:
             meta_lot = float(_BULK_CACHE[sym_clean].get('lot_size', meta_lot))
 
-        min_wall_oi = 2000000.0 if is_index else (20.0 * meta_lot)
-        ambush_min_chg = 1000000.0 if is_index else (15.0 * meta_lot)
+        # True Institutional Dual-Scale Thresholds (Contracts & Shares)
+        min_unwind = 4000.0 if is_index else 50.0
+        min_unwind_shares = 100000.0 if is_index else (50.0 * meta_lot)
+        min_write = 8000.0 if is_index else 80.0
+        min_write_shares = 200000.0 if is_index else (80.0 * meta_lot)
+        min_wall_oi = 30000.0 if is_index else 300.0
+        min_wall_oi_shares = 750000.0 if is_index else (300.0 * meta_lot)
+        ambush_min_chg = 10000.0 if is_index else 120.0
+        ambush_min_chg_shares = 250000.0 if is_index else (120.0 * meta_lot)
         strike_step = sorted_strikes[1] - sorted_strikes[0] if len(sorted_strikes) > 1 else 50.0
 
         if direction.upper() == 'CALL':
-            # Check 1: Upper OTM Call Ambush (Heavy call writing being added on OTM strikes)
+            # Check 1: Lower 4 Strikes Institutional Floor (-4 to -1)
+            # Put writers MUST establish a floor; call writing below spot is forbidden
+            if len(lower_4) >= 2:
+                if tot_lower_ce_chg > 1.5 * max(50.0, tot_lower_pe_chg) and (tot_lower_ce_chg >= ambush_min_chg or tot_lower_ce_chg >= ambush_min_chg_shares):
+                    return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_STRIKE_CALL_WRITING_AMBUSH'}
+
+            # Check 2: Upper OTM Call Ambush (+1 to +4)
             tot_upper_ce_vol = sum(strike_data[s].get('ce_vol', 0) for s in upper_4)
             is_buying_squeeze = (tot_upper_ce_vol >= 2.0 * max(1.0, tot_upper_ce_chg))
-            if not is_buying_squeeze and tot_upper_ce_chg >= ambush_min_chg and tot_upper_ce_chg > 2.0 * max(1000.0, tot_lower_pe_chg):
+            if not is_buying_squeeze and (tot_upper_ce_chg >= ambush_min_chg or tot_upper_ce_chg >= ambush_min_chg_shares) and tot_upper_ce_chg > 2.0 * max(50.0, tot_lower_pe_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
-            # Check 2: Immediate Active Call Resistance Wall (+1 to Target)
+            # Check 3: Immediate Active Call Resistance Wall (+1 to Target)
             call_wall_detected = False
             wall_strike_hit = None
             target_barrier = max(float(target_price), ref_spot + 2.5 * strike_step) if target_price else (ref_spot + 2.5 * strike_step)
@@ -797,12 +812,11 @@ class LiveMarketDataFeed:
                 s_ce = strike_data[s]['ce_oi']
                 s_pe = strike_data[s]['pe_oi']
                 s_ce_chg = strike_data[s]['ce_chg_oi']
-                s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0)
                 
                 # Active Resistance Wall requires s_ce_chg >= 0 (Call Writing active)
-                if s_ce >= min_wall_oi and s_ce_chg >= 0:
-                    if (s_ce > 1.35 * max(500.0, s_pe)) or (s_ce_chg > 1.5 * max(200.0, s_pe_chg)) or (s_ce >= 2.0 * min_wall_oi and s_ce >= 1.0 * s_pe):
+                if (s_ce >= min_wall_oi or s_ce >= min_wall_oi_shares) and s_ce_chg >= 0:
+                    if (s_ce > 1.35 * max(50.0, s_pe)) or (s_ce_chg > 1.5 * max(20.0, s_pe_chg)) or ((s_ce >= 2.0 * min_wall_oi or s_ce >= 2.0 * min_wall_oi_shares) and s_ce >= 1.0 * s_pe):
                         if s_ce_vol >= 2.0 * s_ce:
                             continue  # Squeeze volume exception (forced short covering)
                         call_wall_detected = True
@@ -811,47 +825,45 @@ class LiveMarketDataFeed:
             if call_wall_detected:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_CALL_RESISTANCE_WALL_AT_{int(wall_strike_hit)}'}
 
-            # Check 3: ATM Call Writer Dominance (Active call writing > put writing at ATM)
-            if atm_info['ce_chg_oi'] > 1.5 * max(500.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
+            # Check 4: ATM Call Writer Dominance (Active call writing > put writing at ATM)
+            if atm_info['ce_chg_oi'] > 1.5 * max(50.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
-            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Support + Gamma Squeeze)
-            score = 0.0
-            min_unwind_contracts = 5000.0 if is_index else max(100.0, 3.0 * meta_lot)
-            min_write_contracts = 10000.0 if is_index else max(200.0, 5.0 * meta_lot)
-
-            # 1. Mandatory Call Unwinding on ATM or OTM Resistance strikes
-            has_unwind = (tot_upper_ce_chg <= -min_unwind_contracts) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_contracts)
-            if not has_unwind:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_UNWINDING_MANDATORY_FAIL'}
-
-            # 2. Mandatory Put Support Writing on ATM or OTM Support strikes
-            has_support = (tot_lower_pe_chg >= min_write_contracts and tot_lower_pe_chg >= 1.2 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write_contracts))
-            if not has_support:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_SUPPORT_WRITING_FAIL'}
-
-            # 3. Call Buyer Volume Presence
-            atm_ce_vol = atm_info.get('ce_vol', 0.0)
-            if atm_ce_vol < min_unwind_contracts:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
-
-            # 4. Institutional Gamma Squeeze Detection (Traded Volume >= 2.0x Strike OI + Short Covering)
+            # 5. Institutional Gamma Squeeze Detection (Traded Volume >= 2.0x Strike OI + Short Covering)
             is_gamma_squeeze = False
             for s in [atm_strike] + upper_4[:2]:
                 s_ce = strike_data[s]['ce_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0.0)
                 s_ce_chg = strike_data[s]['ce_chg_oi']
-                if s_ce > 0 and (s_ce_vol / s_ce) >= 2.0 and s_ce_chg < 0:
-                    is_gamma_squeeze = True
-                    break
+                if s_ce > 0:
+                    unwind_pct = (abs(s_ce_chg) / s_ce) if s_ce_chg < 0 else 0.0
+                    vol_oi_ratio = s_ce_vol / s_ce
+                    if vol_oi_ratio >= 2.0 and s_ce_chg < 0 and (unwind_pct >= 0.08 or abs(s_ce_chg) >= (1000.0 if is_index else 25.0)):
+                        is_gamma_squeeze = True
+                        break
 
-            score += 10.0
+            # 6. Mandatory Institutional Call Unwinding on ATM or OTM Resistance strikes
+            has_unwind = (tot_upper_ce_chg <= -min_unwind) or (tot_upper_ce_chg <= -min_unwind_shares) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_shares) or is_gamma_squeeze or (atm_info['ce_oi'] > 0 and abs(atm_info['ce_chg_oi']) / atm_info['ce_oi'] >= 0.08 and atm_info['ce_chg_oi'] < 0)
+            if not has_unwind:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_CALL_UNWINDING_FAIL'}
+
+            # 7. Mandatory Put Support Writing on ATM or OTM Support strikes
+            has_support = ((tot_lower_pe_chg >= min_write or tot_lower_pe_chg >= min_write_shares) and tot_lower_pe_chg >= 1.2 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write_shares))
+            if not has_support:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_SUPPORT_WRITING_FAIL'}
+
+            # 8. Call Buyer Volume Presence
+            atm_ce_vol = atm_info.get('ce_vol', 0.0)
+            if atm_ce_vol < min_unwind and atm_ce_vol < min_unwind_shares and not is_gamma_squeeze:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
+
+            score = 10.0
             if is_gamma_squeeze:
                 score += 4.0
-            if tot_upper_ce_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+            if tot_upper_ce_chg <= -(2.0 * min_unwind) or tot_upper_ce_chg <= -(2.0 * min_unwind_shares) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind) or atm_info.get('ce_chg_oi', 0.0) <= -(2.0 * min_unwind_shares):
                 score += 2.0
             score += 4.0
-            if atm_info.get('pe_chg_oi', 0.0) >= min_write_contracts:
+            if atm_info.get('pe_chg_oi', 0.0) >= min_write or atm_info.get('pe_chg_oi', 0.0) >= min_write_shares:
                 score += 2.0
             score = round(min(20.0, max(8.0, score)), 2)
 
@@ -870,13 +882,19 @@ class LiveMarketDataFeed:
             }
 
         else:  # PUT
-            # Check 1: Lower OTM Put Ambush (Heavy put writing being added on OTM strikes)
+            # Check 1: Upper 4 Strikes Institutional Ceiling (+1 to +4)
+            # Call writers MUST establish a ceiling; put writing above spot is forbidden
+            if len(upper_4) >= 2:
+                if tot_upper_pe_chg > 1.5 * max(50.0, tot_upper_ce_chg) and (tot_upper_pe_chg >= ambush_min_chg or tot_upper_pe_chg >= ambush_min_chg_shares):
+                    return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_STRIKE_PUT_WRITING_AMBUSH'}
+
+            # Check 2: Lower OTM Put Ambush (-1 to -4)
             tot_lower_pe_vol = sum(strike_data[s].get('pe_vol', 0) for s in lower_4)
             is_buying_squeeze = (tot_lower_pe_vol >= 2.0 * max(1.0, tot_lower_pe_chg))
-            if not is_buying_squeeze and tot_lower_pe_chg >= ambush_min_chg and tot_lower_pe_chg > 2.0 * max(1000.0, tot_upper_ce_chg):
+            if not is_buying_squeeze and (tot_lower_pe_chg >= ambush_min_chg or tot_lower_pe_chg >= ambush_min_chg_shares) and tot_lower_pe_chg > 2.0 * max(50.0, tot_upper_ce_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
-            # Check 2: Immediate Active Put Support Wall (-1 to Target)
+            # Check 3: Immediate Active Put Support Wall (-1 to Target)
             put_wall_detected = False
             wall_strike_hit = None
             target_barrier = min(float(target_price), ref_spot - 2.5 * strike_step) if target_price else (ref_spot - 2.5 * strike_step)
@@ -886,12 +904,11 @@ class LiveMarketDataFeed:
                 s_pe = strike_data[s]['pe_oi']
                 s_ce = strike_data[s]['ce_oi']
                 s_pe_chg = strike_data[s]['pe_chg_oi']
-                s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0)
                 
                 # Active Support Wall requires s_pe_chg >= 0 (Put Writing active)
-                if s_pe >= min_wall_oi and s_pe_chg >= 0:
-                    if (s_pe > 1.35 * max(500.0, s_ce)) or (s_pe_chg > 1.5 * max(200.0, s_ce_chg)) or (s_pe >= 2.0 * min_wall_oi and s_pe >= 1.0 * s_ce):
+                if (s_pe >= min_wall_oi or s_pe >= min_wall_oi_shares) and s_pe_chg >= 0:
+                    if (s_pe > 1.35 * max(50.0, s_ce)) or (s_pe_chg > 1.5 * max(20.0, s_ce_chg)) or ((s_pe >= 2.0 * min_wall_oi or s_pe >= 2.0 * min_wall_oi_shares) and s_pe >= 1.0 * s_ce):
                         if s_pe_vol >= 2.0 * s_pe:
                             continue  # Squeeze volume exception (panic breakdown liquidation)
                         put_wall_detected = True
@@ -900,47 +917,45 @@ class LiveMarketDataFeed:
             if put_wall_detected:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_PUT_SUPPORT_WALL_AT_{int(wall_strike_hit)}'}
 
-            # Check 3: ATM Put Writer Dominance (Active put writing > call writing at ATM)
-            if atm_info['pe_chg_oi'] > 1.5 * max(500.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
+            # Check 4: ATM Put Writer Dominance (Active put writing > call writing at ATM)
+            if atm_info['pe_chg_oi'] > 1.5 * max(50.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
-            # Precision Institutional OI Scoring (Triple Confluence: Unwinding + Buyers + Resistance + Panic Squeeze)
-            score = 0.0
-            min_unwind_contracts = 5000.0 if is_index else max(100.0, 3.0 * meta_lot)
-            min_write_contracts = 10000.0 if is_index else max(200.0, 5.0 * meta_lot)
-
-            # 1. Mandatory Put Unwinding on ATM or OTM Support strikes
-            has_unwind = (tot_lower_pe_chg <= -min_unwind_contracts) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_contracts)
-            if not has_unwind:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_UNWINDING_MANDATORY_FAIL'}
-
-            # 2. Mandatory Call Resistance Writing on ATM or OTM Resistance strikes
-            has_resistance = (tot_upper_ce_chg >= min_write_contracts and tot_upper_ce_chg >= 1.2 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write_contracts))
-            if not has_resistance:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_RESISTANCE_WRITING_FAIL'}
-
-            # 3. Put Buyer Volume Presence
-            atm_pe_vol = atm_info.get('pe_vol', 0.0)
-            if atm_pe_vol < min_unwind_contracts:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
-
-            # 4. Institutional Panic Squeeze Detection (Traded Volume >= 2.0x Strike OI + Long Liquidation)
+            # 5. Institutional Panic Squeeze Detection (Traded Volume >= 2.0x Strike OI + Long Liquidation)
             is_panic_squeeze = False
             for s in [atm_strike] + lower_4[-2:]:
                 s_pe = strike_data[s]['pe_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0.0)
                 s_pe_chg = strike_data[s]['pe_chg_oi']
-                if s_pe > 0 and (s_pe_vol / s_pe) >= 2.0 and s_pe_chg < 0:
-                    is_panic_squeeze = True
-                    break
+                if s_pe > 0:
+                    unwind_pct = (abs(s_pe_chg) / s_pe) if s_pe_chg < 0 else 0.0
+                    vol_oi_ratio = s_pe_vol / s_pe
+                    if vol_oi_ratio >= 2.0 and s_pe_chg < 0 and (unwind_pct >= 0.08 or abs(s_pe_chg) >= (1000.0 if is_index else 25.0)):
+                        is_panic_squeeze = True
+                        break
 
-            score += 10.0
+            # 6. Mandatory Institutional Put Unwinding on ATM or OTM Support strikes
+            has_unwind = (tot_lower_pe_chg <= -min_unwind) or (tot_lower_pe_chg <= -min_unwind_shares) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_shares) or is_panic_squeeze or (atm_info['pe_oi'] > 0 and abs(atm_info['pe_chg_oi']) / atm_info['pe_oi'] >= 0.08 and atm_info['pe_chg_oi'] < 0)
+            if not has_unwind:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_PUT_UNWINDING_FAIL'}
+
+            # 7. Mandatory Call Resistance Writing on ATM or OTM Resistance strikes
+            has_resistance = ((tot_upper_ce_chg >= min_write or tot_upper_ce_chg >= min_write_shares) and tot_upper_ce_chg >= 1.2 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write_shares))
+            if not has_resistance:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_RESISTANCE_WRITING_FAIL'}
+
+            # 8. Put Buyer Volume Presence
+            atm_pe_vol = atm_info.get('pe_vol', 0.0)
+            if atm_pe_vol < min_unwind and atm_pe_vol < min_unwind_shares and not is_panic_squeeze:
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
+
+            score = 10.0
             if is_panic_squeeze:
                 score += 4.0
-            if tot_lower_pe_chg <= -(2.0 * min_unwind_contracts) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_contracts):
+            if tot_lower_pe_chg <= -(2.0 * min_unwind) or tot_lower_pe_chg <= -(2.0 * min_unwind_shares) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind) or atm_info.get('pe_chg_oi', 0.0) <= -(2.0 * min_unwind_shares):
                 score += 2.0
             score += 4.0
-            if atm_info.get('ce_chg_oi', 0.0) >= min_write_contracts:
+            if atm_info.get('ce_chg_oi', 0.0) >= min_write or atm_info.get('ce_chg_oi', 0.0) >= min_write_shares:
                 score += 2.0
             score = round(min(20.0, max(8.0, score)), 2)
 

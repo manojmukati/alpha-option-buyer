@@ -265,7 +265,11 @@ def verify_multi_candle_momentum(
         base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
         real_rvol = eval_vol / max(1.0, base_vol)
 
-        # 15-minute rolling turnover (last 5 bars)
+        # Prior 15-minute base turnover (Bars before eval_bar: iloc[-7:-2])
+        prior_5_bars = df_slice.iloc[-7:-2] if len(df_slice) >= 7 else df_slice.iloc[:-2]
+        prior_base_turnover = float(sum((float(b.get('close', 0.0)) * float(b.get('volume', 0.0))) / 1e7 for _, b in prior_5_bars.iterrows())) if len(prior_5_bars) > 0 else 0.0
+
+        # Current 15-minute rolling turnover (last 5 completed bars ending at eval_bar)
         bars_5_turnover = []
         for idx_b in range(max(0, len(df_slice) - 6), len(df_slice) - 1):
             b_item = df_slice.iloc[idx_b]
@@ -275,38 +279,50 @@ def verify_multi_candle_momentum(
         turnover_15m = float(sum(bars_5_turnover)) if bars_5_turnover else turnover_cr
 
         # Strict Institutional Liquidity Depth Veto:
-        # A stock MUST have sustained rolling turnover >= Rs 10 Cr (eliminates dead order books like PIIND)
+        # Sustained rolling turnover >= Rs 10 Cr (eliminates dead order books like PIIND)
         if turnover_15m < 10.0:
             return False, 'INSUFFICIENT_15M_TURNOVER_DEPTH', 0.0
 
-        # Anti-Illiquid Spike Decay Veto:
-        # If eval_bar had a single spike but subsequent bar volume collapsed by > 65%, reject as thin-book trap
-        last_bar = df_slice.iloc[-1]
-        last_vol = float(last_bar.get('volume', 0.0))
-        if last_vol > 0 and eval_vol > 0 and (last_vol < 0.35 * eval_vol) and (last_vol * float(last_bar['close']) / 1e7 < 0.50):
-            return False, 'ILLIQUID_SPIKE_DECAY_VETO', 0.0
+        # Prior Base Liquidity Veto:
+        # Rejects thin books before breakout where prior turnover was negligible (< Rs 6.0 Cr)
+        if prior_base_turnover < 6.0 and turnover_cr < 15.0:
+            return False, 'THIN_BOOK_BASE_LIQUIDITY_VETO', 0.0
+
+        # Candle Quality Veto: Rejects heavy wick rejection candles on breakout initiation
+        eval_body = abs(eval_close - eval_open)
+        eval_body_ratio = eval_body / bar_rng
+        if eval_body_ratio < 0.60:
+            return False, 'WEAK_CANDLE_BODY_REJECTION_VETO', 0.0
 
     # -------------------------------------------------------------
     # TIER 1: ULTRA-CONFIRMATION ON 1 CANDLE (Monster Institutional Thrust)
     # -------------------------------------------------------------
+    eval_body = abs(eval_close - eval_open)
+    eval_body_ratio = eval_body / bar_rng
+
     if direction == 'CALL':
         thrust_1 = (eval_close - eval_low) / bar_rng
         is_breakout_1 = (eval_close > comp_high and eval_close > eval_open)
-        # Power Opening Drive / Momentum Exception: If turnover_15m >= 25 Cr & real_rvol >= 2.2x & thrust >= 0.75, NR3 coil is waived!
-        is_power_drive = (not is_index) and (turnover_15m >= 25.0) and (real_rvol >= 2.2) and (thrust_1 >= 0.75)
-        if is_breakout_1 and (thrust_1 >= 0.85 or is_power_drive) and (is_pre_coiled or is_power_drive):
-            if is_index and range_rvol >= 2.2:
+        # Power Opening Drive / Momentum Exception: If prior_base_turnover >= 15 Cr or turnover_cr >= 10 Cr & real_rvol >= 2.2x & thrust >= 0.75 & body >= 0.70, NR3 coil is waived!
+        # For Index: If range_rvol >= 2.2x & thrust >= 0.75 & body >= 0.70, NR3 coil is waived!
+        is_power_drive = (not is_index) and (prior_base_turnover >= 15.0 or turnover_cr >= 10.0) and (real_rvol >= 2.2) and (thrust_1 >= 0.75) and (eval_body_ratio >= 0.70)
+        is_idx_power_drive = is_index and (range_rvol >= 2.2) and (thrust_1 >= 0.75) and (eval_body_ratio >= 0.70)
+        power_override = is_power_drive or is_idx_power_drive
+        if is_breakout_1 and (thrust_1 >= 0.85 or power_override) and (is_pre_coiled or power_override):
+            if is_index and range_rvol >= 2.2 and eval_body_ratio >= 0.70:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
-            elif (not is_index) and real_rvol >= 2.2 and contracts_in_bar >= 30.0 and turnover_cr >= 2.0:
+            elif (not is_index) and real_rvol >= 2.2 and contracts_in_bar >= 50.0 and turnover_cr >= 3.0 and eval_body_ratio >= 0.70:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
     else:  # PUT
         thrust_1 = (eval_high - eval_close) / bar_rng
         is_breakdown_1 = (eval_close < comp_low and eval_close < eval_open)
-        is_power_drive = (not is_index) and (turnover_15m >= 25.0) and (real_rvol >= 2.2) and (thrust_1 >= 0.75)
-        if is_breakdown_1 and (thrust_1 >= 0.85 or is_power_drive) and (is_pre_coiled or is_power_drive):
-            if is_index and range_rvol >= 2.2:
+        is_power_drive = (not is_index) and (prior_base_turnover >= 15.0 or turnover_cr >= 10.0) and (real_rvol >= 2.2) and (thrust_1 >= 0.75) and (eval_body_ratio >= 0.70)
+        is_idx_power_drive = is_index and (range_rvol >= 2.2) and (thrust_1 >= 0.75) and (eval_body_ratio >= 0.70)
+        power_override = is_power_drive or is_idx_power_drive
+        if is_breakdown_1 and (thrust_1 >= 0.85 or power_override) and (is_pre_coiled or power_override):
+            if is_index and range_rvol >= 2.2 and eval_body_ratio >= 0.70:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
-            elif (not is_index) and real_rvol >= 2.2 and contracts_in_bar >= 30.0 and turnover_cr >= 2.0:
+            elif (not is_index) and real_rvol >= 2.2 and contracts_in_bar >= 50.0 and turnover_cr >= 3.0 and eval_body_ratio >= 0.70:
                 return True, 'TIER_1_ONE_CANDLE_ULTRA_CONFIRMED', 25.0
 
     # -------------------------------------------------------------
@@ -2405,7 +2421,7 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
         opt_tp = str(row['OptnTp']).upper().strip()
         oi = float(row['OpnIntrst']) / lot_size
         chg_oi = float(row['ChngInOpnIntrst']) / lot_size
-        vol = float(row['TtlTradgVol']) / lot_size
+        vol = float(row['TtlTradgVol'])  # TtlTradgVol in Bhavcopy is ALREADY in contracts
         if stk not in strike_data:
             strike_data[stk] = {'ce_oi': 0.0, 'ce_chg_oi': 0.0, 'ce_vol': 0.0, 'pe_oi': 0.0, 'pe_chg_oi': 0.0, 'pe_vol': 0.0}
         if opt_tp == 'CE':
@@ -2422,23 +2438,29 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
     upper_4 = sorted_strikes[atm_idx + 1:min(len(sorted_strikes), atm_idx + 5)]
     atm_info = strike_data[atm_strike]
 
-    min_unwind = 5000.0 if is_index else 150.0
-    min_write = 10000.0 if is_index else 250.0
+    # Institutional Scale Thresholds (Contracts / Lots)
+    min_unwind = 4000.0 if is_index else 50.0
+    min_write = 8000.0 if is_index else 80.0
     immediate_target_dist = 60.0 if (is_index and sym == 'BANKNIFTY') else (50.0 if is_index else 15.0)
-    ambush_min_chg = 15000.0 if is_index else 400.0
-    min_wall_oi = 50000.0 if is_index else 2500.0
+    ambush_min_chg = 10000.0 if is_index else 120.0
+    min_wall_oi = 30000.0 if is_index else 300.0
 
     if direction == 'CALL':
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
+        tot_lower_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
         tot_upper_ce_vol = sum(strike_data[s].get('ce_vol', 0.0) for s in upper_4)
 
-        # Check 1: Upper OTM Call Ambush
+        # Check 1: Lower 4 Strikes Institutional Floor (-4 to -1)
+        if tot_lower_ce_chg > 1.5 * max(50.0, tot_lower_pe_chg) and tot_lower_ce_chg >= ambush_min_chg:
+            return {'confluent': False, 'score': 0.0, 'reason': 'LOWER_STRIKE_CALL_WRITING_AMBUSH'}
+
+        # Check 2: Upper OTM Call Ambush
         is_buying_squeeze = (tot_upper_ce_vol >= 2.0 * max(1.0, tot_upper_ce_chg))
-        if not is_buying_squeeze and tot_upper_ce_chg >= ambush_min_chg and tot_upper_ce_chg > 2.0 * max(100.0, tot_lower_pe_chg):
+        if not is_buying_squeeze and tot_upper_ce_chg >= ambush_min_chg and tot_upper_ce_chg > 2.0 * max(50.0, tot_lower_pe_chg):
             return {'confluent': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
-        # Check 2: Immediate Active Call Resistance Wall
+        # Check 3: Immediate Active Call Resistance Wall
         immediate_upper = [s for s in upper_4 if (s - spot) <= immediate_target_dist]
         for s in immediate_upper:
             s_ce = strike_data[s]['ce_oi']
@@ -2447,16 +2469,29 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
             s_ce_vol = strike_data[s].get('ce_vol', 0.0)
             if s_ce >= min_wall_oi and s_ce_chg >= 0:
                 if (s_ce > 1.35 * max(50.0, s_pe)) or (s_ce_chg > 1.5 * max(20.0, strike_data[s]['pe_chg_oi'])):
-                    if s_ce_vol >= 2.5 * s_ce:
-                        continue
+                    if s_ce_vol >= 2.0 * s_ce:
+                        continue  # Squeeze volume exception
                     return {'confluent': False, 'score': 0.0, 'reason': f'CALL_WALL_RESISTANCE_AT_{int(s)}'}
 
-        # Check 3: ATM Call Writer Dominance
+        # Check 4: ATM Call Writer Dominance
         if atm_info.get('ce_chg_oi', 0.0) > 1.5 * max(50.0, atm_info.get('pe_chg_oi', 0.0)) and atm_info.get('ce_chg_oi', 0.0) > 0:
             return {'confluent': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
+        # Institutional Gamma Squeeze Detection
+        is_gamma_squeeze = False
+        for s in [atm_strike] + upper_4[:2]:
+            s_ce = strike_data[s]['ce_oi']
+            s_ce_vol = strike_data[s].get('ce_vol', 0.0)
+            s_ce_chg = strike_data[s]['ce_chg_oi']
+            if s_ce > 0:
+                unwind_pct = (abs(s_ce_chg) / s_ce) if s_ce_chg < 0 else 0.0
+                vol_oi_ratio = s_ce_vol / s_ce
+                if vol_oi_ratio >= 2.0 and s_ce_chg < 0 and (unwind_pct >= 0.08 or abs(s_ce_chg) >= (1000.0 if is_index else 25.0)):
+                    is_gamma_squeeze = True
+                    break
+
         # 1. Mandatory Call Unwinding on ATM or OTM Resistance strikes
-        has_unwind = (tot_upper_ce_chg <= -min_unwind) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind)
+        has_unwind = (tot_upper_ce_chg <= -min_unwind) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind) or is_gamma_squeeze or (atm_info['ce_oi'] > 0 and abs(atm_info['ce_chg_oi']) / atm_info['ce_oi'] >= 0.08 and atm_info['ce_chg_oi'] < 0)
         if not has_unwind:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_CALL_UNWINDING_MANDATORY_FAIL'}
 
@@ -2467,18 +2502,8 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
 
         # 3. Call Buyer Volume Presence
         atm_ce_vol = atm_info.get('ce_vol', 0.0)
-        if atm_ce_vol < min_unwind:
+        if atm_ce_vol < min_unwind and not is_gamma_squeeze:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
-
-        # 4. Institutional Gamma Squeeze Detection
-        is_gamma_squeeze = False
-        for s in [atm_strike] + upper_4[:2]:
-            s_ce = strike_data[s]['ce_oi']
-            s_ce_vol = strike_data[s].get('ce_vol', 0.0)
-            s_ce_chg = strike_data[s]['ce_chg_oi']
-            if s_ce > 0 and (s_ce_vol / s_ce) >= 2.0 and s_ce_chg < 0:
-                is_gamma_squeeze = True
-                break
 
         score = 10.0
         if is_gamma_squeeze:
@@ -2499,14 +2524,19 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
     else:  # PUT
         tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
         tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
+        tot_upper_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in upper_4)
         tot_lower_pe_vol = sum(strike_data[s].get('pe_vol', 0.0) for s in lower_4)
 
-        # Check 1: Lower OTM Put Ambush
+        # Check 1: Upper 4 Strikes Institutional Ceiling (+1 to +4)
+        if tot_upper_pe_chg > 1.5 * max(50.0, tot_upper_ce_chg) and tot_upper_pe_chg >= ambush_min_chg:
+            return {'confluent': False, 'score': 0.0, 'reason': 'UPPER_STRIKE_PUT_WRITING_AMBUSH'}
+
+        # Check 2: Lower OTM Put Ambush
         is_buying_squeeze = (tot_lower_pe_vol >= 2.0 * max(1.0, tot_lower_pe_chg))
-        if not is_buying_squeeze and tot_lower_pe_chg >= ambush_min_chg and tot_lower_pe_chg > 2.0 * max(100.0, tot_upper_ce_chg):
+        if not is_buying_squeeze and tot_lower_pe_chg >= ambush_min_chg and tot_lower_pe_chg > 2.0 * max(50.0, tot_upper_ce_chg):
             return {'confluent': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
-        # Check 2: Immediate Active Put Support Wall
+        # Check 3: Immediate Active Put Support Wall
         immediate_lower = [s for s in lower_4 if (spot - s) <= immediate_target_dist]
         for s in immediate_lower:
             s_pe = strike_data[s]['pe_oi']
@@ -2515,16 +2545,29 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
             s_pe_vol = strike_data[s].get('pe_vol', 0.0)
             if s_pe >= min_wall_oi and s_pe_chg >= 0:
                 if (s_pe > 1.35 * max(50.0, s_ce)) or (s_pe_chg > 1.5 * max(20.0, strike_data[s]['ce_chg_oi'])):
-                    if s_pe_vol >= 2.5 * s_pe:
-                        continue
+                    if s_pe_vol >= 2.0 * s_pe:
+                        continue  # Squeeze volume exception
                     return {'confluent': False, 'score': 0.0, 'reason': f'PUT_WALL_RESISTANCE_AT_{int(s)}'}
 
-        # Check 3: ATM Put Writer Dominance
+        # Check 4: ATM Put Writer Dominance
         if atm_info.get('pe_chg_oi', 0.0) > 1.5 * max(50.0, atm_info.get('ce_chg_oi', 0.0)) and atm_info.get('pe_chg_oi', 0.0) > 0:
             return {'confluent': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
+        # Institutional Panic Squeeze Detection
+        is_panic_squeeze = False
+        for s in [atm_strike] + lower_4[-2:]:
+            s_pe = strike_data[s]['pe_oi']
+            s_pe_vol = strike_data[s].get('pe_vol', 0.0)
+            s_pe_chg = strike_data[s]['pe_chg_oi']
+            if s_pe > 0:
+                unwind_pct = (abs(s_pe_chg) / s_pe) if s_pe_chg < 0 else 0.0
+                vol_oi_ratio = s_pe_vol / s_pe
+                if vol_oi_ratio >= 2.0 and s_pe_chg < 0 and (unwind_pct >= 0.08 or abs(s_pe_chg) >= (1000.0 if is_index else 25.0)):
+                    is_panic_squeeze = True
+                    break
+
         # 1. Mandatory Put Unwinding on ATM or OTM Support strikes
-        has_unwind = (tot_lower_pe_chg <= -min_unwind) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind)
+        has_unwind = (tot_lower_pe_chg <= -min_unwind) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind) or is_panic_squeeze or (atm_info['pe_oi'] > 0 and abs(atm_info['pe_chg_oi']) / atm_info['pe_oi'] >= 0.08 and atm_info['pe_chg_oi'] < 0)
         if not has_unwind:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_PUT_UNWINDING_MANDATORY_FAIL'}
 
@@ -2535,18 +2578,8 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
 
         # 3. Put Buyer Volume Presence
         atm_pe_vol = atm_info.get('pe_vol', 0.0)
-        if atm_pe_vol < min_unwind:
+        if atm_pe_vol < min_unwind and not is_panic_squeeze:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
-
-        # 4. Institutional Panic Squeeze Detection
-        is_panic_squeeze = False
-        for s in [atm_strike] + lower_4[-2:]:
-            s_pe = strike_data[s]['pe_oi']
-            s_pe_vol = strike_data[s].get('pe_vol', 0.0)
-            s_pe_chg = strike_data[s]['pe_chg_oi']
-            if s_pe > 0 and (s_pe_vol / s_pe) >= 2.0 and s_pe_chg < 0:
-                is_panic_squeeze = True
-                break
 
         score = 10.0
         if is_panic_squeeze:
@@ -2560,7 +2593,7 @@ def verify_bhavcopy_oi_confluence(sym: str, date_obj, spot: float, direction: st
         return {
             'confluent': True,
             'score': score,
-            'reason': 'PANIC_SQUEEZE_LONG_UNWINDING_CONFIRMED' if is_panic_squeeze else 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL',
+            'reason': 'PANIC_SQUEEZE_LONG_LIQUIDATION_CONFIRMED' if is_panic_squeeze else 'CLEAR_PUT_RUNWAY_AND_RESISTANCE_WALL',
             'is_panic_squeeze': is_panic_squeeze
         }
 
