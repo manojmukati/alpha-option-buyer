@@ -120,7 +120,8 @@ def evaluate_institutional_index_engine(
     nifty_regime: Dict[str, Any],
     data_feed: LiveMarketDataFeed,
     daily_atr: float,
-    live_spot_override: Optional[float] = None
+    live_spot_override: Optional[float] = None,
+    bulk_snapshot: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
     """
     ========================================================================================
@@ -214,6 +215,25 @@ def evaluate_institutional_index_engine(
         p5_score = 8.0 if fuel_spent < (1.5 * atr) else 5.0
 
         prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
+
+        # Institutional Heavyweight Confluence (NIFTY & BANKNIFTY)
+        # Spot Index cannot sustain breakout if key constituent drivers are heavily dumping
+        if bulk_snapshot and sym_clean in ['NIFTY', 'BANKNIFTY']:
+            heavy_syms = ['HDFCBANK', 'ICICIBANK', 'RELIANCE'] if sym_clean == 'NIFTY' else ['HDFCBANK', 'ICICIBANK', 'SBIN']
+            heavy_pcts = []
+            for h_s in heavy_syms:
+                h_q = bulk_snapshot.get(h_s)
+                if h_q and h_q.get('pct_change') is not None:
+                    try:
+                        heavy_pcts.append(float(h_q['pct_change']))
+                    except Exception:
+                        pass
+            if heavy_pcts:
+                avg_heavy = float(np.mean(heavy_pcts))
+                if direction == 'CALL' and avg_heavy < -0.40:
+                    continue  # Heavyweight divergence veto
+                if direction == 'PUT' and avg_heavy > 0.40:
+                    continue  # Heavyweight divergence veto
 
         # TARGETED OPTION CHAIN QUERY (Safe 1 Call per candidate Index)
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
@@ -757,7 +777,8 @@ class AlphaInstitutionalSwappedScreener:
                 live_q=bulk.get(idx),
                 nifty_regime=regime,
                 data_feed=self.data_feed,
-                daily_atr=atr
+                daily_atr=atr,
+                bulk_snapshot=bulk
             )
             if res and res.get('passed', False):
                 index_candidates.append(res)
