@@ -2,5 +2,7 @@
   "date": "2026-11-19",
   "dispatched": {
     "PIIND": 1795061478.3362193
-  }
+  },
+  "eod_journal_dispatched": true,
+  "eod_dispatched_time": "03:35:35 PM IST"
 }
