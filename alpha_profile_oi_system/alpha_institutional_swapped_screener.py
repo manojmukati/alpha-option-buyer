@@ -1432,11 +1432,13 @@ class AlphaInstitutionalSwappedScreener:
             if res and res.get('passed', False):
                 index_candidates.append(res)
 
-        # 2. Evaluate All 216 F&O Stocks (Zero hardcoding!)
+        # 2. Evaluate All 218 F&O Stocks (Zero hardcoding!)
         symbols_to_scan = [
-            item['symbol'] if isinstance(item, dict) else item
-            for item in self.universe
-            if (item['symbol'] if isinstance(item, dict) else item) not in INDEX_NAMES
+            sym for sym in [
+                item['symbol'] if isinstance(item, dict) else item
+                for item in self.universe
+            ]
+            if sym not in INDEX_NAMES and not sym.startswith('NIFTY') and not sym.endswith('FPI')
         ]
 
         def scan_stock_worker(sym):
