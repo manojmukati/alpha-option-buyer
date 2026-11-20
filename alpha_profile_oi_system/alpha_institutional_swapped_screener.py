@@ -203,18 +203,16 @@ def evaluate_institutional_index_engine(
     if bar_rng < min_idx_rng:
         return None
 
-    # Range RVOL
+    # Range RVOL (Exclude 09:15 opening outlier bar from median range to prevent distortion)
+    comp_bars = df_slice.iloc[1:-2].tail(8) if len(df_slice) > 3 else df_slice.iloc[:-2]
     comp_rngs = comp_bars['high'] - comp_bars['low']
-    median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
-    idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
+    median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else (45.0 if sym_clean == 'BANKNIFTY' else 15.0)
+    idx_rvol = round(bar_rng / max(15.0 if sym_clean == 'BANKNIFTY' else 8.0, median_rng), 2)
 
     # Instant True Range Delta Inflection
     eval_bvc, prev_bvc, delta_inflection = compute_bar_delta_proxy(df_slice, is_index=True)
 
-    # Fuel spent check: Anti-Top-Chasing Guard (If index moved > 1.30x ATR from low, fuel is exhausted)
     fuel_spent = day_high - day_low
-    if fuel_spent > (1.30 * atr):
-        return None
 
     # Test directions (Allows Slow Grinding Push / Reversal from slight dip to Fast Expansion)
     directions_to_test = []
@@ -289,10 +287,10 @@ def evaluate_institutional_index_engine(
             if remaining_runway < 150.0:
                 continue
             # 3. CVD Delta Aggression: Strictly requires Delta >= +0.30
-            if idx_rvol >= 1.30 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45:
+            if idx_rvol >= 1.20 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45:
                 is_mode_a = True
             # Mode B (Index Fast Climax Breakout / Range Expansion):
-            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc >= 0.35:
+            if idx_rvol >= 1.50 and thrust >= 0.55 and eval_bvc >= 0.35:
                 is_mode_b = True
         else:
             # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% below VWAP
@@ -304,10 +302,10 @@ def evaluate_institutional_index_engine(
             if remaining_runway < 150.0:
                 continue
             # 3. CVD Delta Aggression: Strictly requires Delta <= -0.30
-            if idx_rvol >= 1.30 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45:
+            if idx_rvol >= 1.20 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45:
                 is_mode_a = True
             # Mode B (Index Fast Climax Breakdown / Dump):
-            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc <= -0.35:
+            if idx_rvol >= 1.50 and thrust >= 0.55 and eval_bvc <= -0.35:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -316,7 +314,7 @@ def evaluate_institutional_index_engine(
         p1_score = round(min(25.0, max(15.0, 14.0 + (idx_rvol * 3.5) + (thrust * 5.0))), 2)
         p2_score = round(min(25.0, max(14.0, (abs(eval_bvc) * 12.0) + (abs(delta_inflection) * 12.0))), 2)
         p3_score = 18.0 if ((direction == 'CALL' and eval_close > vwap) or (direction == 'PUT' and eval_close < vwap)) else 12.0
-        p5_score = 10.0 if fuel_spent < (1.0 * atr) else 6.0
+        p5_score = 10.0 if remaining_runway >= 300.0 else 6.0
 
         prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
         oi_score = float(opt.get('oi_score', 12.0))
@@ -1912,8 +1910,8 @@ class AlphaInstitutionalSwappedScreener:
                 elif elapsed_mins >= 15 and cur_bid <= buy_p:
                     exit_reason = '15MIN_TIMEOUT_SL_STAGNATION'
                     exit_price = cur_bid
-                # 5. Force Slab Close
-                elif force_slab_close:
+                # 5. Force Slab Close (Guarantees every trade gets at least its 15-minute minimum runway)
+                elif force_slab_close and elapsed_mins >= 15:
                     exit_reason = 'EOD_SLAB_CONCLUSION_CLOSE'
                     exit_price = cur_bid
 

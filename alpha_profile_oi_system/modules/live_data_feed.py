@@ -843,19 +843,17 @@ class LiveMarketDataFeed:
                         is_gamma_squeeze = True
                         break
 
-            # 6. Mandatory Institutional Call Unwinding on ATM or OTM Resistance strikes
+            # 6. Institutional Flow Confluence (Either Call Unwinding OR Put Support Writing without Call Wall)
             has_unwind = (tot_upper_ce_chg <= -min_unwind) or (tot_upper_ce_chg <= -min_unwind_shares) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_shares) or is_gamma_squeeze or (atm_info['ce_oi'] > 0 and abs(atm_info['ce_chg_oi']) / atm_info['ce_oi'] >= 0.08 and atm_info['ce_chg_oi'] < 0)
-            if not has_unwind:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_CALL_UNWINDING_FAIL'}
-
-            # 7. Mandatory Put Support Writing on ATM or OTM Support strikes
             has_support = ((tot_lower_pe_chg >= min_write or tot_lower_pe_chg >= min_write_shares) and tot_lower_pe_chg >= 1.2 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write_shares))
-            if not has_support:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_SUPPORT_WRITING_FAIL'}
 
-            # 8. Call Buyer Volume Presence
+            if not (has_unwind or has_support):
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_CALL_UNWINDING_OR_SUPPORT_FAIL'}
+
+            # 7. Call Buyer Volume Presence
             atm_ce_vol = atm_info.get('ce_vol', 0.0)
-            if atm_ce_vol < min_unwind and atm_ce_vol < min_unwind_shares and not is_gamma_squeeze:
+            min_vol_floor = 500.0 if is_index else 20.0
+            if atm_ce_vol < min_vol_floor and not is_gamma_squeeze:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_BUYER_VOLUME_DOMINANCE'}
 
             score = 10.0
@@ -936,19 +934,17 @@ class LiveMarketDataFeed:
                         is_panic_squeeze = True
                         break
 
-            # 6. Mandatory Institutional Put Unwinding on ATM or OTM Support strikes
+            # 6. Institutional Flow Confluence (Either Put Unwinding OR Call Resistance Writing without Put Wall)
             has_unwind = (tot_lower_pe_chg <= -min_unwind) or (tot_lower_pe_chg <= -min_unwind_shares) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_shares) or is_panic_squeeze or (atm_info['pe_oi'] > 0 and abs(atm_info['pe_chg_oi']) / atm_info['pe_oi'] >= 0.08 and atm_info['pe_chg_oi'] < 0)
-            if not has_unwind:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_PUT_UNWINDING_FAIL'}
-
-            # 7. Mandatory Call Resistance Writing on ATM or OTM Resistance strikes
             has_resistance = ((tot_upper_ce_chg >= min_write or tot_upper_ce_chg >= min_write_shares) and tot_upper_ce_chg >= 1.2 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write_shares))
-            if not has_resistance:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_CALL_RESISTANCE_WRITING_FAIL'}
 
-            # 8. Put Buyer Volume Presence
+            if not (has_unwind or has_resistance):
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_PUT_UNWINDING_OR_RESISTANCE_FAIL'}
+
+            # 7. Put Buyer Volume Presence
             atm_pe_vol = atm_info.get('pe_vol', 0.0)
-            if atm_pe_vol < min_unwind and atm_pe_vol < min_unwind_shares and not is_panic_squeeze:
+            min_vol_floor = 500.0 if is_index else 20.0
+            if atm_pe_vol < min_vol_floor and not is_panic_squeeze:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_PUT_BUYER_VOLUME_DOMINANCE'}
 
             score = 10.0
@@ -1013,15 +1009,15 @@ class LiveMarketDataFeed:
         # Spread cannot exceed 3.0% and max allowed spread is scaled for high-premium contracts
         spread_abs = round(ask - bid, 2)
         spread_pct = round((spread_abs / max(0.5, ltp)) * 100.0, 2)
-        max_allowed_spread = 5.0 if is_index else max(1.50, round(0.015 * ltp, 2))
+        max_allowed_spread = max(25.0, round(0.05 * ltp, 2)) if is_index else max(8.0, round(0.075 * ltp, 2))
         if spread_abs > max_allowed_spread:
             return {
                 'is_live_chain_verified': False,
                 'is_liquid': False,
                 'rejected_reason': f'WIDE_BID_ASK_SPREAD (Spread Rs {spread_abs:.2f} > Rs {max_allowed_spread:.2f} max allowed for risk budget)'
             }
-        if spread_pct > 3.0:
-            return {'is_live_chain_verified': False, 'is_liquid': False, 'rejected_reason': f'WIDE_BID_ASK_SPREAD ({spread_pct:.2f}% > 3.0%)'}
+        if spread_pct > 8.0:
+            return {'is_live_chain_verified': False, 'is_liquid': False, 'rejected_reason': f'WIDE_BID_ASK_SPREAD ({spread_pct:.2f}% > 8.0%)'}
 
         exp_str = str(oi_res.get('expiry_date', ''))
         try:
