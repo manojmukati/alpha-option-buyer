@@ -81,6 +81,7 @@ def get_symbol_lot_size(sym_clean: str) -> float:
 
 def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
     """
+    Active position management & monitoring slab:
     Morning Prime Slab: 09:30 AM to 10:15 AM IST (570 to 615 mins)
     Afternoon Prime Slab: 01:15 PM to 02:15 PM IST (795 to 855 mins)
     """
@@ -90,25 +91,39 @@ def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
     return is_morning or is_afternoon
 
 
-def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> Tuple[float, float]:
+def is_in_fresh_signal_window(ist_dt: datetime.datetime) -> bool:
     """
-    Computes instant bar delta and cumulative 5-bar volume delta ratio.
-    - For Stocks: Uses real traded cash volume weighting.
-    - For Indices: Spot volume is 0 on NSE; uses True Range (High - Low) weighting.
+    Fresh Signal Entry Window (Guarantees at least 15-20 mins runway before slab closure):
+    Morning: 09:30 AM to 10:00 AM IST (570 to 600 mins)
+    Afternoon: 01:15 PM to 02:00 PM IST (795 to 840 mins)
+    No fresh signals allowed in the final 15 minutes (10:00-10:15 & 14:00-14:15)!
     """
-    if df_slice is None or len(df_slice) < 5:
-        return 0.0, 0.0
-    bars_5 = df_slice.iloc[-6:-1]
-    price_chg = bars_5['close'] - bars_5['open']
-    std_val = float(price_chg.std()) if len(bars_5) > 1 else 0.0
-    sigma = std_val if std_val > 0.01 else float((bars_5['high'] - bars_5['low']).mean() * 0.5)
+    tot_m = ist_dt.hour * 60 + ist_dt.minute
+    is_m_fresh = (570 <= tot_m <= 600)
+    is_a_fresh = (795 <= tot_m <= 840)
+    return is_m_fresh or is_a_fresh
+
+
+def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> Tuple[float, float, float]:
+    """
+    Computes instant bar delta, previous bar delta, and delta slope/inflection.
+    Returns: (eval_bvc, prev_bvc, delta_inflection)
+    - eval_bvc: current bar order flow delta [-1.0, +1.0]
+    - prev_bvc: previous bar order flow delta [-1.0, +1.0]
+    - delta_inflection: eval_bvc - prev_bvc (positive = selling drying up / buying expanding)
+    """
+    if df_slice is None or len(df_slice) < 3:
+        return 0.0, 0.0, 0.0
+    bars_3 = df_slice.iloc[-4:-1]
+    price_chg = bars_3['close'] - bars_3['open']
+    std_val = float(price_chg.std()) if len(bars_3) > 1 else 0.0
+    sigma = std_val if std_val > 0.01 else float((bars_3['high'] - bars_3['low']).mean() * 0.5)
     bvc_z = np.clip(price_chg / max(0.01, sigma), -3.0, 3.0)
     bvc_fraction = np.tanh(bvc_z)
-    has_real_volume = (not is_index) and ('volume' in bars_5.columns and float(np.sum(bars_5['volume'].values.astype(float))) > 0.0)
-    weights = bars_5['volume'].values.astype(float) if has_real_volume else (bars_5['high'] - bars_5['low']).values.astype(float)
-    bvc_cum_ratio = float(np.sum(weights * bvc_fraction.values) / max(1.0, float(np.sum(weights))))
     eval_bvc = float(bvc_fraction.iloc[-1])
-    return eval_bvc, bvc_cum_ratio
+    prev_bvc = float(bvc_fraction.iloc[-2]) if len(bvc_fraction) >= 2 else 0.0
+    delta_inflection = round(eval_bvc - prev_bvc, 4)
+    return eval_bvc, prev_bvc, delta_inflection
 
 
 # =========================================================================
@@ -128,15 +143,16 @@ def evaluate_institutional_index_engine(
     """
     ========================================================================================
     MODULE 1: INSTITUTIONAL INDEX ENGINE (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY)
-    - Macro Range Expansion RVOL & CVD Flow (Zero Cash Turnover Dependency).
-    - Targeted Option Chain Query: Exactly 1 Call for ATM & +/-4 Strikes.
-    - Vol/OI >= 2.0x Gamma Squeeze & Call/Put Unwinding Verification.
+    - DATA-FIRST ARCHITECTURE: Targeted Option Chain & Heavyweight Confluence Lead!
+    - Dual-Velocity Engine: Slow Grinding Push vs Fast Climax Expansion.
+    - True Range Instant Delta Inflection (Zero 5-bar lag).
+    - Market Maker Straddle Pinning Veto & Anti-Top-Chasing Fuel Guard.
     ========================================================================================
     """
     sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
     if sym_clean not in INDEX_NAMES:
         return None
-    if df_slice is None or len(df_slice) < 7:
+    if df_slice is None or len(df_slice) < 5:
         return None
 
     eval_bar = df_slice.iloc[-2]
@@ -166,13 +182,13 @@ def evaluate_institutional_index_engine(
 
     pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
-    # Calculate VWAP proxy
+    # Calculate True Range VWAP proxy
     tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
     vol_weights = df_slice['high'] - df_slice['low']
     vwap = float((tp_all * vol_weights).sum() / max(1.0, float(vol_weights.sum()))) if float(vol_weights.sum()) > 0 else float(tp_all.mean())
 
-    # Absolute minimum bar range floor (eliminates fake breakouts during choppy low-vol periods)
-    min_idx_rng = 35.0 if sym_clean == 'BANKNIFTY' else 14.0
+    # Absolute minimum bar range floor
+    min_idx_rng = 30.0 if sym_clean == 'BANKNIFTY' else 12.0
     if bar_rng < min_idx_rng:
         return None
 
@@ -181,45 +197,25 @@ def evaluate_institutional_index_engine(
     median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else 15.0
     idx_rvol = round(bar_rng / max(0.5, median_rng), 2)
 
-    # Range-weighted Delta (Spot Index Volume is identically 0 on NSE; True Range used)
-    eval_bvc, bvc_cum_ratio = compute_bar_delta_proxy(df_slice, is_index=True)
+    # Instant True Range Delta Inflection
+    eval_bvc, prev_bvc, delta_inflection = compute_bar_delta_proxy(df_slice, is_index=True)
 
-    # Test CALL direction first, then PUT
+    # Fuel spent check: Anti-Top-Chasing Guard (If index moved > 1.30x ATR from low, fuel is exhausted)
+    fuel_spent = day_high - day_low
+    if fuel_spent > (1.30 * atr):
+        return None
+
+    # Test directions
     directions_to_test = []
-    if nifty_regime.get('allow_call', True) and eval_close > vwap and pct_change >= 0.15:
+    if nifty_regime.get('allow_call', True) and eval_close >= (vwap * 0.999) and pct_change >= 0.10:
         directions_to_test.append('CALL')
-    if nifty_regime.get('allow_put', True) and eval_close < vwap and pct_change <= -0.15:
+    if nifty_regime.get('allow_put', True) and eval_close <= (vwap * 1.001) and pct_change <= -0.10:
         directions_to_test.append('PUT')
 
     for direction in directions_to_test:
-        # Pillar 1 (Index Range Momentum): Score up to 25 pts
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
-        if thrust < 0.55:
-            continue
-        p1_score = round(min(25.0, max(15.0, 15.0 + (idx_rvol * 3.5) + (thrust * 5.0))), 2)
-
-        # Pillar 2 (Delta Flow): Score up to 25 pts
-        if direction == 'CALL':
-            if eval_bvc <= 0 or bvc_cum_ratio <= 0:
-                continue
-            p2_score = round(min(25.0, max(12.0, (eval_bvc * 12.0) + (bvc_cum_ratio * 13.0))), 2)
-        else:
-            if eval_bvc >= 0 or bvc_cum_ratio >= 0:
-                continue
-            p2_score = round(min(25.0, max(12.0, (abs(eval_bvc) * 12.0) + (abs(bvc_cum_ratio) * 13.0))), 2)
-
-        # Pillar 3 (Profile Alignment): Score up to 20 pts
-        p3_score = 18.0 if ((direction == 'CALL' and eval_close > vwap) or (direction == 'PUT' and eval_close < vwap)) else 10.0
-
-        # Pillar 5 (ATR Runway):
-        target_dist = 140.0 if sym_clean == 'BANKNIFTY' else 90.0
-        fuel_spent = day_high - day_low
-        p5_score = 8.0 if fuel_spent < (1.5 * atr) else 5.0
-
-        prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
 
         # Institutional Heavyweight Confluence (NIFTY & BANKNIFTY)
-        # Spot Index cannot sustain breakout if key constituent drivers are heavily dumping
         if bulk_snapshot and sym_clean in ['NIFTY', 'BANKNIFTY']:
             heavy_syms = ['HDFCBANK', 'ICICIBANK', 'RELIANCE'] if sym_clean == 'NIFTY' else ['HDFCBANK', 'ICICIBANK', 'SBIN']
             heavy_pcts = []
@@ -232,12 +228,13 @@ def evaluate_institutional_index_engine(
                         pass
             if heavy_pcts:
                 avg_heavy = float(np.mean(heavy_pcts))
-                if direction == 'CALL' and avg_heavy < -0.40:
+                if direction == 'CALL' and avg_heavy < -0.30:
                     continue  # Heavyweight divergence veto
-                if direction == 'PUT' and avg_heavy > 0.40:
+                if direction == 'PUT' and avg_heavy > 0.30:
                     continue  # Heavyweight divergence veto
 
-        # TARGETED OPTION CHAIN QUERY (Safe 1 Call per candidate Index)
+        # GATE 2: TARGETED OPTION CHAIN QUERY (DATA FIRST!)
+        target_dist = 140.0 if sym_clean == 'BANKNIFTY' else 90.0
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
         if opt_override is not None:
             opt = opt_override
@@ -253,10 +250,48 @@ def evaluate_institutional_index_engine(
         if not opt or not opt.get('is_liquid', False):
             continue
 
+        # Market Maker Straddle Pinning Check (Chop Blocker)
+        atm_info = opt.get('atm_info', {})
+        if atm_info:
+            ce_chg = abs(float(atm_info.get('ce_chg_oi', 0.0)))
+            pe_chg = abs(float(atm_info.get('pe_chg_oi', 0.0)))
+            tot_chg = ce_chg + pe_chg
+            if tot_chg > 2000.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
+                continue  # Market maker equilibrium straddle pinning veto (Chop trap)
+
+        # GATE 3: DUAL-VELOCITY CONFIRMATION
+        is_mode_a = False  # Slow Grinding Push
+        is_mode_b = False  # Fast Range Expansion
+
+        if direction == 'CALL':
+            # Mode A (Index Grinding Push): Price above VWAP, positive delta inflection
+            if idx_rvol >= 0.70 and (delta_inflection >= 0.15 or eval_bvc >= 0.10) and thrust >= 0.40:
+                is_mode_a = True
+            # Mode B (Fast Expansion): Large range breakout
+            if idx_rvol >= 1.40 and thrust >= 0.55 and eval_bvc >= 0.25:
+                is_mode_b = True
+        else:
+            # Mode A (Index Grinding Drop)
+            if idx_rvol >= 0.70 and (delta_inflection <= -0.15 or eval_bvc <= -0.10) and thrust >= 0.40:
+                is_mode_a = True
+            # Mode B (Fast Breakdown)
+            if idx_rvol >= 1.40 and thrust >= 0.55 and eval_bvc <= -0.25:
+                is_mode_b = True
+
+        if not (is_mode_a or is_mode_b):
+            continue
+
+        p1_score = round(min(25.0, max(15.0, 14.0 + (idx_rvol * 3.5) + (thrust * 5.0))), 2)
+        p2_score = round(min(25.0, max(14.0, (abs(eval_bvc) * 12.0) + (abs(delta_inflection) * 12.0))), 2)
+        p3_score = 18.0 if ((direction == 'CALL' and eval_close > vwap) or (direction == 'PUT' and eval_close < vwap)) else 12.0
+        p5_score = 10.0 if fuel_spent < (1.0 * atr) else 6.0
+
+        prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
         oi_score = float(opt.get('oi_score', 12.0))
         total_score = round(prelim_score + oi_score, 2)
 
         if total_score >= INDEX_SCORE_THRESHOLD:
+            mode_tag = "FAST_EXPANSION" if is_mode_b else "SLOW_GRINDING_PUSH"
             return {
                 'symbol': sym_clean,
                 'is_index': True,
@@ -272,7 +307,7 @@ def evaluate_institutional_index_engine(
                 'pct_change': pct_change,
                 'verified_opt': opt,
                 'passed': True,
-                'tier_reason': f'INSTITUTIONAL_INDEX_{direction}_CONFIRMED'
+                'tier_reason': f'INSTITUTIONAL_INDEX_{direction}_{mode_tag}_CONFIRMED'
             }
 
     return None
@@ -295,26 +330,36 @@ def evaluate_institutional_stock_engine(
     """
     ========================================================================================
     MODULE 2: INSTITUTIONAL STOCK ENGINE (216 DYNAMIC F&O STOCKS, ZERO HARDCODING)
-    - GATE 1 (Zero NSE Option Chain Calls):
-      Strict Cash Turnover Floor (>= Rs 15 Cr in 15m), Spot >= 500 INR, RVOL >= 1.6x,
-      and VWAP Alignment. Eliminates 212 dead/illiquid stocks in 1 second!
-    - GATE 2 (Targeted Safe Option Chain Query):
-      Queries NSE live Option Chain ONLY for the top surviving liquid leaders!
-      Vol/OI >= 2.0x (Gamma Squeeze), Call Unwinding (>= 50 lots), Put Support Wall.
-    - GATE 3 (Execution Timing & Pricing):
+    TRUE INSTITUTIONAL DATA-FIRST ARCHITECTURE:
+    - GATE 1 (Cash Turnover & Liquidity Defense Floor):
+      Strict Cash Turnover Floor (>= Rs 10-15 Cr in 15m), Spot >= 500 INR,
+      RVOL >= 0.50x (allows stealth institutional accumulation / bottom reversals),
+      and VWAP alignment / reversal inflection.
+    - GATE 2 (Targeted Live Option Chain Query - Data-First for Liquid Leaders):
+      Queries NSE live Option Chain FIRST for qualifying liquid stocks!
+      Market Maker Straddle Pinning Veto (|ΔCE - ΔPE| / (ΔCE + ΔPE) < 0.15 blocks chop).
+      Option Liquidity & OI verification.
+    - GATE 3 (Dual-Velocity Engine Confirmation):
+      * Mode A (Slow Stealth Reversal / V-Bounce Accumulation):
+        Catches bottom reversals at low option premiums with moderate volume (RVOL >= 0.50x),
+        VWAP reclaim, and positive order flow delta inflection (delta_inflection >= 0.15).
+      * Mode B (Fast Climax Breakout):
+        Catches explosive momentum surges (RVOL >= 1.60x, thrust >= 0.55, eval_bvc >= 0.20)
+        with Anti-Top-Chasing Guard (blocks late entries if price is extended > 3.5% from VWAP).
+    - GATE 4 (Execution Timing & Pricing):
       Executable Ask price entry, Pro-Desk dynamic SL/Target, and 15m time SL.
     ========================================================================================
     """
     sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
     if sym_clean in INDEX_NAMES:
         return None
-    if df_slice is None or len(df_slice) < 7:
+    if df_slice is None or len(df_slice) < 5:
         return None
 
     eval_bar = df_slice.iloc[-2]
     live_bar = df_slice.iloc[-1]
     comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
-    if len(comp_bars) < 5:
+    if len(comp_bars) < 3:
         return None
 
     eval_close = float(eval_bar['close'])
@@ -349,7 +394,7 @@ def evaluate_institutional_stock_engine(
     else:
         pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
-    # 2. Gate 1 Liquidity & 15-Minute Rolling Cash Turnover Floor (ZERO NSE OPTION CHAIN CALLS)
+    # 2. Gate 1 Liquidity & Rolling Cash Turnover Floor
     turnover_cr = (eval_close * eval_vol) / 1e7
     bars_5_turnover = []
     for idx_b in range(max(0, len(df_slice) - 6), len(df_slice) - 1):
@@ -357,8 +402,8 @@ def evaluate_institutional_stock_engine(
         bars_5_turnover.append((float(b_item.get('close', 0.0)) * float(b_item.get('volume', 0.0))) / 1e7)
     turnover_15m = float(sum(bars_5_turnover)) if bars_5_turnover else turnover_cr
 
-    # Strict Institutional Liquidity Defense: Eliminates dead stocks like PIIND (turnover 4.8 Cr)
-    if turnover_15m < 15.0 and turnover_cr < 8.0:
+    # Institutional Turnover Defense (Allows actively traded stocks, filters dead names)
+    if turnover_15m < 10.0 and turnover_cr < 5.0:
         return None
 
     # RVOL Calculation
@@ -366,68 +411,32 @@ def evaluate_institutional_stock_engine(
     comp_vol_med = float(comp_bars['volume'].median()) if 'volume' in comp_bars else 1000.0
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
-    if real_rvol < 1.6 and turnover_cr < 12.0:
-        return None  # Rejects low-participation churn
 
     # Wyckoff VWAP Calculation
     tp_all = (df_slice['high'] + df_slice['low'] + df_slice['close']) / 3.0
     vol_weights = df_slice['volume'] if 'volume' in df_slice.columns else pd.Series(1.0, index=df_slice.index)
     vwap = float((tp_all * vol_weights).sum() / max(1.0, float(vol_weights.sum()))) if float(vol_weights.sum()) > 0 else float(tp_all.mean())
 
-    # Delta Flow Calculation (Uses real cash volume weighting for stocks)
-    eval_bvc, bvc_cum_ratio = compute_bar_delta_proxy(df_slice, is_index=False)
+    # Delta Order Flow & Instant Inflection
+    eval_bvc, prev_bvc, delta_inflection = compute_bar_delta_proxy(df_slice, is_index=False)
 
     # Direction Selection
     directions_to_test = []
-    if nifty_regime.get('allow_stock_call', True) and eval_close > vwap and pct_change >= 0.35 and pct_change <= 4.20:
+    # CALL candidate: Market regime allows calls, price near/above VWAP, and reasonable day range
+    if nifty_regime.get('allow_stock_call', True) and (eval_close >= (vwap * 0.995)) and (-2.50 <= pct_change <= 4.50):
         directions_to_test.append('CALL')
-    if nifty_regime.get('allow_stock_put', True) and eval_close < vwap and pct_change <= -0.35 and pct_change >= -4.20:
+    # PUT candidate: Market regime allows puts, price near/below VWAP, and reasonable day range
+    if nifty_regime.get('allow_stock_put', True) and (eval_close <= (vwap * 1.005)) and (-4.50 <= pct_change <= 2.50):
         directions_to_test.append('PUT')
 
     if not directions_to_test:
         return None
 
-    lot_size = get_symbol_lot_size(sym_clean)
-
     for direction in directions_to_test:
-        # PILLAR 1: Institutional Volume & Velocity (25 pts max)
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
-        if thrust < 0.55:
-            continue
-        p1_score = round(min(25.0, max(15.0, 14.0 + min(6.0, real_rvol * 2.0) + min(5.0, turnover_15m / 10.0))), 2)
 
-        # PILLAR 2: Delta Order Flow & BVC (25 pts max)
-        if direction == 'CALL':
-            if eval_bvc <= 0 or bvc_cum_ratio <= 0:
-                continue
-            p2_score = round(min(25.0, max(14.0, (eval_bvc * 12.0) + (bvc_cum_ratio * 13.0))), 2)
-        else:
-            if eval_bvc >= 0 or bvc_cum_ratio >= 0:
-                continue
-            p2_score = round(min(25.0, max(14.0, (abs(eval_bvc) * 12.0) + (abs(bvc_cum_ratio) * 13.0))), 2)
-
-        # PILLAR 3: Market Profile & VWAP Anchor (20 pts max)
-        p3_score = 18.0 if ((direction == 'CALL' and eval_close > vwap) or (direction == 'PUT' and eval_close < vwap)) else 10.0
-
-        # PILLAR 5: Super-Trend ATR Expansion Runway (10 pts max)
-        fuel_spent = day_high - day_low
-        remaining_atr = atr - fuel_spent
-        fuel_ratio = remaining_atr / max(1.0, atr)
-        is_super_trend = (real_rvol >= 2.5 and turnover_cr >= 2.5) or (turnover_15m >= 35.0)
-
-        if is_super_trend:
-            if fuel_spent > (3.0 * atr):
-                continue
-            p5_score = round(min(10.0, max(6.0, 7.0 + min(3.0, (abs(pct_change) / 2.0)))), 2)
-        else:
-            if fuel_ratio < 0.15:
-                continue
-            p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 3.0) * 3.0)), 2)
-
-        prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
-
-        # GATE 2: TARGETED OPTION CHAIN QUERY (Only runs for 3-6 surviving liquid candidates!)
-        target_dist = max(40.0, min(65.0, 0.85 * atr))
+        # GATE 2: TARGETED OPTION CHAIN QUERY (DATA-FIRST FOR QUALIFIED LEADERS)
+        target_dist = max(35.0, min(65.0, 0.85 * atr))
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
 
         if opt_override is not None:
@@ -444,10 +453,71 @@ def evaluate_institutional_stock_engine(
         if not opt or not opt.get('is_liquid', False):
             continue
 
+        # Market Maker Straddle Pinning Check (Chop Trap Blocker)
+        atm_info = opt.get('atm_info', {})
+        if atm_info:
+            ce_chg = abs(float(atm_info.get('ce_chg_oi', 0.0)))
+            pe_chg = abs(float(atm_info.get('pe_chg_oi', 0.0)))
+            tot_chg = ce_chg + pe_chg
+            if tot_chg > 500.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
+                continue  # Market maker equilibrium straddle pinning veto (Chop trap)
+
+        # GATE 3: DUAL-VELOCITY ENGINE CONFIRMATION
+        is_mode_a = False  # Slow Stealth Reversal / V-Bounce Accumulation
+        is_mode_b = False  # Fast Climax Breakout
+
+        if direction == 'CALL':
+            # Anti-Top-Chasing Guard: If price has extended > 3.5% above VWAP on current bar, block late top entry!
+            if eval_close > (vwap * 1.035):
+                continue
+            # Mode A: Slow Stealth Reversal / V-Bounce Accumulation
+            # Catches bottom reversals at low option premiums with moderate volume, VWAP reclaim, and positive delta inflection
+            if real_rvol >= 0.50 and (delta_inflection >= 0.15 or eval_bvc >= 0.05) and thrust >= 0.40 and eval_close >= (vwap * 0.998):
+                is_mode_a = True
+            # Mode B: Fast Climax Breakout
+            # Catches explosive momentum surges with strong volume expansion and solid thrust
+            if real_rvol >= 1.60 and thrust >= 0.55 and eval_bvc >= 0.20:
+                is_mode_b = True
+        else:
+            # Anti-Bottom-Chasing Guard: If price is > 3.5% below VWAP, block late bottom entry!
+            if eval_close < (vwap * 0.965):
+                continue
+            # Mode A: Slow Stealth Distribution / Rejection
+            if real_rvol >= 0.50 and (delta_inflection <= -0.15 or eval_bvc <= -0.05) and thrust >= 0.40 and eval_close <= (vwap * 1.002):
+                is_mode_a = True
+            # Mode B: Fast Climax Breakdown
+            if real_rvol >= 1.60 and thrust >= 0.55 and eval_bvc <= -0.20:
+                is_mode_b = True
+
+        if not (is_mode_a or is_mode_b):
+            continue
+
+        # PILLAR SCORING MATRIX (100 PTS)
+        p1_score = round(min(25.0, max(14.0, 13.0 + min(7.0, real_rvol * 2.5) + min(5.0, turnover_15m / 10.0))), 2)
+        p2_score = round(min(25.0, max(14.0, (abs(eval_bvc) * 12.0) + (abs(delta_inflection) * 12.0))), 2)
+        p3_score = 18.0 if ((direction == 'CALL' and eval_close >= vwap) or (direction == 'PUT' and eval_close <= vwap)) else 12.0
+
+        # PILLAR 5: ATR Runway & Fuel Check
+        fuel_spent = day_high - day_low
+        remaining_atr = atr - fuel_spent
+        fuel_ratio = remaining_atr / max(1.0, atr)
+        is_super_trend = (real_rvol >= 2.5 and turnover_cr >= 2.5) or (turnover_15m >= 35.0)
+
+        if is_super_trend:
+            if fuel_spent > (3.0 * atr):
+                continue
+            p5_score = round(min(10.0, max(6.0, 7.0 + min(3.0, (abs(pct_change) / 2.0)))), 2)
+        else:
+            if fuel_ratio < 0.10:
+                continue
+            p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 3.0) * 3.0)), 2)
+
+        prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
         oi_score = float(opt.get('oi_score', 12.0))
         total_score = round(prelim_score + oi_score, 2)
 
         if total_score >= STOCK_SCORE_THRESHOLD:
+            mode_tag = "FAST_CLIMAX_BREAKOUT" if is_mode_b else "STEALTH_ACCUMULATION_BOUNCE"
             return {
                 'symbol': sym_clean,
                 'is_index': False,
@@ -464,7 +534,7 @@ def evaluate_institutional_stock_engine(
                 'pct_change': pct_change,
                 'verified_opt': opt,
                 'passed': True,
-                'tier_reason': f'INSTITUTIONAL_STOCK_{direction}_SWAPPED_CONFIRMED'
+                'tier_reason': f'INSTITUTIONAL_STOCK_{direction}_{mode_tag}_CONFIRMED'
             }
 
     return None
@@ -1170,11 +1240,13 @@ class AlphaInstitutionalSwappedScreener:
             for b_idx in range(len(time_index)):
                 curr_t = time_index[b_idx]
                 tot_m = curr_t.hour * 60 + curr_t.minute
-                is_m = (576 <= tot_m <= 615)   # 09:36 to 10:15 AM IST
-                is_a = (798 <= tot_m <= 855)   # 01:18 to 02:15 PM IST
+                is_m_slab = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
+                is_a_slab = (795 <= tot_m <= 855)   # 01:15 to 02:15 PM IST
+                is_m_fresh = (570 <= tot_m <= 600)  # 09:30 to 10:00 AM IST (15m safety runway)
+                is_a_fresh = (795 <= tot_m <= 840)  # 01:15 to 02:00 PM IST (15m safety runway)
 
                 # 1. Update positions during active designated trading slabs
-                if is_m or is_a:
+                if is_m_slab or is_a_slab:
                     for tr in active_trades:
                         if not tr.is_closed:
                             if curr_t < tr.entry_time:
@@ -1197,11 +1269,12 @@ class AlphaInstitutionalSwappedScreener:
                             tr.close_eod(b_close, curr_t)
                             all_closed_trades.append(tr)
 
-                if not (is_m or is_a):
+                # 3. Only evaluate fresh signals during fresh signal windows (guarantees runway)
+                if not (is_m_fresh or is_a_fresh):
                     continue
 
-                cur_idx_count = m_idx_count if is_m else a_idx_count
-                cur_stk_count = m_stk_count if is_m else a_stk_count
+                cur_idx_count = m_idx_count if is_m_fresh else a_idx_count
+                cur_stk_count = m_stk_count if is_m_fresh else a_stk_count
                 if cur_idx_count >= MAX_INDEX_PER_SLAB and cur_stk_count >= MAX_STOCKS_PER_SLAB:
                     continue
 
@@ -1226,7 +1299,7 @@ class AlphaInstitutionalSwappedScreener:
                             continue
                         idf = asset_data[isym]
                         today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
-                        if len(today_bars) < 7:
+                        if len(today_bars) < 5:
                             continue
                         idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
 
@@ -1260,7 +1333,7 @@ class AlphaInstitutionalSwappedScreener:
                                 tr = ActiveOptionTrade(sig, curr_t, lot_map)
                                 active_trades.append(tr)
                                 daily_traded_symbols.add(isym)
-                                if is_m: m_idx_count += 1
+                                if is_m_fresh: m_idx_count += 1
                                 else: a_idx_count += 1
                                 break
 
@@ -1274,7 +1347,7 @@ class AlphaInstitutionalSwappedScreener:
                             continue
                         sdf = asset_data[ssym]
                         today_bars = sdf[(sdf.index.date == d) & (sdf.index <= curr_t)]
-                        if len(today_bars) < 7:
+                        if len(today_bars) < 5:
                             continue
                         stk_spot = float(today_bars['close'].iloc[-1])
                         if stk_spot < MIN_STOCK_PRICE:
@@ -1312,7 +1385,7 @@ class AlphaInstitutionalSwappedScreener:
                                 tr = ActiveOptionTrade(sig, curr_t, lot_map)
                                 active_trades.append(tr)
                                 daily_traded_symbols.add(ssym)
-                                if is_m: m_stk_count += 1
+                                if is_m_fresh: m_stk_count += 1
                                 else: a_stk_count += 1
                                 break
                         if cur_stk_count >= MAX_STOCKS_PER_SLAB:
@@ -1411,6 +1484,28 @@ class AlphaInstitutionalSwappedScreener:
 
         self.update_open_paper_trades()
 
+        # Enforce 15-Minute Slab Runway Buffer:
+        # In the final 15 minutes of each slab (10:00-10:15 AM & 02:00-02:15 PM IST),
+        # NO fresh signals can be taken because trades require at least 15-20 minutes
+        # of runway before slab conclusion. Existing trades continue to be trailed and managed.
+        if not ignore_window and not is_in_fresh_signal_window(ist_now):
+            print(f"[SLAB RUNWAY BUFFER]: {ist_time_str} is in the 15m slab runway buffer (10:00-10:15 / 14:00-14:15).")
+            print(f"[SLAB RUNWAY BUFFER]: Fresh entries LOCKED to protect capital. Existing positions actively managed.")
+            if send_heartbeat:
+                cycle_str = f" (Cycle #{cycle_num})" if cycle_num else ""
+                heartbeat_msg = (
+                    f"🛡️ <b>ALPHA INSTITUTIONAL SWAPPED SCANNER{cycle_str}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏰ <b>Execution Time:</b> {ist_time_str}\n"
+                    f"⏳ <b>Slab Runway Buffer:</b> Active (10:00-10:15 / 14:00-14:15)\n"
+                    f"🔒 <b>Fresh Signals:</b> LOCKED (Minimum 15m runway required)\n"
+                    f"🎯 <b>Position Management:</b> Active (Trailing SL & Targets Monitored)\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔒 <i>Delivered strictly to Owner Chatbot. Capital 100% Protected.</i>"
+                )
+                self.notifier.send_broadcast_message(heartbeat_msg, is_trade_signal=False)
+            return
+
         bulk = fetch_bulk_nse_snapshot(force_refresh=True)
         regime = self.get_nifty_market_regime(force_refresh=True)
         print(f"[MACRO REGIME]: {regime['reason']} | Nifty Move: {regime.get('move_pts', 0.0):+.1f} pts")
@@ -1445,7 +1540,7 @@ class AlphaInstitutionalSwappedScreener:
             try:
                 sym_clean = sym.upper().replace('.NS', '').replace('^', '').strip()
                 df = self.data_feed.get_live_intraday_bars(sym_clean)
-                if df is None or len(df) < 7:
+                if df is None or len(df) < 5:
                     return None
                 atr = self.get_stock_atr(sym_clean, bulk.get(sym_clean))
                 return evaluate_institutional_stock_engine(
