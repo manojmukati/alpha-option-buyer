@@ -104,6 +104,16 @@ def is_in_fresh_signal_window(ist_dt: datetime.datetime) -> bool:
     return is_m_fresh or is_a_fresh
 
 
+def get_current_trading_slab_name(ist_dt: datetime.datetime) -> Optional[str]:
+    """Returns 'morning' for 09:30-10:15 or 'afternoon' for 13:15-14:15."""
+    tot_m = ist_dt.hour * 60 + ist_dt.minute
+    if 570 <= tot_m <= 615:
+        return 'morning'
+    elif 795 <= tot_m <= 855:
+        return 'afternoon'
+    return None
+
+
 def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> Tuple[float, float, float]:
     """
     Computes instant bar delta, previous bar delta, and delta slope/inflection.
@@ -270,23 +280,23 @@ def evaluate_institutional_index_engine(
             # Anti-Top-Chasing Guard: If index is > 1.25% above VWAP on current bar, block late top entry!
             if eval_close > (vwap * 1.0125):
                 continue
-            # Mode A (Index Slow Grinding Push / Stealth Reversal):
-            # Price reclaiming VWAP, positive delta inflection or expanding delta
-            if idx_rvol >= 0.70 and (delta_inflection >= 0.15 or eval_bvc >= 0.10) and thrust >= 0.40:
+            # Mode A (Index Reclaim Push / Momentum Expansion):
+            # Price reclaiming VWAP, strict RVOL >= 1.30 and delta >= +0.20
+            if idx_rvol >= 1.30 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45:
                 is_mode_a = True
             # Mode B (Index Fast Climax Breakout / Range Expansion):
-            if idx_rvol >= 1.40 and thrust >= 0.55 and eval_bvc >= 0.25:
+            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc >= 0.25:
                 is_mode_b = True
         else:
             # Anti-Bottom-Chasing Guard: If index is > 1.25% below VWAP on current bar, block late bottom entry!
             if eval_close < (vwap * 0.9875):
                 continue
-            # Mode A (Index Slow Correction Fall / Stealth Distribution Rejection):
-            # Price below VWAP, negative delta inflection
-            if idx_rvol >= 0.70 and (delta_inflection <= -0.15 or eval_bvc <= -0.10) and thrust >= 0.40:
+            # Mode A (Index Correction Fall / Distribution Dump):
+            # Price below VWAP, strict RVOL >= 1.30 and delta <= -0.20
+            if idx_rvol >= 1.30 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45:
                 is_mode_a = True
             # Mode B (Index Fast Climax Breakdown / Dump):
-            if idx_rvol >= 1.40 and thrust >= 0.55 and eval_bvc <= -0.25:
+            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc <= -0.25:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -484,23 +494,22 @@ def evaluate_institutional_stock_engine(
             # Anti-Top-Chasing Guard: If price has extended > 3.5% above VWAP on current bar, block late top entry!
             if eval_close > (vwap * 1.035):
                 continue
-            # Mode A: Slow Stealth Reversal / V-Bounce Accumulation
-            # Catches bottom reversals at low option premiums with moderate volume, VWAP reclaim, and positive delta inflection
-            if real_rvol >= 0.50 and (delta_inflection >= 0.15 or eval_bvc >= 0.05) and thrust >= 0.40 and eval_close >= vwap:
+            # Mode A: Institutional Reversal / Accumulation (Strict RVOL >= 1.50x & Delta >= +0.20)
+            # Low volume (< 1.50x) and weak delta (< 0.20) are 100% strictly banned to defeat theta decay
+            if real_rvol >= 1.50 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45 and eval_close >= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakout
-            # Catches explosive momentum surges with strong volume expansion and solid thrust
-            if real_rvol >= 1.60 and thrust >= 0.55 and eval_bvc >= 0.20:
+            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc >= 0.25:
                 is_mode_b = True
         else:
             # Anti-Bottom-Chasing Guard: If price is > 3.5% below VWAP, block late bottom entry!
             if eval_close < (vwap * 0.965):
                 continue
-            # Mode A: Slow Stealth Distribution / Rejection
-            if real_rvol >= 0.50 and (delta_inflection <= -0.15 or eval_bvc <= -0.05) and thrust >= 0.40 and eval_close <= vwap:
+            # Mode A: Institutional Distribution / Rejection (Strict RVOL >= 1.50x & Delta <= -0.20)
+            if real_rvol >= 1.50 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45 and eval_close <= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakdown
-            if real_rvol >= 1.60 and thrust >= 0.55 and eval_bvc <= -0.20:
+            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc <= -0.25:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -804,15 +813,16 @@ class ActiveOptionTrade:
         if self.is_idx:
             self.spot_sl = 25.0
             if self.sym == 'BANKNIFTY':
-                self.spot_t1 = 50.0
-                self.spot_t2 = 140.0
-            else:
                 self.spot_t1 = 45.0
-                self.spot_t2 = 90.0
+                self.spot_t2 = 120.0
+            else:
+                self.spot_t1 = 30.0
+                self.spot_t2 = 75.0
         else:
-            self.spot_sl = 10.0
-            self.spot_t1 = 12.0
-            self.spot_t2 = 25.0
+            # Dynamic 1.5R Slab Target based on 0.40x ATR
+            self.spot_sl = round(max(3.0, 0.25 * self.atr), 2)
+            self.spot_t1 = round(max(4.5, 0.40 * self.atr), 2)
+            self.spot_t2 = round(max(9.0, 0.85 * self.atr), 2)
 
         step_sz = 100.0 if self.sym == 'BANKNIFTY' else (50.0 if self.is_idx else (20.0 if self.spot_entry >= 1000.0 else 10.0))
         self.atm_strike = round(self.spot_entry / step_sz) * step_sz
@@ -821,9 +831,11 @@ class ActiveOptionTrade:
         self.contract_name = f"{self.sym} {stk_str} {self.opt_type}"
         self.lot_size = lot_map.get(self.sym, (25 if self.is_idx else 250))
         self.opt_entry_premium = max(6.0, round(self.spot_sl * 2.00, 2))
-        self.opt_sl_pts = 18.0 if self.is_idx else 5.0
-        self.opt_t1_pts = 45.0 if self.is_idx else 25.0
-        self.opt_t2_pts = 100.0 if self.is_idx else 50.0
+        
+        # Dynamic Slab Option Target: +22% to +25% premium expansion (locks quick profit before theta decay)
+        self.opt_sl_pts = round(0.18 * self.opt_entry_premium, 2) if not self.is_idx else 15.0
+        self.opt_t1_pts = round(max(2.00, 0.22 * self.opt_entry_premium), 2) if not self.is_idx else 30.0
+        self.opt_t2_pts = round(max(4.00, 0.50 * self.opt_entry_premium), 2) if not self.is_idx else 70.0
 
     def update(self, b_high: float, b_low: float, b_close: float, ts: datetime.datetime):
         if self.is_closed:
@@ -1049,6 +1061,38 @@ class AlphaInstitutionalSwappedScreener:
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
         self.dispatched_today[sym_clean] = time.time()
         self._save_dispatched_cache()
+
+    def is_slab_stock_dispatched(self, ist_now: datetime.datetime) -> bool:
+        slab = get_current_trading_slab_name(ist_now)
+        if not slab:
+            return False
+        today_str = ist_now.strftime('%Y-%m-%d')
+        key = f"slab_stock_{today_str}_{slab}"
+        return key in self.dispatched_today
+
+    def mark_slab_stock_dispatched(self, ist_now: datetime.datetime, sym: str):
+        slab = get_current_trading_slab_name(ist_now)
+        if slab:
+            today_str = ist_now.strftime('%Y-%m-%d')
+            key = f"slab_stock_{today_str}_{slab}"
+            self.dispatched_today[key] = sym
+            self._save_dispatched_cache()
+
+    def is_slab_index_dispatched(self, ist_now: datetime.datetime) -> bool:
+        slab = get_current_trading_slab_name(ist_now)
+        if not slab:
+            return False
+        today_str = ist_now.strftime('%Y-%m-%d')
+        key = f"slab_index_{today_str}_{slab}"
+        return key in self.dispatched_today
+
+    def mark_slab_index_dispatched(self, ist_now: datetime.datetime, sym: str):
+        slab = get_current_trading_slab_name(ist_now)
+        if slab:
+            today_str = ist_now.strftime('%Y-%m-%d')
+            key = f"slab_index_{today_str}_{slab}"
+            self.dispatched_today[key] = sym
+            self._save_dispatched_cache()
 
     def is_eod_journal_dispatched_today(self) -> bool:
         today_str = get_ist_time().strftime('%Y-%m-%d')
@@ -1624,22 +1668,20 @@ class AlphaInstitutionalSwappedScreener:
         all_candidates.sort(key=lambda x: x.get('score', 0.0), reverse=True)
 
         verified_super_trades = []
-        active_slab_index = 0
-        active_slab_stock = 0
 
-        for cand in all_candidates:
-            if len(verified_super_trades) >= MAX_SLAB_TRADES:
-                break
-            is_idx = cand.get('is_index', False)
-            if is_idx:
-                if active_slab_index >= MAX_INDEX_PER_SLAB:
-                    continue
-                active_slab_index += 1
-            else:
-                if active_slab_stock >= MAX_STOCKS_PER_SLAB:
-                    continue
-                active_slab_stock += 1
-            verified_super_trades.append(cand)
+        # 1. STRICT SINGLE BEST-CONVICTION INDEX CANDIDATE (MAX 1 per slab)
+        idx_cands = [c for c in all_candidates if c.get('is_index', False)]
+        if idx_cands and not self.is_slab_index_dispatched(ist_now):
+            best_idx = idx_cands[0]
+            if not self.is_already_dispatched(best_idx['symbol']):
+                verified_super_trades.append(best_idx)
+
+        # 2. STRICT SINGLE BEST-CONVICTION STOCK CANDIDATE (MAX 1 per slab across 220 stocks)
+        stk_cands = [c for c in all_candidates if not c.get('is_index', False)]
+        if stk_cands and not self.is_slab_stock_dispatched(ist_now):
+            best_stk = stk_cands[0]
+            if not self.is_already_dispatched(best_stk['symbol']):
+                verified_super_trades.append(best_stk)
 
         if not verified_super_trades:
             print(f"[SCREENER]: 0 signals qualified at {ist_time_str}. Capital 100% Protected.")
@@ -1699,6 +1741,10 @@ class AlphaInstitutionalSwappedScreener:
         )
 
         self.mark_dispatched(sym, contract)
+        if is_idx:
+            self.mark_slab_index_dispatched(ist_now, sym)
+        else:
+            self.mark_slab_stock_dispatched(ist_now, sym)
         self._record_signal_to_excel(ist_now, cand, opt, opt_action, contract, opt_entry, opt_sl, opt_tgt1, opt_tgt2, time_sl_time, buffer_end_time)
         self.notifier.send_broadcast_message(pure_signal_msg, is_trade_signal=True)
 

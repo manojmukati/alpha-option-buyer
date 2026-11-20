@@ -1036,22 +1036,16 @@ class LiveMarketDataFeed:
         # Executable pricing: Entry at ask, monitoring at bid
         entry_p = ask
         if is_index:
-            # Strictly Fixed Index Option Rules: 18.0 pt SL / 45.0 pt T1 / 100.0 pt T2
-            sl_pts = 18.0
-            t1_pts = 45.0
-            t2_pts = 100.0
+            # Strictly Institutional Index Option Rules: 15.0 pt SL / 30.0 pt T1 (Dynamic 2.0R) / 75.0 pt T2
+            sl_pts = 15.0
+            t1_pts = 30.0
+            t2_pts = 75.0
         else:
-            # Pro-Desk Stock Option Rules: Dynamic SL & Target proportional to Option Price
-            # Normal stock options (entry <= 60): 5.0 pt SL / 25.0 pt T1 / 50.0 pt T2
-            # High premium options (Maruti, UltraTech, etc.): proportional 18% SL (max 25 pts)
-            if entry_p > 60.0:
-                sl_pts = round(max(5.0, min(25.0, 0.18 * entry_p)), 2)
-                t1_pts = round(max(25.0, 0.35 * entry_p), 2)
-                t2_pts = round(max(50.0, 0.70 * entry_p), 2)
-            else:
-                sl_pts = 5.0
-                t1_pts = 25.0
-                t2_pts = 50.0
+            # Pro-Desk Stock Option Rules: Dynamic 1.5R Slab Target (22% to 25% Premium Expansion)
+            # Unlocks quick profit-locking on 45-minute intraday bursts to defeat theta decay!
+            sl_pts = round(max(1.80, min(15.0, 0.18 * entry_p)), 2)
+            t1_pts = round(max(2.00, 0.22 * entry_p), 2)
+            t2_pts = round(max(4.00, 0.50 * entry_p), 2)
 
         opt_sl = round(max(0.5, entry_p - sl_pts), 2)
         opt_t1 = round(entry_p + t1_pts, 2)
