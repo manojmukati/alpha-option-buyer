@@ -205,11 +205,11 @@ def evaluate_institutional_index_engine(
     if fuel_spent > (1.30 * atr):
         return None
 
-    # Test directions
+    # Test directions (Allows Slow Grinding Push / Reversal from slight dip to Fast Expansion)
     directions_to_test = []
-    if nifty_regime.get('allow_call', True) and eval_close >= (vwap * 0.999) and pct_change >= 0.10:
+    if nifty_regime.get('allow_call', True) and eval_close >= (vwap * 0.999) and pct_change >= -0.60:
         directions_to_test.append('CALL')
-    if nifty_regime.get('allow_put', True) and eval_close <= (vwap * 1.001) and pct_change <= -0.10:
+    if nifty_regime.get('allow_put', True) and eval_close <= (vwap * 1.001) and pct_change <= 0.60:
         directions_to_test.append('PUT')
 
     for direction in directions_to_test:
@@ -260,21 +260,29 @@ def evaluate_institutional_index_engine(
                 continue  # Market maker equilibrium straddle pinning veto (Chop trap)
 
         # GATE 3: DUAL-VELOCITY CONFIRMATION
-        is_mode_a = False  # Slow Grinding Push
-        is_mode_b = False  # Fast Range Expansion
+        is_mode_a = False  # Slow Grinding Push / Slow Correction Fall
+        is_mode_b = False  # Fast Climax Breakout / Fast Climax Breakdown
 
         if direction == 'CALL':
-            # Mode A (Index Grinding Push): Price above VWAP, positive delta inflection
+            # Anti-Top-Chasing Guard: If index is > 1.25% above VWAP on current bar, block late top entry!
+            if eval_close > (vwap * 1.0125):
+                continue
+            # Mode A (Index Slow Grinding Push / Stealth Reversal):
+            # Price reclaiming VWAP, positive delta inflection or expanding delta
             if idx_rvol >= 0.70 and (delta_inflection >= 0.15 or eval_bvc >= 0.10) and thrust >= 0.40:
                 is_mode_a = True
-            # Mode B (Fast Expansion): Large range breakout
+            # Mode B (Index Fast Climax Breakout / Range Expansion):
             if idx_rvol >= 1.40 and thrust >= 0.55 and eval_bvc >= 0.25:
                 is_mode_b = True
         else:
-            # Mode A (Index Grinding Drop)
+            # Anti-Bottom-Chasing Guard: If index is > 1.25% below VWAP on current bar, block late bottom entry!
+            if eval_close < (vwap * 0.9875):
+                continue
+            # Mode A (Index Slow Correction Fall / Stealth Distribution Rejection):
+            # Price below VWAP, negative delta inflection
             if idx_rvol >= 0.70 and (delta_inflection <= -0.15 or eval_bvc <= -0.10) and thrust >= 0.40:
                 is_mode_a = True
-            # Mode B (Fast Breakdown)
+            # Mode B (Index Fast Climax Breakdown / Dump):
             if idx_rvol >= 1.40 and thrust >= 0.55 and eval_bvc <= -0.25:
                 is_mode_b = True
 
@@ -291,7 +299,7 @@ def evaluate_institutional_index_engine(
         total_score = round(prelim_score + oi_score, 2)
 
         if total_score >= INDEX_SCORE_THRESHOLD:
-            mode_tag = "FAST_EXPANSION" if is_mode_b else "SLOW_GRINDING_PUSH"
+            mode_tag = "FAST_CLIMAX_EXPANSION" if is_mode_b else ("SLOW_GRINDING_PUSH" if direction == 'CALL' else "SLOW_CORRECTION_FALL")
             return {
                 'symbol': sym_clean,
                 'is_index': True,
@@ -517,7 +525,7 @@ def evaluate_institutional_stock_engine(
         total_score = round(prelim_score + oi_score, 2)
 
         if total_score >= STOCK_SCORE_THRESHOLD:
-            mode_tag = "FAST_CLIMAX_BREAKOUT" if is_mode_b else "STEALTH_ACCUMULATION_BOUNCE"
+            mode_tag = ("FAST_CLIMAX_BREAKOUT" if direction == 'CALL' else "FAST_CLIMAX_BREAKDOWN") if is_mode_b else ("STEALTH_ACCUMULATION_BOUNCE" if direction == 'CALL' else "STEALTH_DISTRIBUTION_REJECTION")
             return {
                 'symbol': sym_clean,
                 'is_index': False,
@@ -1304,10 +1312,11 @@ class AlphaInstitutionalSwappedScreener:
                         idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
 
                         spot_eval = float(today_bars['close'].iloc[-2])
+                        pct_idx = ((spot_eval - float(today_bars['open'].iloc[0])) / max(1.0, float(today_bars['open'].iloc[0]))) * 100.0
                         test_dirs = []
-                        if regime['allow_call'] and spot_eval > float(today_bars['open'].iloc[0]):
+                        if regime['allow_call'] and pct_idx >= -0.60:
                             test_dirs.append('CALL')
-                        if regime['allow_put'] and spot_eval < float(today_bars['open'].iloc[0]):
+                        if regime['allow_put'] and pct_idx <= 0.60:
                             test_dirs.append('PUT')
 
                         for dir_test in test_dirs:
@@ -1327,7 +1336,9 @@ class AlphaInstitutionalSwappedScreener:
                             }
                             sig = evaluate_institutional_index_engine(
                                 isym, today_bars, live_q=None, nifty_regime=regime,
-                                data_feed=self.data_feed, daily_atr=idx_atr, opt_override=opt_override
+                                data_feed=self.data_feed, daily_atr=idx_atr,
+                                live_spot_override=spot_eval,
+                                opt_override=opt_override
                             )
                             if sig and sig.get('score', 0.0) >= INDEX_SCORE_THRESHOLD:
                                 tr = ActiveOptionTrade(sig, curr_t, lot_map)
@@ -1357,9 +1368,9 @@ class AlphaInstitutionalSwappedScreener:
                         s_open = float(today_bars['open'].iloc[0])
                         pct_s = ((stk_spot - s_open) / max(1.0, s_open)) * 100.0
                         test_dirs = []
-                        if regime['allow_stock_call'] and pct_s >= 0.35:
+                        if regime['allow_stock_call'] and pct_s >= -2.50:
                             test_dirs.append('CALL')
-                        if regime['allow_stock_put'] and pct_s <= -0.35:
+                        if regime['allow_stock_put'] and pct_s <= 2.50:
                             test_dirs.append('PUT')
 
                         for dir_test in test_dirs:
@@ -1379,7 +1390,9 @@ class AlphaInstitutionalSwappedScreener:
                             }
                             sig = evaluate_institutional_stock_engine(
                                 ssym, today_bars, live_q=None, nifty_regime=regime,
-                                data_feed=self.data_feed, daily_atr=stk_atr, opt_override=opt_override
+                                data_feed=self.data_feed, daily_atr=stk_atr,
+                                live_spot_override=stk_spot, pct_change_override=pct_s,
+                                opt_override=opt_override
                             )
                             if sig and sig.get('score', 0.0) >= STOCK_SCORE_THRESHOLD:
                                 tr = ActiveOptionTrade(sig, curr_t, lot_map)
