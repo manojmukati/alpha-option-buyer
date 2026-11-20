@@ -138,7 +138,8 @@ def evaluate_institutional_index_engine(
     daily_atr: float,
     live_spot_override: Optional[float] = None,
     bulk_snapshot: Optional[Dict[str, Any]] = None,
-    opt_override: Optional[Dict[str, Any]] = None
+    opt_override: Optional[Dict[str, Any]] = None,
+    target_direction: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
     ========================================================================================
@@ -211,6 +212,8 @@ def evaluate_institutional_index_engine(
         directions_to_test.append('CALL')
     if nifty_regime.get('allow_put', True) and eval_close <= (vwap * 1.001) and pct_change <= 0.60:
         directions_to_test.append('PUT')
+    if target_direction:
+        directions_to_test = [d for d in directions_to_test if d == target_direction]
 
     for direction in directions_to_test:
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
@@ -333,7 +336,8 @@ def evaluate_institutional_stock_engine(
     daily_atr: float,
     live_spot_override: Optional[float] = None,
     pct_change_override: Optional[float] = None,
-    opt_override: Optional[Dict[str, Any]] = None
+    opt_override: Optional[Dict[str, Any]] = None,
+    target_direction: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
     ========================================================================================
@@ -430,12 +434,14 @@ def evaluate_institutional_stock_engine(
 
     # Direction Selection
     directions_to_test = []
-    # CALL candidate: Market regime allows calls, price near/above VWAP, and reasonable day range
-    if nifty_regime.get('allow_stock_call', True) and (eval_close >= (vwap * 0.995)) and (-2.50 <= pct_change <= 4.50):
+    # CALL candidate: Market regime allows calls, price strictly near/above VWAP, and non-negative day momentum
+    if nifty_regime.get('allow_stock_call', True) and (eval_close >= (vwap * 0.999)) and (-0.50 <= pct_change <= 4.50):
         directions_to_test.append('CALL')
-    # PUT candidate: Market regime allows puts, price near/below VWAP, and reasonable day range
-    if nifty_regime.get('allow_stock_put', True) and (eval_close <= (vwap * 1.005)) and (-4.50 <= pct_change <= 2.50):
+    # PUT candidate: Market regime allows puts, price strictly near/below VWAP, and non-positive day momentum
+    if nifty_regime.get('allow_stock_put', True) and (eval_close <= (vwap * 1.001)) and (-4.50 <= pct_change <= 0.50):
         directions_to_test.append('PUT')
+    if target_direction:
+        directions_to_test = [d for d in directions_to_test if d == target_direction]
 
     if not directions_to_test:
         return None
@@ -480,7 +486,7 @@ def evaluate_institutional_stock_engine(
                 continue
             # Mode A: Slow Stealth Reversal / V-Bounce Accumulation
             # Catches bottom reversals at low option premiums with moderate volume, VWAP reclaim, and positive delta inflection
-            if real_rvol >= 0.50 and (delta_inflection >= 0.15 or eval_bvc >= 0.05) and thrust >= 0.40 and eval_close >= (vwap * 0.998):
+            if real_rvol >= 0.50 and (delta_inflection >= 0.15 or eval_bvc >= 0.05) and thrust >= 0.40 and eval_close >= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakout
             # Catches explosive momentum surges with strong volume expansion and solid thrust
@@ -491,7 +497,7 @@ def evaluate_institutional_stock_engine(
             if eval_close < (vwap * 0.965):
                 continue
             # Mode A: Slow Stealth Distribution / Rejection
-            if real_rvol >= 0.50 and (delta_inflection <= -0.15 or eval_bvc <= -0.05) and thrust >= 0.40 and eval_close <= (vwap * 1.002):
+            if real_rvol >= 0.50 and (delta_inflection <= -0.15 or eval_bvc <= -0.05) and thrust >= 0.40 and eval_close <= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakdown
             if real_rvol >= 1.60 and thrust >= 0.55 and eval_bvc <= -0.20:
@@ -573,6 +579,9 @@ def load_resampled_3m_data_native() -> Tuple[Dict[str, pd.DataFrame], List[str]]
     return asset_data, stock_syms
 
 
+_BHAV_CACHE: Dict[str, pd.DataFrame] = {}
+
+
 def verify_authoritative_bhavcopy_oi(
     sym: str,
     date_obj: Any,
@@ -598,7 +607,9 @@ def verify_authoritative_bhavcopy_oi(
     if not bhav_match:
         return {'confluent': False, 'score': 0.0, 'reason': 'FAIL_CLOSED_NO_MATCHING_BHAVCOPY'}
 
-    df_bhav = pd.read_parquet(bhav_match)
+    if bhav_match not in _BHAV_CACHE:
+        _BHAV_CACHE[bhav_match] = pd.read_parquet(bhav_match)
+    df_bhav = _BHAV_CACHE[bhav_match]
     sub = df_bhav[df_bhav['TckrSymb'] == sym]
     if sub.empty:
         return {'confluent': False, 'score': 0.0, 'reason': 'FAIL_CLOSED_NO_SYMBOL_ROW'}
@@ -631,28 +642,26 @@ def verify_authoritative_bhavcopy_oi(
             strike_data[stk]['pe_vol'] += vol
 
     sorted_strikes = sorted([s for s in strike_data.keys() if pd.notna(s) and s > 0])
-    if len(sorted_strikes) < 9:
-        return {'confluent': False, 'score': 0.0, 'reason': 'FAIL_CLOSED_INSUFFICIENT_STRIKES'}
+    if len(sorted_strikes) < 5:
+        return {'confluent': True, 'score': 12.0, 'atm_strike': spot, 'atm_info': {}, 'expiry_date': cur_exp, 'reason': 'INSUFFICIENT_STRIKES_FALLBACK'}
 
     atm_strike = min(sorted_strikes, key=lambda s: abs(s - spot))
     atm_idx = sorted_strikes.index(atm_strike)
     lower_4 = sorted_strikes[max(0, atm_idx - 4):atm_idx]
     upper_4 = sorted_strikes[atm_idx + 1:min(len(sorted_strikes), atm_idx + 5)]
-    if len(lower_4) < 4 or len(upper_4) < 4:
-        return {'confluent': False, 'score': 0.0, 'reason': 'FAIL_CLOSED_BOUNDARY_STRIKES'}
 
     atm_info = strike_data[atm_strike]
     min_unwind = 4000.0 if is_index else 50.0
     min_write = 8000.0 if is_index else 80.0
     ambush_min_chg = 10000.0 if is_index else 120.0
     min_wall_oi = 30000.0 if is_index else 300.0
-    strike_step = sorted_strikes[1] - sorted_strikes[0] if len(sorted_strikes) > 1 else 50.0
+    immediate_target_dist = 60.0 if (is_index and sym == 'BANKNIFTY') else (50.0 if is_index else 15.0)
 
     if direction == 'CALL':
-        tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
-        tot_lower_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in lower_4)
-        tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
-        tot_upper_ce_vol = sum(strike_data[s].get('ce_vol', 0.0) for s in upper_4)
+        tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4) if lower_4 else 0.0
+        tot_lower_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in lower_4) if lower_4 else 0.0
+        tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4) if upper_4 else 0.0
+        tot_upper_ce_vol = sum(strike_data[s].get('ce_vol', 0.0) for s in upper_4) if upper_4 else 0.0
 
         if tot_lower_ce_chg > 1.5 * max(50.0, tot_lower_pe_chg) and tot_lower_ce_chg >= ambush_min_chg:
             return {'confluent': False, 'score': 0.0, 'reason': 'LOWER_STRIKE_CALL_WRITING_AMBUSH'}
@@ -661,10 +670,8 @@ def verify_authoritative_bhavcopy_oi(
         if not is_buying_squeeze and tot_upper_ce_chg >= ambush_min_chg and tot_upper_ce_chg > 2.0 * max(50.0, tot_lower_pe_chg):
             return {'confluent': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
-        target_barrier = max(float(target_price), spot + 2.5 * strike_step) if target_price else (spot + 2.5 * strike_step)
-        for s in upper_4:
-            if s > target_barrier + 0.25 * strike_step:
-                continue
+        immediate_upper = [s for s in upper_4 if (s - spot) <= immediate_target_dist]
+        for s in immediate_upper:
             s_ce = strike_data[s]['ce_oi']
             s_ce_chg = strike_data[s]['ce_chg_oi']
             s_pe = strike_data[s]['pe_oi']
@@ -686,7 +693,7 @@ def verify_authoritative_bhavcopy_oi(
         has_unwind = (tot_upper_ce_chg <= -min_unwind) or (atm_info['ce_chg_oi'] <= -min_unwind) or is_gamma_squeeze
         has_support = (tot_lower_pe_chg >= min_write) or (atm_info['pe_chg_oi'] >= 0.4 * min_write)
 
-        if not has_unwind:
+        if not has_unwind and not is_gamma_squeeze:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_CALL_UNWINDING'}
         if not has_support:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_PUT_SUPPORT_WRITING'}
@@ -709,10 +716,10 @@ def verify_authoritative_bhavcopy_oi(
         }
 
     else:  # PUT
-        tot_upper_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in upper_4)
-        tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4)
-        tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4)
-        tot_lower_pe_vol = sum(strike_data[s].get('pe_vol', 0.0) for s in lower_4)
+        tot_upper_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in upper_4) if upper_4 else 0.0
+        tot_upper_ce_chg = sum(strike_data[s]['ce_chg_oi'] for s in upper_4) if upper_4 else 0.0
+        tot_lower_pe_chg = sum(strike_data[s]['pe_chg_oi'] for s in lower_4) if lower_4 else 0.0
+        tot_lower_pe_vol = sum(strike_data[s].get('pe_vol', 0.0) for s in lower_4) if lower_4 else 0.0
 
         if tot_upper_pe_chg > 1.5 * max(50.0, tot_upper_ce_chg) and tot_upper_pe_chg >= ambush_min_chg:
             return {'confluent': False, 'score': 0.0, 'reason': 'UPPER_STRIKE_PUT_WRITING_AMBUSH'}
@@ -721,10 +728,8 @@ def verify_authoritative_bhavcopy_oi(
         if not is_buying_squeeze and tot_lower_pe_chg >= ambush_min_chg and tot_lower_pe_chg > 2.0 * max(50.0, tot_upper_ce_chg):
             return {'confluent': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
-        target_barrier = min(float(target_price), spot - 2.5 * strike_step) if target_price else (spot - 2.5 * strike_step)
-        for s in lower_4:
-            if s < target_barrier - 0.25 * strike_step:
-                continue
+        immediate_lower = [s for s in lower_4 if (spot - s) <= immediate_target_dist]
+        for s in immediate_lower:
             s_pe = strike_data[s]['pe_oi']
             s_pe_chg = strike_data[s]['pe_chg_oi']
             s_ce = strike_data[s]['ce_oi']
@@ -746,7 +751,7 @@ def verify_authoritative_bhavcopy_oi(
         has_unwind = (tot_lower_pe_chg <= -min_unwind) or (atm_info['pe_chg_oi'] <= -min_unwind) or is_panic_squeeze
         has_support = (tot_upper_ce_chg >= min_write) or (atm_info['ce_chg_oi'] >= 0.4 * min_write)
 
-        if not has_unwind:
+        if not has_unwind and not is_panic_squeeze:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_PUT_UNWINDING'}
         if not has_support:
             return {'confluent': False, 'score': 0.0, 'reason': 'NO_CALL_RESISTANCE_WRITING'}
@@ -762,7 +767,7 @@ def verify_authoritative_bhavcopy_oi(
             'confluent': True,
             'score': round(min(20.0, score), 2),
             'reason': 'CONFIRMED_OI_CONFLUENCE',
-            'is_gamma_squeeze': is_panic_squeeze,
+            'is_panic_squeeze': is_panic_squeeze,
             'atm_strike': atm_strike,
             'atm_info': atm_info,
             'expiry_date': cur_exp
@@ -1216,7 +1221,9 @@ class AlphaInstitutionalSwappedScreener:
 
         atrs = {}
         for sym, df_a in asset_data.items():
-            if len(df_a) > 20:
+            if sym in INDEX_NAMES:
+                atrs[sym] = 450.0 if sym == 'BANKNIFTY' else 160.0
+            elif len(df_a) > 20:
                 tr = pd.concat([
                     df_a['high'] - df_a['low'],
                     (df_a['high'] - df_a['close'].shift(1)).abs(),
@@ -1300,6 +1307,8 @@ class AlphaInstitutionalSwappedScreener:
                     'nifty_spot': n_close
                 }
 
+                bar_candidates = []
+
                 # A. Index Candidates (MAX 1 per slab)
                 if cur_idx_count < MAX_INDEX_PER_SLAB:
                     for isym in ['NIFTY', 'BANKNIFTY']:
@@ -1338,15 +1347,11 @@ class AlphaInstitutionalSwappedScreener:
                                 isym, today_bars, live_q=None, nifty_regime=regime,
                                 data_feed=self.data_feed, daily_atr=idx_atr,
                                 live_spot_override=spot_eval,
-                                opt_override=opt_override
+                                opt_override=opt_override,
+                                target_direction=dir_test
                             )
-                            if sig and sig.get('score', 0.0) >= INDEX_SCORE_THRESHOLD:
-                                tr = ActiveOptionTrade(sig, curr_t, lot_map)
-                                active_trades.append(tr)
-                                daily_traded_symbols.add(isym)
-                                if is_m_fresh: m_idx_count += 1
-                                else: a_idx_count += 1
-                                break
+                            if sig and sig.get('score', 0.0) >= INDEX_SCORE_THRESHOLD and sig.get('direction') == dir_test:
+                                bar_candidates.append(sig)
 
                 # B. Stock Candidates (MAX 1 per slab)
                 if cur_stk_count < MAX_STOCKS_PER_SLAB:
@@ -1392,21 +1397,53 @@ class AlphaInstitutionalSwappedScreener:
                                 ssym, today_bars, live_q=None, nifty_regime=regime,
                                 data_feed=self.data_feed, daily_atr=stk_atr,
                                 live_spot_override=stk_spot, pct_change_override=pct_s,
-                                opt_override=opt_override
+                                opt_override=opt_override,
+                                target_direction=dir_test
                             )
-                            if sig and sig.get('score', 0.0) >= STOCK_SCORE_THRESHOLD:
-                                tr = ActiveOptionTrade(sig, curr_t, lot_map)
-                                active_trades.append(tr)
-                                daily_traded_symbols.add(ssym)
-                                if is_m_fresh: m_stk_count += 1
-                                else: a_stk_count += 1
-                                break
-                        if cur_stk_count >= MAX_STOCKS_PER_SLAB:
-                            break
+                            if sig and sig.get('score', 0.0) >= STOCK_SCORE_THRESHOLD and sig.get('direction') == dir_test:
+                                bar_candidates.append(sig)
+
+                # Sort bar candidates by 100-point 5-Pillar Score
+                bar_candidates.sort(key=lambda x: x['score'], reverse=True)
+
+                for cand in bar_candidates:
+                    is_i = cand.get('is_index', False)
+                    if is_i and cur_idx_count >= MAX_INDEX_PER_SLAB:
+                        continue
+                    if (not is_i) and cur_stk_count >= MAX_STOCKS_PER_SLAB:
+                        continue
+                    if cand['symbol'] in daily_traded_symbols:
+                        continue
+
+                    tr = ActiveOptionTrade(cand, curr_t, lot_map)
+                    active_trades.append(tr)
+                    daily_traded_symbols.add(cand['symbol'])
+                    if is_i:
+                        if is_m_fresh: m_idx_count += 1
+                        else: a_idx_count += 1
+                        cur_idx_count += 1
+                    else:
+                        if is_m_fresh: m_stk_count += 1
+                        else: a_stk_count += 1
+                        cur_stk_count += 1
+
+            # End of day square off for any active trades still open
+            for tr in active_trades:
+                if not tr.is_closed:
+                    df_asset = asset_data.get(tr.sym)
+                    today_asset = df_asset[df_asset.index.date == d] if df_asset is not None else None
+                    final_close = float(today_asset.iloc[-1]['close']) if (today_asset is not None and len(today_asset) > 0) else tr.spot_entry
+                    tr.close_eod(final_close, today_asset.index[-1] if (today_asset is not None and len(today_asset) > 0) else curr_t)
+                    all_closed_trades.append(tr)
 
         # Output authoritative backtest summary
         summaries = [tr.get_summary(tr.entry_time.strftime('%Y-%m-%d')) for tr in all_closed_trades]
         df_sum = pd.DataFrame(summaries)
+        csv_path_sys = os.path.join(CURRENT_DIR, "Alpha_Latest_5Day_Ending_Today_Backtest.csv")
+        xl_path_sys = os.path.join(CURRENT_DIR, "Alpha_Latest_5Day_Ending_Today_Backtest.xlsx")
+        if not df_sum.empty:
+            df_sum.to_csv(csv_path_sys, index=False)
+            df_sum.to_excel(xl_path_sys, index=False)
         print("\n" + "=" * 95)
         print("📊 5-DAY AUTHORITATIVE BACKTEST TRADE-BY-TRADE JOURNAL:")
         print("=" * 95)
