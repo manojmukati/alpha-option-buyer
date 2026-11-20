@@ -56,13 +56,13 @@ from modules.telegram_notifier import TelegramNotifier
 CONFIG_PATH = os.path.join(CURRENT_DIR, 'config', 'telegram_config.json')
 
 INDEX_NAMES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-MIN_STOCK_PRICE = 500.0
+MIN_STOCK_PRICE = 50.0
 INDEX_SCORE_THRESHOLD = 60.0
 STOCK_SCORE_THRESHOLD = 80.0
 
-MAX_SLAB_TRADES = 2
-MAX_INDEX_PER_SLAB = 1
-MAX_STOCKS_PER_SLAB = 1
+MAX_SLAB_TRADES = 4
+MAX_INDEX_PER_SLAB = 2
+MAX_STOCKS_PER_SLAB = 3
 
 
 def get_symbol_lot_size(sym_clean: str) -> float:
@@ -272,31 +272,42 @@ def evaluate_institutional_index_engine(
             if tot_chg > 2000.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue  # Market maker equilibrium straddle pinning veto (Chop trap)
 
-        # GATE 3: DUAL-VELOCITY CONFIRMATION
-        is_mode_a = False  # Slow Grinding Push / Slow Correction Fall
-        is_mode_b = False  # Fast Climax Breakout / Fast Climax Breakdown
+        # GATE 3: DUAL-VELOCITY CONFIRMATION & 150+ PTS RUNWAY GATE
+        is_mode_a = False  # Momentum Expansion
+        is_mode_b = False  # Fast Climax Breakout / Breakdown
+
+        # Live Expansion Potential: 2.5% on Index Trend Days (Free from static ATR constraints)
+        max_expansion = max(250.0, eval_close * 0.025)
 
         if direction == 'CALL':
-            # Anti-Top-Chasing Guard: If index is > 1.25% above VWAP on current bar, block late top entry!
-            if eval_close > (vwap * 1.0125):
+            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% above VWAP
+            if eval_close > (vwap * 1.012):
                 continue
-            # Mode A (Index Reclaim Push / Momentum Expansion):
-            # Price reclaiming VWAP, strict RVOL >= 1.30 and delta >= +0.20
-            if idx_rvol >= 1.30 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45:
+            # 2. Remaining Runway Check: Must have at least 150 points of open runway
+            potential_high = day_low + max_expansion
+            remaining_runway = potential_high - eval_close
+            if remaining_runway < 150.0:
+                continue
+            # 3. CVD Delta Aggression: Strictly requires Delta >= +0.30
+            if idx_rvol >= 1.30 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45:
                 is_mode_a = True
             # Mode B (Index Fast Climax Breakout / Range Expansion):
-            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc >= 0.25:
+            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc >= 0.35:
                 is_mode_b = True
         else:
-            # Anti-Bottom-Chasing Guard: If index is > 1.25% below VWAP on current bar, block late bottom entry!
-            if eval_close < (vwap * 0.9875):
+            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% below VWAP
+            if eval_close < (vwap * 0.988):
                 continue
-            # Mode A (Index Correction Fall / Distribution Dump):
-            # Price below VWAP, strict RVOL >= 1.30 and delta <= -0.20
-            if idx_rvol >= 1.30 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45:
+            # 2. Remaining Runway Check: Must have at least 150 points of open runway to downside
+            potential_low = day_high - max_expansion
+            remaining_runway = eval_close - potential_low
+            if remaining_runway < 150.0:
+                continue
+            # 3. CVD Delta Aggression: Strictly requires Delta <= -0.30
+            if idx_rvol >= 1.30 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45:
                 is_mode_a = True
             # Mode B (Index Fast Climax Breakdown / Dump):
-            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc <= -0.25:
+            if idx_rvol >= 1.60 and thrust >= 0.55 and eval_bvc <= -0.35:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -486,30 +497,42 @@ def evaluate_institutional_stock_engine(
             if tot_chg > 500.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue  # Market maker equilibrium straddle pinning veto (Chop trap)
 
-        # GATE 3: DUAL-VELOCITY ENGINE CONFIRMATION
-        is_mode_a = False  # Slow Stealth Reversal / V-Bounce Accumulation
-        is_mode_b = False  # Fast Climax Breakout
+        # GATE 3: DUAL-VELOCITY ENGINE CONFIRMATION & 60+ PTS RUNWAY GATE
+        is_mode_a = False  # Institutional Momentum Accumulation / Rejection
+        is_mode_b = False  # Fast Climax Breakout / Breakdown
+
+        # Dynamic Volatility Expansion: Live expansion potential (up to 8% trend day or dynamic ATR)
+        max_expansion = max(75.0, eval_close * 0.08, atr * math.sqrt(max(1.0, real_rvol)))
 
         if direction == 'CALL':
-            # Anti-Top-Chasing Guard: If price has extended > 3.5% above VWAP on current bar, block late top entry!
-            if eval_close > (vwap * 1.035):
+            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% above VWAP
+            if eval_close > (vwap * 1.012):
                 continue
-            # Mode A: Institutional Reversal / Accumulation (Strict RVOL >= 1.50x & Delta >= +0.20)
-            # Low volume (< 1.50x) and weak delta (< 0.20) are 100% strictly banned to defeat theta decay
-            if real_rvol >= 1.50 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45 and eval_close >= vwap:
+            # 2. Remaining Runway Check: Must have at least 60 points of open runway
+            potential_high = day_low + max_expansion
+            remaining_runway = potential_high - eval_close
+            if remaining_runway < 60.0:
+                continue
+            # 3. CVD Delta Aggression: Strictly requires Delta >= +0.30
+            if real_rvol >= 1.50 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45 and eval_close >= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakout
-            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc >= 0.25:
+            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc >= 0.35:
                 is_mode_b = True
         else:
-            # Anti-Bottom-Chasing Guard: If price is > 3.5% below VWAP, block late bottom entry!
-            if eval_close < (vwap * 0.965):
+            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% below VWAP
+            if eval_close < (vwap * 0.988):
                 continue
-            # Mode A: Institutional Distribution / Rejection (Strict RVOL >= 1.50x & Delta <= -0.20)
-            if real_rvol >= 1.50 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45 and eval_close <= vwap:
+            # 2. Remaining Runway Check: Must have at least 60 points of open runway to downside
+            potential_low = day_high - max_expansion
+            remaining_runway = eval_close - potential_low
+            if remaining_runway < 60.0:
+                continue
+            # 3. CVD Delta Aggression: Strictly requires Delta <= -0.30
+            if real_rvol >= 1.50 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45 and eval_close <= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakdown
-            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc <= -0.25:
+            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc <= -0.35:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -520,20 +543,9 @@ def evaluate_institutional_stock_engine(
         p2_score = round(min(25.0, max(14.0, (abs(eval_bvc) * 12.0) + (abs(delta_inflection) * 12.0))), 2)
         p3_score = 18.0 if ((direction == 'CALL' and eval_close >= vwap) or (direction == 'PUT' and eval_close <= vwap)) else 12.0
 
-        # PILLAR 5: ATR Runway & Fuel Check
+        # PILLAR 5: ATR Runway & Fuel Check (Measured against Live Expansion, no static ATR traps)
         fuel_spent = day_high - day_low
-        remaining_atr = atr - fuel_spent
-        fuel_ratio = remaining_atr / max(1.0, atr)
-        is_super_trend = (real_rvol >= 2.5 and turnover_cr >= 2.5) or (turnover_15m >= 35.0)
-
-        if is_super_trend:
-            if fuel_spent > (3.0 * atr):
-                continue
-            p5_score = round(min(10.0, max(6.0, 7.0 + min(3.0, (abs(pct_change) / 2.0)))), 2)
-        else:
-            if fuel_ratio < 0.10:
-                continue
-            p5_score = round(min(10.0, max(4.0, fuel_ratio * 7.0 + (abs(pct_change) / 3.0) * 3.0)), 2)
+        p5_score = round(min(10.0, max(5.0, 5.0 + min(5.0, (remaining_runway / max(1.0, max_expansion)) * 10.0))), 2)
 
         prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
         oi_score = float(opt.get('oi_score', 12.0))
@@ -811,18 +823,31 @@ class ActiveOptionTrade:
         self.max_adv_pts = 0.0
 
         if self.is_idx:
-            self.spot_sl = 25.0
-            if self.sym == 'BANKNIFTY':
-                self.spot_t1 = 45.0
-                self.spot_t2 = 120.0
-            else:
-                self.spot_t1 = 30.0
-                self.spot_t2 = 75.0
+            # Index: 150+ pts Spot Target (Yielding +75 to +150 pts on Option)
+            self.spot_sl = 35.0
+            self.spot_t1 = 150.0
+            self.spot_t2 = 300.0
+            self.opt_sl_pts = 18.0
+            self.opt_t1_pts = 75.0
+            self.opt_t2_pts = 150.0
         else:
-            # Dynamic 1.5R Slab Target based on 0.40x ATR
-            self.spot_sl = round(max(3.0, 0.25 * self.atr), 2)
-            self.spot_t1 = round(max(4.5, 0.40 * self.atr), 2)
-            self.spot_t2 = round(max(9.0, 0.85 * self.atr), 2)
+            # Stock: 60+ pts Spot Target (Yielding +30 to +60 pts on Option)
+            # Ultra-Condition: 100+ pts Spot Target (Yielding +50 to +100 pts on Option)
+            is_ultra = (float(self.cand.get('real_rvol', 1.0)) >= 3.0) or (float(self.cand.get('turnover_15m', 0.0)) >= 35.0)
+            if is_ultra:
+                self.spot_sl = 20.0
+                self.spot_t1 = 100.0
+                self.spot_t2 = 200.0
+                self.opt_sl_pts = 10.0
+                self.opt_t1_pts = 50.0
+                self.opt_t2_pts = 100.0
+            else:
+                self.spot_sl = 15.0
+                self.spot_t1 = 60.0
+                self.spot_t2 = 120.0
+                self.opt_sl_pts = 8.0
+                self.opt_t1_pts = 30.0
+                self.opt_t2_pts = 60.0
 
         step_sz = 100.0 if self.sym == 'BANKNIFTY' else (50.0 if self.is_idx else (20.0 if self.spot_entry >= 1000.0 else 10.0))
         self.atm_strike = round(self.spot_entry / step_sz) * step_sz
@@ -831,11 +856,6 @@ class ActiveOptionTrade:
         self.contract_name = f"{self.sym} {stk_str} {self.opt_type}"
         self.lot_size = lot_map.get(self.sym, (25 if self.is_idx else 250))
         self.opt_entry_premium = max(6.0, round(self.spot_sl * 2.00, 2))
-        
-        # Dynamic Slab Option Target: +22% to +25% premium expansion (locks quick profit before theta decay)
-        self.opt_sl_pts = round(0.18 * self.opt_entry_premium, 2) if not self.is_idx else 15.0
-        self.opt_t1_pts = round(max(2.00, 0.22 * self.opt_entry_premium), 2) if not self.is_idx else 30.0
-        self.opt_t2_pts = round(max(4.00, 0.50 * self.opt_entry_premium), 2) if not self.is_idx else 70.0
 
     def update(self, b_high: float, b_low: float, b_close: float, ts: datetime.datetime):
         if self.is_closed:
@@ -1062,36 +1082,48 @@ class AlphaInstitutionalSwappedScreener:
         self.dispatched_today[sym_clean] = time.time()
         self._save_dispatched_cache()
 
-    def is_slab_stock_dispatched(self, ist_now: datetime.datetime) -> bool:
+    def get_slab_stock_dispatched_count(self, ist_now: datetime.datetime) -> int:
         slab = get_current_trading_slab_name(ist_now)
         if not slab:
-            return False
+            return 0
         today_str = ist_now.strftime('%Y-%m-%d')
-        key = f"slab_stock_{today_str}_{slab}"
-        return key in self.dispatched_today
+        key = f"slab_stocks_{today_str}_{slab}"
+        val = self.dispatched_today.get(key, [])
+        return len(val) if isinstance(val, list) else (1 if val else 0)
 
     def mark_slab_stock_dispatched(self, ist_now: datetime.datetime, sym: str):
         slab = get_current_trading_slab_name(ist_now)
         if slab:
             today_str = ist_now.strftime('%Y-%m-%d')
-            key = f"slab_stock_{today_str}_{slab}"
-            self.dispatched_today[key] = sym
+            key = f"slab_stocks_{today_str}_{slab}"
+            val = self.dispatched_today.get(key, [])
+            if not isinstance(val, list):
+                val = [val] if val else []
+            if sym not in val:
+                val.append(sym)
+            self.dispatched_today[key] = val
             self._save_dispatched_cache()
 
-    def is_slab_index_dispatched(self, ist_now: datetime.datetime) -> bool:
+    def get_slab_index_dispatched_count(self, ist_now: datetime.datetime) -> int:
         slab = get_current_trading_slab_name(ist_now)
         if not slab:
-            return False
+            return 0
         today_str = ist_now.strftime('%Y-%m-%d')
-        key = f"slab_index_{today_str}_{slab}"
-        return key in self.dispatched_today
+        key = f"slab_indices_{today_str}_{slab}"
+        val = self.dispatched_today.get(key, [])
+        return len(val) if isinstance(val, list) else (1 if val else 0)
 
     def mark_slab_index_dispatched(self, ist_now: datetime.datetime, sym: str):
         slab = get_current_trading_slab_name(ist_now)
         if slab:
             today_str = ist_now.strftime('%Y-%m-%d')
-            key = f"slab_index_{today_str}_{slab}"
-            self.dispatched_today[key] = sym
+            key = f"slab_indices_{today_str}_{slab}"
+            val = self.dispatched_today.get(key, [])
+            if not isinstance(val, list):
+                val = [val] if val else []
+            if sym not in val:
+                val.append(sym)
+            self.dispatched_today[key] = val
             self._save_dispatched_cache()
 
     def is_eod_journal_dispatched_today(self) -> bool:
@@ -1275,8 +1307,9 @@ class AlphaInstitutionalSwappedScreener:
                 ], axis=1).max(axis=1)
                 atrs[sym] = round(float(tr.rolling(14).mean().iloc[-1] * 7.5), 2)
 
-        MAX_INDEX_PER_SLAB = 1
-        MAX_STOCKS_PER_SLAB = 1
+        MAX_SLAB_TRADES = 4
+        MAX_INDEX_PER_SLAB = 2
+        MAX_STOCKS_PER_SLAB = 3
 
         print(f"\nLoaded {len(asset_data)} active assets ({len(stock_syms)} equities, {len(INDEX_NAMES)} indices).")
         print(f"Authoritative 5-Day Backtest Window: {unique_dates}")
@@ -1334,7 +1367,7 @@ class AlphaInstitutionalSwappedScreener:
 
                 cur_idx_count = m_idx_count if is_m_fresh else a_idx_count
                 cur_stk_count = m_stk_count if is_m_fresh else a_stk_count
-                if cur_idx_count >= MAX_INDEX_PER_SLAB and cur_stk_count >= MAX_STOCKS_PER_SLAB:
+                if (cur_idx_count + cur_stk_count) >= MAX_SLAB_TRADES or (cur_idx_count >= MAX_INDEX_PER_SLAB and cur_stk_count >= MAX_STOCKS_PER_SLAB):
                     continue
 
                 # Regime calculation
@@ -1451,6 +1484,8 @@ class AlphaInstitutionalSwappedScreener:
                 bar_candidates.sort(key=lambda x: x['score'], reverse=True)
 
                 for cand in bar_candidates:
+                    if (cur_idx_count + cur_stk_count) >= MAX_SLAB_TRADES:
+                        break
                     is_i = cand.get('is_index', False)
                     if is_i and cur_idx_count >= MAX_INDEX_PER_SLAB:
                         continue
@@ -1669,19 +1704,38 @@ class AlphaInstitutionalSwappedScreener:
 
         verified_super_trades = []
 
-        # 1. STRICT SINGLE BEST-CONVICTION INDEX CANDIDATE (MAX 1 per slab)
-        idx_cands = [c for c in all_candidates if c.get('is_index', False)]
-        if idx_cands and not self.is_slab_index_dispatched(ist_now):
-            best_idx = idx_cands[0]
-            if not self.is_already_dispatched(best_idx['symbol']):
-                verified_super_trades.append(best_idx)
+        # Select up to MAX_INDEX_PER_SLAB (2) and MAX_STOCKS_PER_SLAB (3), total <= MAX_SLAB_TRADES (4)
+        cur_idx_count = self.get_slab_index_dispatched_count(ist_now)
+        cur_stk_count = self.get_slab_stock_dispatched_count(ist_now)
+        total_slab_dispatched = cur_idx_count + cur_stk_count
 
-        # 2. STRICT SINGLE BEST-CONVICTION STOCK CANDIDATE (MAX 1 per slab across 220 stocks)
+        idx_cands = [c for c in all_candidates if c.get('is_index', False)]
         stk_cands = [c for c in all_candidates if not c.get('is_index', False)]
-        if stk_cands and not self.is_slab_stock_dispatched(ist_now):
-            best_stk = stk_cands[0]
-            if not self.is_already_dispatched(best_stk['symbol']):
-                verified_super_trades.append(best_stk)
+
+        idx_cands.sort(key=lambda x: x.get('score', 0.0), reverse=True)
+        stk_cands.sort(key=lambda x: x.get('score', 0.0), reverse=True)
+
+        verified_super_trades = []
+
+        # 1. Index Candidates (Up to 2 per slab)
+        for icand in idx_cands:
+            if total_slab_dispatched + len(verified_super_trades) >= MAX_SLAB_TRADES:
+                break
+            if cur_idx_count >= MAX_INDEX_PER_SLAB:
+                break
+            if not self.is_already_dispatched(icand['symbol']):
+                verified_super_trades.append(icand)
+                cur_idx_count += 1
+
+        # 2. Stock Candidates (Up to 3 per slab)
+        for scand in stk_cands:
+            if total_slab_dispatched + len(verified_super_trades) >= MAX_SLAB_TRADES:
+                break
+            if cur_stk_count >= MAX_STOCKS_PER_SLAB:
+                break
+            if not self.is_already_dispatched(scand['symbol']):
+                verified_super_trades.append(scand)
+                cur_stk_count += 1
 
         if not verified_super_trades:
             print(f"[SCREENER]: 0 signals qualified at {ist_time_str}. Capital 100% Protected.")
