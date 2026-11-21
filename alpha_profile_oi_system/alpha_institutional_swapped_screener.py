@@ -1071,12 +1071,29 @@ class AlphaInstitutionalSwappedScreener:
         except Exception as e:
             self.logger.warning(f"Error saving dispatched cache: {e}")
 
-    def is_already_dispatched(self, symbol: str) -> bool:
+    def is_already_dispatched(self, symbol: str, ist_now: Optional[datetime.datetime] = None) -> bool:
+        """
+        Slab-Isolated Dispatch Gate:
+        Enforces single-entry exclusivity per slab.
+        Allows independent re-entry in Afternoon Slab (01:15 - 02:15 PM) if fresh 5-pillar setup forms.
+        """
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
-        return sym_clean in self.dispatched_today
+        t = ist_now or get_ist_time()
+        slab = get_current_trading_slab_name(t)
+        if not slab:
+            return sym_clean in self.dispatched_today
+        today_str = t.strftime('%Y-%m-%d')
+        slab_key = f"dispatched_{today_str}_{slab}_{sym_clean}"
+        return slab_key in self.dispatched_today
 
-    def mark_dispatched(self, symbol: str, contract: str = ''):
+    def mark_dispatched(self, symbol: str, contract: str = '', ist_now: Optional[datetime.datetime] = None):
         sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
+        t = ist_now or get_ist_time()
+        slab = get_current_trading_slab_name(t)
+        today_str = t.strftime('%Y-%m-%d')
+        if slab:
+            slab_key = f"dispatched_{today_str}_{slab}_{sym_clean}"
+            self.dispatched_today[slab_key] = time.time()
         self.dispatched_today[sym_clean] = time.time()
         self._save_dispatched_cache()
 
@@ -1322,7 +1339,8 @@ class AlphaInstitutionalSwappedScreener:
             nifty_day['ema9'] = nifty_day['close'].ewm(span=9, adjust=False).mean()
 
             active_trades: List[ActiveOptionTrade] = []
-            daily_traded_symbols = set()
+            m_slab_traded = set()
+            a_slab_traded = set()
             m_idx_count, m_stk_count = 0, 0
             a_idx_count, a_stk_count = 0, 0
             time_index = nifty_day.index
@@ -1365,6 +1383,7 @@ class AlphaInstitutionalSwappedScreener:
 
                 cur_idx_count = m_idx_count if is_m_fresh else a_idx_count
                 cur_stk_count = m_stk_count if is_m_fresh else a_stk_count
+                cur_slab_traded = m_slab_traded if is_m_fresh else a_slab_traded
                 if (cur_idx_count + cur_stk_count) >= MAX_SLAB_TRADES or (cur_idx_count >= MAX_INDEX_PER_SLAB and cur_stk_count >= MAX_STOCKS_PER_SLAB):
                     continue
 
@@ -1387,7 +1406,7 @@ class AlphaInstitutionalSwappedScreener:
                 # A. Index Candidates (MAX 1 per slab)
                 if cur_idx_count < MAX_INDEX_PER_SLAB:
                     for isym in ['NIFTY', 'BANKNIFTY']:
-                        if isym in daily_traded_symbols or isym not in asset_data:
+                        if isym in cur_slab_traded or isym not in asset_data:
                             continue
                         idf = asset_data[isym]
                         today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
@@ -1431,7 +1450,7 @@ class AlphaInstitutionalSwappedScreener:
                 # B. Stock Candidates (MAX 1 per slab)
                 if cur_stk_count < MAX_STOCKS_PER_SLAB:
                     for ssym in stock_syms:
-                        if ssym in daily_traded_symbols or ssym not in asset_data:
+                        if ssym in cur_slab_traded or ssym not in asset_data:
                             continue
                         lot_sz = lot_map.get(ssym, 0)
                         if lot_sz <= 0:
@@ -1489,12 +1508,12 @@ class AlphaInstitutionalSwappedScreener:
                         continue
                     if (not is_i) and cur_stk_count >= MAX_STOCKS_PER_SLAB:
                         continue
-                    if cand['symbol'] in daily_traded_symbols:
+                    if cand['symbol'] in cur_slab_traded:
                         continue
 
                     tr = ActiveOptionTrade(cand, curr_t, lot_map)
                     active_trades.append(tr)
-                    daily_traded_symbols.add(cand['symbol'])
+                    cur_slab_traded.add(cand['symbol'])
                     if is_i:
                         if is_m_fresh: m_idx_count += 1
                         else: a_idx_count += 1
@@ -1692,8 +1711,8 @@ class AlphaInstitutionalSwappedScreener:
         all_candidates = []
         for cand in (index_candidates + stock_candidates):
             sym = cand['symbol']
-            if self.is_already_dispatched(sym):
-                print(f"[REJECTION]: {sym} already dispatched today.")
+            if self.is_already_dispatched(sym, ist_now):
+                print(f"[REJECTION]: {sym} already dispatched in this slab.")
                 continue
             all_candidates.append(cand)
 
@@ -1721,7 +1740,7 @@ class AlphaInstitutionalSwappedScreener:
                 break
             if cur_idx_count >= MAX_INDEX_PER_SLAB:
                 break
-            if not self.is_already_dispatched(icand['symbol']):
+            if not self.is_already_dispatched(icand['symbol'], ist_now):
                 verified_super_trades.append(icand)
                 cur_idx_count += 1
 
@@ -1731,7 +1750,7 @@ class AlphaInstitutionalSwappedScreener:
                 break
             if cur_stk_count >= MAX_STOCKS_PER_SLAB:
                 break
-            if not self.is_already_dispatched(scand['symbol']):
+            if not self.is_already_dispatched(scand['symbol'], ist_now):
                 verified_super_trades.append(scand)
                 cur_stk_count += 1
 
@@ -1792,7 +1811,7 @@ class AlphaInstitutionalSwappedScreener:
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
 
-        self.mark_dispatched(sym, contract)
+        self.mark_dispatched(sym, contract, ist_now)
         if is_idx:
             self.mark_slab_index_dispatched(ist_now, sym)
         else:
