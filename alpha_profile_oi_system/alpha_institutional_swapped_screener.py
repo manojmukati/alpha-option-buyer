@@ -82,11 +82,11 @@ def get_symbol_lot_size(sym_clean: str) -> float:
 def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
     """
     Active position management & monitoring slab:
-    Morning Prime Slab: 09:30 AM to 10:15 AM IST (570 to 615 mins)
+    Morning Prime Slab: 09:38 AM to 10:15 AM IST (578 to 615 mins)
     Afternoon Prime Slab: 01:15 PM to 02:15 PM IST (795 to 855 mins)
     """
     tot_m = ist_dt.hour * 60 + ist_dt.minute
-    is_morning = (570 <= tot_m <= 615)
+    is_morning = (578 <= tot_m <= 615)
     is_afternoon = (795 <= tot_m <= 855)
     return is_morning or is_afternoon
 
@@ -94,20 +94,20 @@ def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
 def is_in_fresh_signal_window(ist_dt: datetime.datetime) -> bool:
     """
     Fresh Signal Entry Window (Guarantees at least 15-20 mins runway before slab closure):
-    Morning: 09:30 AM to 10:00 AM IST (570 to 600 mins)
+    Morning: 09:38 AM to 10:05 AM IST (578 to 605 mins)
     Afternoon: 01:15 PM to 02:00 PM IST (795 to 840 mins)
-    No fresh signals allowed in the final 15 minutes (10:00-10:15 & 14:00-14:15)!
+    No fresh signals allowed in the final 15 minutes (10:05-10:15 & 14:00-14:15)!
     """
     tot_m = ist_dt.hour * 60 + ist_dt.minute
-    is_m_fresh = (570 <= tot_m <= 600)
+    is_m_fresh = (578 <= tot_m <= 605)
     is_a_fresh = (795 <= tot_m <= 840)
     return is_m_fresh or is_a_fresh
 
 
 def get_current_trading_slab_name(ist_dt: datetime.datetime) -> Optional[str]:
-    """Returns 'morning' for 09:30-10:15 or 'afternoon' for 13:15-14:15."""
+    """Returns 'morning' for 09:38-10:15 or 'afternoon' for 13:15-14:15."""
     tot_m = ist_dt.hour * 60 + ist_dt.minute
-    if 570 <= tot_m <= 615:
+    if 578 <= tot_m <= 615:
         return 'morning'
     elif 795 <= tot_m <= 855:
         return 'afternoon'
@@ -511,11 +511,11 @@ def evaluate_institutional_stock_engine(
             remaining_runway = potential_high - eval_close
             if remaining_runway < 60.0:
                 continue
-            # 3. CVD Delta Aggression: Strictly requires Delta >= +0.30
-            if real_rvol >= 1.50 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45 and eval_close >= vwap:
+            # 3. CVD Delta Aggression: Strictly requires Delta >= +0.30 and RVOL >= 1.80
+            if real_rvol >= 1.80 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45 and eval_close >= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakout
-            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc >= 0.35:
+            if real_rvol >= 2.00 and thrust >= 0.55 and eval_bvc >= 0.35:
                 is_mode_b = True
         else:
             # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% below VWAP
@@ -526,11 +526,11 @@ def evaluate_institutional_stock_engine(
             remaining_runway = eval_close - potential_low
             if remaining_runway < 60.0:
                 continue
-            # 3. CVD Delta Aggression: Strictly requires Delta <= -0.30
-            if real_rvol >= 1.50 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45 and eval_close <= vwap:
+            # 3. CVD Delta Aggression: Strictly requires Delta <= -0.30 and RVOL >= 1.80
+            if real_rvol >= 1.80 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45 and eval_close <= vwap:
                 is_mode_a = True
             # Mode B: Fast Climax Breakdown
-            if real_rvol >= 1.80 and thrust >= 0.55 and eval_bvc <= -0.35:
+            if real_rvol >= 2.00 and thrust >= 0.55 and eval_bvc <= -0.35:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -1330,9 +1330,9 @@ class AlphaInstitutionalSwappedScreener:
             for b_idx in range(len(time_index)):
                 curr_t = time_index[b_idx]
                 tot_m = curr_t.hour * 60 + curr_t.minute
-                is_m_slab = (570 <= tot_m <= 615)   # 09:30 to 10:15 AM IST
+                is_m_slab = (578 <= tot_m <= 615)   # 09:38 to 10:15 AM IST
                 is_a_slab = (795 <= tot_m <= 855)   # 01:15 to 02:15 PM IST
-                is_m_fresh = (570 <= tot_m <= 600)  # 09:30 to 10:00 AM IST (15m safety runway)
+                is_m_fresh = (578 <= tot_m <= 605)  # 09:38 to 10:05 AM IST (Settled morning entry window)
                 is_a_fresh = (795 <= tot_m <= 840)  # 01:15 to 02:00 PM IST (15m safety runway)
 
                 # 1. Update positions during active designated trading slabs
@@ -1962,9 +1962,9 @@ class AlphaInstitutionalSwappedScreener:
         print(f"=======================================================")
 
         tot_m = ist_start.hour * 60 + ist_start.minute
-        if 565 <= tot_m < 570:
-            wait_s = (570 - tot_m) * 60
-            print(f"[PRE-SLAB WARMUP]: Waiting {wait_s}s until 09:30 AM IST...")
+        if 565 <= tot_m < 578:
+            wait_s = (578 - tot_m) * 60
+            print(f"[PRE-SLAB WARMUP]: Waiting {wait_s}s until 09:38 AM IST...")
             time.sleep(wait_s)
         elif 790 <= tot_m < 795:
             wait_s = (795 - tot_m) * 60
@@ -1978,7 +1978,7 @@ class AlphaInstitutionalSwappedScreener:
         while True:
             ist_now = get_ist_time()
             now_m = ist_now.hour * 60 + ist_now.minute
-            is_m_slab = (570 <= now_m <= 615)
+            is_m_slab = (578 <= now_m <= 615)
             is_a_slab = (795 <= now_m <= 855)
 
             if not (is_m_slab or is_a_slab):
@@ -1999,7 +1999,7 @@ class AlphaInstitutionalSwappedScreener:
             cycle += 1
             ist_next = get_ist_time()
             next_m = (ist_next.hour * 60 + ist_next.minute) + (interval_seconds // 60)
-            if not ((570 <= next_m <= 616) or (795 <= next_m <= 856)):
+            if not ((578 <= next_m <= 616) or (795 <= next_m <= 856)):
                 print(f"\n[SLAB CONCLUDED]: Next cycle falls outside slab window. Completed {cycle - 1} cycles.")
                 break
 
