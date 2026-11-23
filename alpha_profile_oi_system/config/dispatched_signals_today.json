@@ -1,10 +1,13 @@
 {
-  "date": "2026-11-20",
+  "date": "2026-11-23",
   "dispatched": {
-    "LTM": 1795149595.4636905,
-    "HDFCBANK": 1795162553.7990627,
-    "EICHERMOT": 1795168596.3476977
-  },
-  "eod_journal_dispatched": true,
-  "eod_dispatched_time": "03:35:45 PM IST"
+    "dispatched_2026-11-23_morning_PIIND": 1795408602.0448663,
+    "PIIND": 1795408602.0448673,
+    "slab_stocks_2026-11-23_morning": [
+      "PIIND",
+      "DIVISLAB"
+    ],
+    "dispatched_2026-11-23_morning_DIVISLAB": 1795409539.5315697,
+    "DIVISLAB": 1795409539.5315711
+  }
 }
