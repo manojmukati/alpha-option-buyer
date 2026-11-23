@@ -273,42 +273,63 @@ def evaluate_institutional_index_engine(
             if tot_chg > 2000.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue  # Market maker equilibrium straddle pinning veto (Chop trap)
 
-        # GATE 3: DUAL-VELOCITY CONFIRMATION & 150+ PTS RUNWAY GATE
+        # GATE 3: DUAL-VELOCITY CONFIRMATION & 150+ PTS RUNWAY GATE (ANTI-TOP CHASING)
         is_mode_a = False  # Momentum Expansion
         is_mode_b = False  # Fast Climax Breakout / Breakdown
 
         # Live Expansion Potential: 2.5% on Index Trend Days (Free from static ATR constraints)
         max_expansion = max(250.0, eval_close * 0.025)
+        comp_high = float(comp_bars['high'].max())
+        comp_low = float(comp_bars['low'].min())
+        day_range_spent = day_high - day_low
+        normal_idx_range = max(180.0, eval_close * 0.012)
+        idx_buffer = 25.0 if sym_clean == 'BANKNIFTY' else 10.0
 
         if direction == 'CALL':
-            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% above VWAP
-            if eval_close > (vwap * 1.012):
+            # 1. Anti-Top Chasing Guard: Price must NOT be stretched > 0.8% above VWAP
+            if eval_close > (vwap * 1.008):
                 continue
-            # 2. Remaining Runway Check: Must have at least 150 points of open runway
+            # 2. Anti-Extension Guard: Price must NOT be stretched beyond base breakout pivot (Top Chasing Veto)
+            if eval_close > (comp_high + idx_buffer):
+                continue
+            # 3. Base Breakout Requirement: Price must be breaking out at or above base resistance
+            if eval_close < (comp_high - (idx_buffer * 0.5)):
+                continue
+            # 4. Day Range Exhaustion Guard: If day has already consumed > 75% of normal range, room is exhausted
+            if day_range_spent >= (0.75 * normal_idx_range):
+                continue
+            # 5. Remaining Runway Check: Must have at least 150 points of open runway
             potential_high = day_low + max_expansion
             remaining_runway = potential_high - eval_close
             if remaining_runway < 150.0:
                 continue
-            # 3. CVD Delta Aggression: Strictly requires Delta >= +0.30
-            if idx_rvol >= 1.20 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45:
+            # 6. Fresh Base Breakout Trigger:
+            if idx_rvol >= 1.20 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45:
                 is_mode_a = True
-            # Mode B (Index Fast Climax Breakout / Range Expansion):
-            if idx_rvol >= 1.50 and thrust >= 0.55 and eval_bvc >= 0.35:
+            if idx_rvol >= 1.50 and eval_bvc >= 0.25:
                 is_mode_b = True
         else:
-            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% below VWAP
-            if eval_close < (vwap * 0.988):
+            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched > 0.8% below VWAP
+            if eval_close < (vwap * 0.992):
                 continue
-            # 2. Remaining Runway Check: Must have at least 150 points of open runway to downside
+            # 2. Anti-Extension Guard: Price must NOT be stretched beyond base breakdown pivot (Bottom Chasing Veto)
+            if eval_close < (comp_low - idx_buffer):
+                continue
+            # 3. Base Breakdown Requirement: Price must be breaking down at or below base support
+            if eval_close > (comp_low + (idx_buffer * 0.5)):
+                continue
+            # 4. Day Range Exhaustion Guard: If day has already consumed > 75% of normal range, room is exhausted
+            if day_range_spent >= (0.75 * normal_idx_range):
+                continue
+            # 5. Remaining Runway Check: Must have at least 150 points of open runway to downside
             potential_low = day_high - max_expansion
             remaining_runway = eval_close - potential_low
             if remaining_runway < 150.0:
                 continue
-            # 3. CVD Delta Aggression: Strictly requires Delta <= -0.30
-            if idx_rvol >= 1.20 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45:
+            # 6. Fresh Base Breakdown Trigger:
+            if idx_rvol >= 1.20 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45:
                 is_mode_a = True
-            # Mode B (Index Fast Climax Breakdown / Dump):
-            if idx_rvol >= 1.50 and thrust >= 0.55 and eval_bvc <= -0.35:
+            if idx_rvol >= 1.50 and eval_bvc <= -0.25:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -472,7 +493,7 @@ def evaluate_institutional_stock_engine(
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
 
         # GATE 2: TARGETED OPTION CHAIN QUERY (DATA-FIRST FOR QUALIFIED LEADERS)
-        target_dist = 60.0  # User Institutional Mandate: Minimum 60 Spot Pts
+        target_dist = max(40.0, round(eval_close * 0.015, 1))  # Dynamic Price-Scaled Target Runway (Min 40 pts or 1.5% Spot)
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
 
         if opt_override is not None:
@@ -500,42 +521,67 @@ def evaluate_institutional_stock_engine(
             if tot_chg > 500.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue  # Market maker equilibrium straddle pinning veto (Chop trap)
 
-        # GATE 3: DUAL-VELOCITY ENGINE CONFIRMATION & 60+ PTS RUNWAY GATE
+        # GATE 3: DUAL-VELOCITY ENGINE CONFIRMATION & ANTI-TOP CHASING GATE
         is_mode_a = False  # Institutional Momentum Accumulation / Rejection
-        is_mode_b = False  # Fast Climax Breakout / Breakdown
+        is_mode_b = False  # Fast Fresh Base Breakout / Breakdown
+
+        # Base Contraction & Anti-Top Chasing Framework
+        comp_high = float(comp_bars['high'].max())
+        comp_low = float(comp_bars['low'].min())
+        base_range_pct = ((comp_high - comp_low) / max(1.0, comp_low)) * 100.0
+        day_range_spent = day_high - day_low
+        normal_day_range = max(50.0, eval_close * 0.022)
 
         # Dynamic Volatility Expansion: Live expansion potential (up to 8% trend day or dynamic ATR)
         max_expansion = max(75.0, eval_close * 0.08, atr * math.sqrt(max(1.0, real_rvol)))
 
         if direction == 'CALL':
-            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% above VWAP
-            if eval_close > (vwap * 1.012):
+            # 1. Anti-Top Chasing Guard: Price must NOT be stretched > 0.8% above VWAP
+            if eval_close > (vwap * 1.008):
                 continue
-            # 2. Remaining Runway Check: Must have at least 60 points of open runway
+            # 2. Anti-Extension Guard: Price must NOT be stretched > 0.35% above the consolidation base!
+            # If price is already > 0.35% above the base, it is an EXHAUSTION CLIMAX (Top Chasing Veto)
+            if eval_close > (comp_high * 1.0035):
+                continue
+            # 3. Base Breakout Requirement: Price must be breaking out at or above base resistance
+            if eval_close < (comp_high * 0.999):
+                continue
+            # 4. Day Range Exhaustion Guard: If day has already consumed > 65% of normal range, room is exhausted
+            if day_range_spent >= (0.65 * normal_day_range):
+                continue
+            # 5. Remaining Runway Check: Must have at least target_dist points of open runway
             potential_high = day_low + max_expansion
             remaining_runway = potential_high - eval_close
-            if remaining_runway < 60.0:
+            if remaining_runway < target_dist:
                 continue
-            # 3. CVD Delta Aggression: Strictly requires Delta >= +0.30 and RVOL >= 1.80
-            if real_rvol >= 1.80 and (delta_inflection >= 0.30 or eval_bvc >= 0.30) and thrust >= 0.45 and eval_close >= vwap:
+            # 6. Fresh Base Breakout Trigger:
+            if real_rvol >= 1.50 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45 and eval_close >= vwap:
                 is_mode_a = True
-            # Mode B: Fast Climax Breakout
-            if real_rvol >= 2.00 and thrust >= 0.55 and eval_bvc >= 0.35:
+            if real_rvol >= 1.80 and eval_bvc >= 0.25:
                 is_mode_b = True
         else:
-            # 1. VWAP Distance Guard: Price must NOT be stretched > 1.2% below VWAP
-            if eval_close < (vwap * 0.988):
+            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched > 0.8% below VWAP
+            if eval_close < (vwap * 0.992):
                 continue
-            # 2. Remaining Runway Check: Must have at least 60 points of open runway to downside
+            # 2. Anti-Extension Guard: Price must NOT be stretched > 0.35% below the consolidation base!
+            # If price is already > 0.35% below the base, it is an EXHAUSTION DUMP (Bottom Chasing Veto)
+            if eval_close < (comp_low * 0.9965):
+                continue
+            # 3. Base Breakdown Requirement: Price must be breaking down at or below base support
+            if eval_close > (comp_low * 1.001):
+                continue
+            # 4. Day Range Exhaustion Guard: If day has already consumed > 65% of normal range, room is exhausted
+            if day_range_spent >= (0.65 * normal_day_range):
+                continue
+            # 5. Remaining Runway Check: Must have at least target_dist points of open runway to downside
             potential_low = day_high - max_expansion
             remaining_runway = eval_close - potential_low
-            if remaining_runway < 60.0:
+            if remaining_runway < target_dist:
                 continue
-            # 3. CVD Delta Aggression: Strictly requires Delta <= -0.30 and RVOL >= 1.80
-            if real_rvol >= 1.80 and (delta_inflection <= -0.30 or eval_bvc <= -0.30) and thrust >= 0.45 and eval_close <= vwap:
+            # 6. Fresh Base Breakdown Trigger:
+            if real_rvol >= 1.50 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45 and eval_close <= vwap:
                 is_mode_a = True
-            # Mode B: Fast Climax Breakdown
-            if real_rvol >= 2.00 and thrust >= 0.55 and eval_bvc <= -0.35:
+            if real_rvol >= 1.80 and eval_bvc <= -0.25:
                 is_mode_b = True
 
         if not (is_mode_a or is_mode_b):
@@ -1361,15 +1407,15 @@ class AlphaInstitutionalSwappedScreener:
 
         atrs = {}
         for sym, df_a in asset_data.items():
-            if sym in INDEX_NAMES:
-                atrs[sym] = 450.0 if sym == 'BANKNIFTY' else 160.0
-            elif len(df_a) > 20:
+            if len(df_a) > 20:
                 tr = pd.concat([
                     df_a['high'] - df_a['low'],
                     (df_a['high'] - df_a['close'].shift(1)).abs(),
                     (df_a['low'] - df_a['close'].shift(1)).abs()
                 ], axis=1).max(axis=1)
                 atrs[sym] = round(float(tr.rolling(14).mean().iloc[-1] * 7.5), 2)
+            else:
+                atrs[sym] = round(float(df_a['close'].iloc[-1] * 0.012), 2) if len(df_a) > 0 else 100.0
 
         MAX_SLAB_TRADES = 4
         MAX_INDEX_PER_SLAB = 2
@@ -1461,9 +1507,8 @@ class AlphaInstitutionalSwappedScreener:
                         today_bars = idf[(idf.index.date == d) & (idf.index <= curr_t)]
                         if len(today_bars) < 5:
                             continue
-                        idx_atr = atrs.get(isym, (450.0 if isym == 'BANKNIFTY' else 160.0))
-
                         spot_eval = float(today_bars['close'].iloc[-2])
+                        idx_atr = atrs.get(isym, round(spot_eval * 0.012, 2))
                         pct_idx = ((spot_eval - float(today_bars['open'].iloc[0])) / max(1.0, float(today_bars['open'].iloc[0]))) * 100.0
                         test_dirs = []
                         if regime['allow_call'] and pct_idx >= -0.60:

@@ -802,7 +802,7 @@ class LiveMarketDataFeed:
             if not is_buying_squeeze and (tot_upper_ce_chg >= ambush_min_chg or tot_upper_ce_chg >= ambush_min_chg_shares) and tot_upper_ce_chg > 2.0 * max(50.0, tot_lower_pe_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
-            # Check 3: Immediate Active Call Resistance Wall (+1 to Target)
+            # Check 3: Immediate Active Call Resistance Wall (+1 to Target Runway)
             call_wall_detected = False
             wall_strike_hit = None
             target_barrier = max(float(target_price), ref_spot + 2.5 * strike_step) if target_price else (ref_spot + 2.5 * strike_step)
@@ -815,10 +815,10 @@ class LiveMarketDataFeed:
                 s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0)
                 
-                # Active Resistance Wall requires s_ce_chg >= 0 (Call Writing active)
-                if (s_ce >= min_wall_oi or s_ce >= min_wall_oi_shares) and s_ce_chg >= 0:
-                    if (s_ce > 1.35 * max(50.0, s_pe)) or (s_ce_chg > 1.5 * max(20.0, s_pe_chg)) or ((s_ce >= 2.0 * min_wall_oi or s_ce >= 2.0 * min_wall_oi_shares) and s_ce >= 1.0 * s_pe):
-                        if s_ce_vol >= 2.0 * s_ce:
+                # Active Resistance Wall: Call Writing is adding resistance in the immediate runway (+1 to +3 strikes)
+                if s_ce_chg > 0 and (s_ce >= min_wall_oi or s_ce >= min_wall_oi_shares or s in upper_4[:2]):
+                    if (s_ce > 1.20 * max(20.0, s_pe)) or (s_ce_chg > 1.2 * max(10.0, s_pe_chg)):
+                        if s_ce_vol >= 2.5 * s_ce:
                             continue  # Squeeze volume exception (forced short covering)
                         call_wall_detected = True
                         wall_strike_hit = s
@@ -827,7 +827,7 @@ class LiveMarketDataFeed:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_CALL_RESISTANCE_WALL_AT_{int(wall_strike_hit)}'}
 
             # Check 4: ATM Call Writer Dominance (Active call writing > put writing at ATM)
-            if atm_info['ce_chg_oi'] > 1.5 * max(50.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
+            if atm_info['ce_chg_oi'] > 1.2 * max(20.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
             # 5. Institutional Gamma Squeeze Detection (Traded Volume >= 2.0x Strike OI + Short Covering)
@@ -843,11 +843,15 @@ class LiveMarketDataFeed:
                         is_gamma_squeeze = True
                         break
 
-            # 6. Institutional Flow Confluence (Either Call Unwinding OR Put Support Writing without Call Wall)
+            # 6. Strict Institutional Flow Confluence (Must have clear runway: no upper call building, requires unwinding or strong put floor)
+            if tot_upper_ce_chg > 1.5 * max(50.0, tot_lower_pe_chg):
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_CALL_WRITING_RESISTANCE_BLOCKING_RUNWAY'}
+
             has_unwind = (tot_upper_ce_chg <= -min_unwind) or (tot_upper_ce_chg <= -min_unwind_shares) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind) or (atm_info.get('ce_chg_oi', 0.0) <= -min_unwind_shares) or is_gamma_squeeze or (atm_info['ce_oi'] > 0 and abs(atm_info['ce_chg_oi']) / atm_info['ce_oi'] >= 0.08 and atm_info['ce_chg_oi'] < 0)
             has_support = ((tot_lower_pe_chg >= min_write or tot_lower_pe_chg >= min_write_shares) and tot_lower_pe_chg >= 1.2 * max(50.0, tot_upper_ce_chg)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write)) or (atm_info.get('pe_chg_oi', 0.0) >= (0.4 * min_write_shares))
 
-            if not (has_unwind or has_support):
+            # Must have either explicit Call Unwinding OR a dominant Put Support Floor with ZERO Call building
+            if not has_unwind and not (has_support and tot_upper_ce_chg <= 0):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_CALL_UNWINDING_OR_SUPPORT_FAIL'}
 
             # 7. Call Buyer Volume Presence
@@ -893,7 +897,7 @@ class LiveMarketDataFeed:
             if not is_buying_squeeze and (tot_lower_pe_chg >= ambush_min_chg or tot_lower_pe_chg >= ambush_min_chg_shares) and tot_lower_pe_chg > 2.0 * max(50.0, tot_upper_ce_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
-            # Check 3: Immediate Active Put Support Wall (-1 to Target)
+            # Check 3: Immediate Active Put Support Wall (-1 to Target Runway)
             put_wall_detected = False
             wall_strike_hit = None
             target_barrier = min(float(target_price), ref_spot - 2.5 * strike_step) if target_price else (ref_spot - 2.5 * strike_step)
@@ -906,10 +910,10 @@ class LiveMarketDataFeed:
                 s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0)
                 
-                # Active Support Wall requires s_pe_chg >= 0 (Put Writing active)
-                if (s_pe >= min_wall_oi or s_pe >= min_wall_oi_shares) and s_pe_chg >= 0:
-                    if (s_pe > 1.35 * max(50.0, s_ce)) or (s_pe_chg > 1.5 * max(20.0, s_ce_chg)) or ((s_pe >= 2.0 * min_wall_oi or s_pe >= 2.0 * min_wall_oi_shares) and s_pe >= 1.0 * s_ce):
-                        if s_pe_vol >= 2.0 * s_pe:
+                # Active Support Wall: Put Writing is actively adding support in the immediate runway (-1 to -3 strikes)
+                if s_pe_chg > 0 and (s_pe >= min_wall_oi or s_pe >= min_wall_oi_shares or s in lower_4[-2:]):
+                    if (s_pe > 1.20 * max(20.0, s_ce)) or (s_pe_chg > 1.2 * max(10.0, s_ce_chg)):
+                        if s_pe_vol >= 2.5 * s_pe:
                             continue  # Squeeze volume exception (panic breakdown liquidation)
                         put_wall_detected = True
                         wall_strike_hit = s
@@ -918,7 +922,7 @@ class LiveMarketDataFeed:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_PUT_SUPPORT_WALL_AT_{int(wall_strike_hit)}'}
 
             # Check 4: ATM Put Writer Dominance (Active put writing > call writing at ATM)
-            if atm_info['pe_chg_oi'] > 1.5 * max(50.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
+            if atm_info['pe_chg_oi'] > 1.2 * max(20.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
             # 5. Institutional Panic Squeeze Detection (Traded Volume >= 2.0x Strike OI + Long Liquidation)
@@ -934,11 +938,15 @@ class LiveMarketDataFeed:
                         is_panic_squeeze = True
                         break
 
-            # 6. Institutional Flow Confluence (Either Put Unwinding OR Call Resistance Writing without Put Wall)
+            # 6. Strict Institutional Flow Confluence (Must have clear runway: no lower put building, requires unwinding or strong call ceiling)
+            if tot_lower_pe_chg > 1.5 * max(50.0, tot_upper_ce_chg):
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_PUT_WRITING_SUPPORT_BLOCKING_RUNWAY'}
+
             has_unwind = (tot_lower_pe_chg <= -min_unwind) or (tot_lower_pe_chg <= -min_unwind_shares) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind) or (atm_info.get('pe_chg_oi', 0.0) <= -min_unwind_shares) or is_panic_squeeze or (atm_info['pe_oi'] > 0 and abs(atm_info['pe_chg_oi']) / atm_info['pe_oi'] >= 0.08 and atm_info['pe_chg_oi'] < 0)
             has_resistance = ((tot_upper_ce_chg >= min_write or tot_upper_ce_chg >= min_write_shares) and tot_upper_ce_chg >= 1.2 * max(50.0, tot_lower_pe_chg)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write)) or (atm_info.get('ce_chg_oi', 0.0) >= (0.4 * min_write_shares))
 
-            if not (has_unwind or has_resistance):
+            # Must have either explicit Put Unwinding OR a dominant Call Ceiling with ZERO Put building
+            if not has_unwind and not (has_resistance and tot_lower_pe_chg <= 0):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'NO_INSTITUTIONAL_PUT_UNWINDING_OR_RESISTANCE_FAIL'}
 
             # 7. Put Buyer Volume Presence
