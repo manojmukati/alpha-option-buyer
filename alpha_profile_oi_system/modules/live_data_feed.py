@@ -1038,11 +1038,15 @@ class LiveMarketDataFeed:
             t1_pts = 75.0
             t2_pts = 150.0
         else:
-            # Institutional Stock Option Rules (60+ Spot Pt Runway):
-            # Option T1 is +30.0 pts (minimum 60 spot pts) / T2 is +60.0 pts / SL is 8.0 pts
+            # Institutional Stock Option Rules (Spot +-60 pts T1 / +-120 pts T2 Jackpot):
+            # 60 spot pts move * 0.50 ATM delta = 30.0 option pts.
             sl_pts = round(max(3.0, min(15.0, 0.18 * entry_p)), 2)
-            t1_pts = 30.0 if entry_p >= 20.0 else round(max(15.0, 0.50 * entry_p), 2)
-            t2_pts = 60.0 if entry_p >= 20.0 else round(max(30.0, 1.00 * entry_p), 2)
+            if entry_p >= 25.0:
+                t1_pts = 30.0
+                t2_pts = 60.0
+            else:
+                t1_pts = round(max(4.0, 0.60 * entry_p), 2)
+                t2_pts = round(max(8.0, 1.20 * entry_p), 2)
 
         opt_sl = round(max(0.5, entry_p - sl_pts), 2)
         opt_t1 = round(entry_p + t1_pts, 2)

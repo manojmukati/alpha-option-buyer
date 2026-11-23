@@ -38,6 +38,7 @@ from typing import Dict, List, Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
@@ -245,11 +246,13 @@ def evaluate_institutional_index_engine(
                     continue  # Heavyweight divergence veto
 
         # GATE 2: TARGETED OPTION CHAIN QUERY (DATA FIRST!)
-        target_dist = 140.0 if sym_clean == 'BANKNIFTY' else 90.0
+        target_dist = 150.0  # User Institutional Mandate: Minimum 150 Spot Pts
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
         if opt_override is not None:
             opt = opt_override
         else:
+            print(f"[AKAMAI SAFETY SHIELD]: Waiting 5.0s before Option Chain query for {sym_clean}...")
+            time.sleep(5.0)
             opt = data_feed.compute_option_pricing(
                 spot_price=eval_close,
                 direction=direction,
@@ -469,12 +472,14 @@ def evaluate_institutional_stock_engine(
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
 
         # GATE 2: TARGETED OPTION CHAIN QUERY (DATA-FIRST FOR QUALIFIED LEADERS)
-        target_dist = max(35.0, min(65.0, 0.85 * atr))
+        target_dist = 60.0  # User Institutional Mandate: Minimum 60 Spot Pts
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
 
         if opt_override is not None:
             opt = opt_override
         else:
+            print(f"[AKAMAI SAFETY SHIELD]: Waiting 5.0s before Option Chain query for {sym_clean}...")
+            time.sleep(5.0)
             opt = data_feed.compute_option_pricing(
                 spot_price=eval_close,
                 direction=direction,
@@ -1028,6 +1033,44 @@ class AlphaInstitutionalSwappedScreener:
             'reason': 'NEUTRAL',
             'timestamp': 0.0
         }
+        self._dynamic_top_stocks = []
+        self._dynamic_top_stocks_ts = 0.0
+
+    def get_dynamic_top_liquid_stocks(self, all_raw_symbols: List[str], top_n: int = 28) -> List[str]:
+        """
+        Pure Dynamic Institutional Liquidity Selection (Zero Hardcoding!):
+        Fetches today's live volume/close in a single fast batch call (~3s),
+        sorts all F&O stocks by today's cash turnover, and dynamically selects top 28.
+        Caches results for 15 minutes to guarantee lightning-fast 15s execution cycles.
+        """
+        now = time.time()
+        if self._dynamic_top_stocks and (now - self._dynamic_top_stocks_ts < 900.0):
+            return self._dynamic_top_stocks
+
+        try:
+            batch_tickers = [f"{s}.NS" for s in all_raw_symbols if not s.startswith('^') and not s.startswith('NIFTY') and not s.endswith('FPI')]
+            batch_data = yf.download(batch_tickers, period='1d', interval='1d', progress=False)
+            if 'Volume' in batch_data.columns and 'Close' in batch_data.columns:
+                vol_s = batch_data['Volume'].iloc[-1]
+                cls_s = batch_data['Close'].iloc[-1]
+                turnover_series = (vol_s * cls_s).fillna(0.0)
+                t_map = {}
+                for t_col, val in turnover_series.items():
+                    clean_sym = str(t_col).replace('.NS', '').strip().upper()
+                    t_map[clean_sym] = float(val) if not np.isnan(val) else 0.0
+                sorted_syms = sorted(all_raw_symbols, key=lambda s: t_map.get(s.upper(), 0.0), reverse=True)
+                top_stocks = sorted_syms[:top_n]
+                self._dynamic_top_stocks = top_stocks
+                self._dynamic_top_stocks_ts = now
+                print(f"[DYNAMIC LIQUIDITY SELECTION]: Selected Top {len(top_stocks)} F&O stocks by live turnover (Zero Hardcoding).")
+                return top_stocks
+        except Exception as e:
+            print(f"[DYNAMIC LIQUIDITY SELECTION WARNING]: {e}. Using fallback.")
+
+        top_stocks = all_raw_symbols[:top_n]
+        self._dynamic_top_stocks = top_stocks
+        self._dynamic_top_stocks_ts = now
+        return top_stocks
 
     def _load_fno_universe(self) -> List[Dict[str, Any]]:
         possible_paths = [
@@ -1194,6 +1237,12 @@ class AlphaInstitutionalSwappedScreener:
         if not os.path.exists(daily_xl):
             print(f"[EOD ERROR]: Excel file {daily_xl} not found.")
             return
+
+        # Strict EOD Mandate: Force square-off all active open trades at CMP before generating closing report (Zero Overnight Risk)
+        try:
+            self.update_open_paper_trades(force_slab_close=True)
+        except Exception as e:
+            print(f"[EOD AUTO-CLOSE ERROR]: {e}")
 
         df = pd.read_excel(daily_xl)
         df_today = df[df['Date'].astype(str).str.contains(ist_date_str, na=False)] if 'Date' in df.columns else pd.DataFrame()
@@ -1673,14 +1722,15 @@ class AlphaInstitutionalSwappedScreener:
             if res and res.get('passed', False):
                 index_candidates.append(res)
 
-        # 2. Evaluate All 218 F&O Stocks (Zero hardcoding!)
-        symbols_to_scan = [
+        # 2. Evaluate Dynamic Top 28 Highest Liquidity F&O Stocks (Zero hardcoding!)
+        all_candidate_symbols = [
             sym for sym in [
                 item['symbol'] if isinstance(item, dict) else item
                 for item in self.universe
             ]
             if sym not in INDEX_NAMES and not sym.startswith('NIFTY') and not sym.endswith('FPI')
         ]
+        symbols_to_scan = self.get_dynamic_top_liquid_stocks(all_candidate_symbols, top_n=28)
 
         def scan_stock_worker(sym):
             try:
@@ -1929,9 +1979,9 @@ class AlphaInstitutionalSwappedScreener:
                 elif elapsed_mins >= 15 and cur_bid <= buy_p:
                     exit_reason = '15MIN_TIMEOUT_SL_STAGNATION'
                     exit_price = cur_bid
-                # 5. Force Slab Close (Guarantees every trade gets at least its 15-minute minimum runway)
-                elif force_slab_close and elapsed_mins >= 15:
-                    exit_reason = 'EOD_SLAB_CONCLUSION_CLOSE'
+                # 5. Force EOD / Slab Close (Guarantees zero trades are ever carried overnight)
+                elif force_slab_close:
+                    exit_reason = 'EOD_MARKET_CLOSE_SQUAREOFF'
                     exit_price = cur_bid
 
                 if exit_reason:
