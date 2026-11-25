@@ -1462,8 +1462,8 @@ class AlphaInstitutionalSwappedScreener:
                 tot_m = curr_t.hour * 60 + curr_t.minute
                 is_m_slab = (578 <= tot_m <= 615)   # 09:38 to 10:15 AM IST
                 is_a_slab = (795 <= tot_m <= 855)   # 01:15 to 02:15 PM IST
-                is_m_fresh = (578 <= tot_m <= 605)  # 09:38 to 10:05 AM IST (Settled morning entry window)
-                is_a_fresh = (795 <= tot_m <= 840)  # 01:15 to 02:00 PM IST (15m safety runway)
+                is_m_fresh = (578 <= tot_m <= 610)  # 09:38 to 10:10 AM IST (Settled morning entry window)
+                is_a_fresh = (795 <= tot_m <= 848)  # 01:15 to 02:08 PM IST (7m safety runway)
 
                 # 1. Update positions during active designated trading slabs
                 if is_m_slab or is_a_slab:
