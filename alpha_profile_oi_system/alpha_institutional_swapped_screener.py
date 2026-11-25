@@ -94,14 +94,13 @@ def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
 
 def is_in_fresh_signal_window(ist_dt: datetime.datetime) -> bool:
     """
-    Fresh Signal Entry Window (Guarantees at least 15-20 mins runway before slab closure):
-    Morning: 09:38 AM to 10:05 AM IST (578 to 605 mins)
-    Afternoon: 01:15 PM to 02:00 PM IST (795 to 840 mins)
-    No fresh signals allowed in the final 15 minutes (10:05-10:15 & 14:00-14:15)!
+    Fresh Signal Entry Window (Guarantees sufficient momentum runway before slab closure):
+    Morning: 09:38 AM to 10:10 AM IST (578 to 610 mins, leaving 5 mins final runway buffer)
+    Afternoon: 01:15 PM to 02:08 PM IST (795 to 848 mins, leaving 7 mins final runway buffer)
     """
     tot_m = ist_dt.hour * 60 + ist_dt.minute
-    is_m_fresh = (578 <= tot_m <= 605)
-    is_a_fresh = (795 <= tot_m <= 840)
+    is_m_fresh = (578 <= tot_m <= 610)
+    is_a_fresh = (795 <= tot_m <= 848)
     return is_m_fresh or is_a_fresh
 
 
@@ -283,11 +282,17 @@ def evaluate_institutional_index_engine(
         comp_low = float(comp_bars['low'].min())
         day_range_spent = day_high - day_low
         normal_idx_range = max(180.0, eval_close * 0.012)
-        idx_buffer = 25.0 if sym_clean == 'BANKNIFTY' else 10.0
+        idx_rvol_mult = math.sqrt(max(1.0, idx_rvol))
+        effective_idx_capacity = normal_idx_range * idx_rvol_mult
+        idx_buffer = (25.0 if sym_clean == 'BANKNIFTY' else 10.0) * min(2.5, idx_rvol_mult)
+
+        # Dynamic VWAP Stretch limit: 0.8% base, up to 1.4% on high volume trend days
+        max_vwap_stretch_call = vwap * min(1.014, 1.008 * idx_rvol_mult)
+        max_vwap_stretch_put = vwap * max(0.986, 0.992 / idx_rvol_mult)
 
         if direction == 'CALL':
-            # 1. Anti-Top Chasing Guard: Price must NOT be stretched > 0.8% above VWAP
-            if eval_close > (vwap * 1.008):
+            # 1. Anti-Top Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
+            if eval_close > max_vwap_stretch_call:
                 continue
             # 2. Anti-Extension Guard: Price must NOT be stretched beyond base breakout pivot (Top Chasing Veto)
             if eval_close > (comp_high + idx_buffer):
@@ -295,8 +300,8 @@ def evaluate_institutional_index_engine(
             # 3. Base Breakout Requirement: Price must be breaking out at or above base resistance
             if eval_close < (comp_high - (idx_buffer * 0.5)):
                 continue
-            # 4. Day Range Exhaustion Guard: If day has already consumed > 75% of normal range, room is exhausted
-            if day_range_spent >= (0.75 * normal_idx_range):
+            # 4. Day Range Exhaustion Guard: Scaled dynamically with Index RVOL
+            if day_range_spent >= (0.75 * effective_idx_capacity):
                 continue
             # 5. Remaining Runway Check: Must have at least 150 points of open runway
             potential_high = day_low + max_expansion
@@ -309,8 +314,8 @@ def evaluate_institutional_index_engine(
             if idx_rvol >= 1.50 and eval_bvc >= 0.25:
                 is_mode_b = True
         else:
-            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched > 0.8% below VWAP
-            if eval_close < (vwap * 0.992):
+            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
+            if eval_close < max_vwap_stretch_put:
                 continue
             # 2. Anti-Extension Guard: Price must NOT be stretched beyond base breakdown pivot (Bottom Chasing Veto)
             if eval_close < (comp_low - idx_buffer):
@@ -318,8 +323,8 @@ def evaluate_institutional_index_engine(
             # 3. Base Breakdown Requirement: Price must be breaking down at or below base support
             if eval_close > (comp_low + (idx_buffer * 0.5)):
                 continue
-            # 4. Day Range Exhaustion Guard: If day has already consumed > 75% of normal range, room is exhausted
-            if day_range_spent >= (0.75 * normal_idx_range):
+            # 4. Day Range Exhaustion Guard: Scaled dynamically with Index RVOL
+            if day_range_spent >= (0.75 * effective_idx_capacity):
                 continue
             # 5. Remaining Runway Check: Must have at least 150 points of open runway to downside
             potential_low = day_high - max_expansion
@@ -535,19 +540,32 @@ def evaluate_institutional_stock_engine(
         # Dynamic Volatility Expansion: Live expansion potential (up to 8% trend day or dynamic ATR)
         max_expansion = max(75.0, eval_close * 0.08, atr * math.sqrt(max(1.0, real_rvol)))
 
+        # Dynamic Institutional Fuel Capacity:
+        # Scales with volume surge (sqrt of RVOL). Normal days stay capped at 2.2% (PIIND sideways chop blocked at 65%).
+        # News/trend days scale up to 4.5%-6.0% (Reliance/HDFCLIFE rally allowed!).
+        rvol_fuel_mult = math.sqrt(max(1.0, real_rvol))
+        effective_day_capacity = normal_day_range * rvol_fuel_mult
+
+        # Dynamic Anti-Top Chasing Band:
+        # Base cap: 0.35%, scaling up to 0.85% for high-volume explosive Bar 1 breakouts.
+        max_breakout_chase_pct = min(0.0085, 0.0035 * rvol_fuel_mult)
+
+        # Dynamic VWAP Stretch Band:
+        max_vwap_call = vwap * min(1.015, 1.008 * rvol_fuel_mult)
+        max_vwap_put = vwap * max(0.985, 0.992 / rvol_fuel_mult)
+
         if direction == 'CALL':
-            # 1. Anti-Top Chasing Guard: Price must NOT be stretched > 0.8% above VWAP
-            if eval_close > (vwap * 1.008):
+            # 1. Anti-Top Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
+            if eval_close > max_vwap_call:
                 continue
-            # 2. Anti-Extension Guard: Price must NOT be stretched > 0.35% above the consolidation base!
-            # If price is already > 0.35% above the base, it is an EXHAUSTION CLIMAX (Top Chasing Veto)
-            if eval_close > (comp_high * 1.0035):
+            # 2. Anti-Extension Guard: Price must NOT be stretched beyond breakout tolerance (Top Chasing Veto)
+            if eval_close > (comp_high * (1.0 + max_breakout_chase_pct)):
                 continue
             # 3. Base Breakout Requirement: Price must be breaking out at or above base resistance
             if eval_close < (comp_high * 0.999):
                 continue
-            # 4. Day Range Exhaustion Guard: If day has already consumed > 65% of normal range, room is exhausted
-            if day_range_spent >= (0.65 * normal_day_range):
+            # 4. Day Range Exhaustion Guard: Scaled dynamically with RVOL (blocks PIIND @ 0.65x, allows Reliance @ 1.6x)
+            if day_range_spent >= (0.65 * effective_day_capacity):
                 continue
             # 5. Remaining Runway Check: Must have at least target_dist points of open runway
             potential_high = day_low + max_expansion
@@ -560,18 +578,17 @@ def evaluate_institutional_stock_engine(
             if real_rvol >= 1.80 and eval_bvc >= 0.25:
                 is_mode_b = True
         else:
-            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched > 0.8% below VWAP
-            if eval_close < (vwap * 0.992):
+            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
+            if eval_close < max_vwap_put:
                 continue
-            # 2. Anti-Extension Guard: Price must NOT be stretched > 0.35% below the consolidation base!
-            # If price is already > 0.35% below the base, it is an EXHAUSTION DUMP (Bottom Chasing Veto)
-            if eval_close < (comp_low * 0.9965):
+            # 2. Anti-Extension Guard: Price must NOT be stretched beyond breakdown tolerance (Bottom Chasing Veto)
+            if eval_close < (comp_low * (1.0 - max_breakout_chase_pct)):
                 continue
             # 3. Base Breakdown Requirement: Price must be breaking down at or below base support
             if eval_close > (comp_low * 1.001):
                 continue
-            # 4. Day Range Exhaustion Guard: If day has already consumed > 65% of normal range, room is exhausted
-            if day_range_spent >= (0.65 * normal_day_range):
+            # 4. Day Range Exhaustion Guard: Scaled dynamically with RVOL (blocks sideways dump exhaustion)
+            if day_range_spent >= (0.65 * effective_day_capacity):
                 continue
             # 5. Remaining Runway Check: Must have at least target_dist points of open runway to downside
             potential_low = day_high - max_expansion
