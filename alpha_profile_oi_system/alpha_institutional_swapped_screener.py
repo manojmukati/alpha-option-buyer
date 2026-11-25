@@ -83,11 +83,11 @@ def get_symbol_lot_size(sym_clean: str) -> float:
 def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
     """
     Active position management & monitoring slab:
-    Morning Prime Slab: 09:38 AM to 10:15 AM IST (578 to 615 mins)
+    Morning Prime Slab: 09:38 AM to 10:50 AM IST (578 to 650 mins)
     Afternoon Prime Slab: 01:15 PM to 02:15 PM IST (795 to 855 mins)
     """
     tot_m = ist_dt.hour * 60 + ist_dt.minute
-    is_morning = (578 <= tot_m <= 615)
+    is_morning = (578 <= tot_m <= 650)
     is_afternoon = (795 <= tot_m <= 855)
     return is_morning or is_afternoon
 
@@ -95,19 +95,19 @@ def is_in_active_trading_slab(ist_dt: datetime.datetime) -> bool:
 def is_in_fresh_signal_window(ist_dt: datetime.datetime) -> bool:
     """
     Fresh Signal Entry Window (Guarantees sufficient momentum runway before slab closure):
-    Morning: 09:38 AM to 10:10 AM IST (578 to 610 mins, leaving 5 mins final runway buffer)
+    Morning: 09:38 AM to 10:45 AM IST (578 to 645 mins, captures 10:15-10:20 gap digestion breakouts!)
     Afternoon: 01:15 PM to 02:08 PM IST (795 to 848 mins, leaving 7 mins final runway buffer)
     """
     tot_m = ist_dt.hour * 60 + ist_dt.minute
-    is_m_fresh = (578 <= tot_m <= 610)
+    is_m_fresh = (578 <= tot_m <= 645)
     is_a_fresh = (795 <= tot_m <= 848)
     return is_m_fresh or is_a_fresh
 
 
 def get_current_trading_slab_name(ist_dt: datetime.datetime) -> Optional[str]:
-    """Returns 'morning' for 09:38-10:15 or 'afternoon' for 13:15-14:15."""
+    """Returns 'morning' for 09:38-10:50 or 'afternoon' for 13:15-14:15."""
     tot_m = ist_dt.hour * 60 + ist_dt.minute
-    if 578 <= tot_m <= 615:
+    if 578 <= tot_m <= 650:
         return 'morning'
     elif 795 <= tot_m <= 855:
         return 'afternoon'
@@ -498,7 +498,7 @@ def evaluate_institutional_stock_engine(
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
 
         # GATE 2: TARGETED OPTION CHAIN QUERY (DATA-FIRST FOR QUALIFIED LEADERS)
-        target_dist = max(40.0, round(eval_close * 0.015, 1))  # Dynamic Price-Scaled Target Runway (Min 40 pts or 1.5% Spot)
+        target_dist = 60.0  # Mandatory Institutional Gate: Minimum 60.0 Spot Pts Clear Runway
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
 
         if opt_override is not None:
@@ -1460,9 +1460,9 @@ class AlphaInstitutionalSwappedScreener:
             for b_idx in range(len(time_index)):
                 curr_t = time_index[b_idx]
                 tot_m = curr_t.hour * 60 + curr_t.minute
-                is_m_slab = (578 <= tot_m <= 615)   # 09:38 to 10:15 AM IST
+                is_m_slab = (578 <= tot_m <= 650)   # 09:38 to 10:50 AM IST
                 is_a_slab = (795 <= tot_m <= 855)   # 01:15 to 02:15 PM IST
-                is_m_fresh = (578 <= tot_m <= 610)  # 09:38 to 10:10 AM IST (Settled morning entry window)
+                is_m_fresh = (578 <= tot_m <= 645)  # 09:38 to 10:45 AM IST (Captures post-gap 10:15-10:20 breakouts!)
                 is_a_fresh = (795 <= tot_m <= 848)  # 01:15 to 02:08 PM IST (7m safety runway)
 
                 # 1. Update positions during active designated trading slabs
@@ -1481,7 +1481,7 @@ class AlphaInstitutionalSwappedScreener:
                                     all_closed_trades.append(tr)
 
                 # 2. Slab Boundary Square-Off
-                if tot_m == 615 or tot_m == 855:
+                if tot_m == 650 or tot_m == 855:
                     for tr in active_trades:
                         if not tr.is_closed:
                             df_asset = asset_data.get(tr.sym)
@@ -2103,13 +2103,13 @@ class AlphaInstitutionalSwappedScreener:
             time.sleep(wait_s)
 
         cycle = 1
-        max_duration_seconds = 70 * 60
+        max_duration_seconds = 85 * 60
         start_ts = time.time()
 
         while True:
             ist_now = get_ist_time()
             now_m = ist_now.hour * 60 + ist_now.minute
-            is_m_slab = (578 <= now_m <= 615)
+            is_m_slab = (578 <= now_m <= 650)
             is_a_slab = (795 <= now_m <= 855)
 
             if not (is_m_slab or is_a_slab):
@@ -2117,7 +2117,7 @@ class AlphaInstitutionalSwappedScreener:
                 break
 
             if (time.time() - start_ts) > max_duration_seconds:
-                print(f"\n[SESSION TIMEOUT]: Max duration of 70m reached. Exiting cleanly.")
+                print(f"\n[SESSION TIMEOUT]: Max duration of 85m reached. Exiting cleanly.")
                 break
 
             print(f"\n>>> [SLAB CYCLE #{cycle}] Active Scan & Position Management at {ist_now.strftime('%I:%M:%S %p IST')}...")
