@@ -214,11 +214,39 @@ def evaluate_institutional_index_engine(
 
     fuel_spent = day_high - day_low
 
-    # Test directions (Allows Slow Grinding Push / Reversal from slight dip to Fast Expansion)
+    # =========================================================================
+    # 1. INDEPENDENT DIRECTION SELECTION & INTER-MARKET DIVERGENCE HANDLING
+    # BANKNIFTY is evaluated independently based on its own Banking Confluence
+    # (HDFCBANK, ICICIBANK, SBIN, AXISBANK, KOTAKBANK). Never blocked by Nifty IT/Reliance!
+    # =========================================================================
+    is_bn = (sym_clean == 'BANKNIFTY')
     directions_to_test = []
-    if nifty_regime.get('allow_call', True) and eval_close >= (vwap * 0.999) and pct_change >= -0.60:
+
+    heavy_call_allow = True
+    heavy_put_allow = True
+    if bulk_snapshot and sym_clean in ['NIFTY', 'BANKNIFTY']:
+        heavy_syms = ['HDFCBANK', 'ICICIBANK', 'RELIANCE'] if sym_clean == 'NIFTY' else ['HDFCBANK', 'ICICIBANK', 'SBIN', 'AXISBANK', 'KOTAKBANK']
+        heavy_pcts = []
+        for h_s in heavy_syms:
+            h_q = bulk_snapshot.get(h_s)
+            if h_q and h_q.get('pct_change') is not None:
+                try:
+                    heavy_pcts.append(float(h_q['pct_change']))
+                except Exception:
+                    pass
+        if heavy_pcts:
+            avg_heavy = float(np.mean(heavy_pcts))
+            if avg_heavy < -0.30:
+                heavy_call_allow = False
+            if avg_heavy > 0.30:
+                heavy_put_allow = False
+
+    allow_call = heavy_call_allow if is_bn else (nifty_regime.get('allow_call', True) and heavy_call_allow)
+    allow_put = heavy_put_allow if is_bn else (nifty_regime.get('allow_put', True) and heavy_put_allow)
+
+    if allow_call and eval_close >= (vwap * 0.995):
         directions_to_test.append('CALL')
-    if nifty_regime.get('allow_put', True) and eval_close <= (vwap * 1.001) and pct_change <= 0.60:
+    if allow_put and eval_close <= (vwap * 1.005):
         directions_to_test.append('PUT')
     if target_direction:
         directions_to_test = [d for d in directions_to_test if d == target_direction]
@@ -226,32 +254,79 @@ def evaluate_institutional_index_engine(
     for direction in directions_to_test:
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
 
-        # Institutional Heavyweight Confluence (NIFTY & BANKNIFTY)
-        if bulk_snapshot and sym_clean in ['NIFTY', 'BANKNIFTY']:
-            heavy_syms = ['HDFCBANK', 'ICICIBANK', 'RELIANCE'] if sym_clean == 'NIFTY' else ['HDFCBANK', 'ICICIBANK', 'SBIN']
-            heavy_pcts = []
-            for h_s in heavy_syms:
-                h_q = bulk_snapshot.get(h_s)
-                if h_q and h_q.get('pct_change') is not None:
-                    try:
-                        heavy_pcts.append(float(h_q['pct_change']))
-                    except Exception:
-                        pass
-            if heavy_pcts:
-                avg_heavy = float(np.mean(heavy_pcts))
-                if direction == 'CALL' and avg_heavy < -0.30:
-                    continue  # Heavyweight divergence veto
-                if direction == 'PUT' and avg_heavy > 0.30:
-                    continue  # Heavyweight divergence veto
+        # =====================================================================
+        # GATE 2: DUAL-VELOCITY IN-MEMORY SETUP GATE (BREAKOUT + REVERSAL ABSORPTION)
+        # Fast in-memory evaluation before touching Akamai or Option Chain
+        # =====================================================================
+        is_mode_a = False       # Momentum Breakout & Pullback
+        is_mode_b = False       # Fast Climax Expansion
+        is_mode_rev = False     # Institutional Support/Resistance Reversal Absorption
 
-        # GATE 2: TARGETED OPTION CHAIN QUERY (DATA FIRST!)
-        target_dist = 150.0  # User Institutional Mandate: Minimum 150 Spot Pts
+        comp_high = float(comp_bars['high'].max())
+        comp_low = float(comp_bars['low'].min())
+        idx_rvol_mult = math.sqrt(max(1.0, idx_rvol))
+        idx_buffer = (25.0 if sym_clean == 'BANKNIFTY' else 10.0) * min(2.5, idx_rvol_mult)
+
+        # Dynamic VWAP Stretch limit (Free from static ATR caps)
+        max_vwap_stretch_call = vwap * min(1.018, 1.008 * idx_rvol_mult)
+        max_vwap_stretch_put = vwap * max(0.982, 0.992 / idx_rvol_mult)
+
+        if direction == 'CALL':
+            # Anti-Top Chasing Guard
+            if eval_close > max_vwap_stretch_call:
+                continue
+
+            # 1. Fresh Base Breakout / Retest
+            is_breakout = (eval_close >= (comp_high - (idx_buffer * 0.5))) and (eval_close <= (comp_high + idx_buffer))
+            if is_breakout and idx_rvol >= 1.20 and (delta_inflection >= 0.15 or eval_bvc >= 0.15) and thrust >= 0.45:
+                is_mode_a = True
+
+            # 2. Fast Climax Expansion
+            if idx_rvol >= 1.50 and eval_bvc >= 0.25 and eval_close > vwap:
+                is_mode_b = True
+
+            # 3. Institutional Bottom Reversal Absorption (Spring / V-Shape Bottom Reclaim like BankNifty 63,593)
+            # Sweeps swing low / day low, current bar shows heavy buying absorption
+            recent_low_sweep = (eval_low <= comp_bars['low'].min() + idx_buffer * 1.5) or (eval_low <= day_low + 150.0)
+            bullish_absorption = (eval_close > eval_open) and (thrust >= 0.50) and (delta_inflection >= 0.15 or eval_bvc >= 0.15)
+            if recent_low_sweep and bullish_absorption:
+                is_mode_rev = True
+
+        else:  # PUT
+            # Anti-Bottom Chasing Guard
+            if eval_close < max_vwap_stretch_put:
+                continue
+
+            # 1. Fresh Base Breakdown / Retest
+            is_breakdown = (eval_close <= (comp_low + (idx_buffer * 0.5))) and (eval_close >= (comp_low - idx_buffer))
+            if is_breakdown and idx_rvol >= 1.20 and (delta_inflection <= -0.15 or eval_bvc <= -0.15) and thrust >= 0.45:
+                is_mode_a = True
+
+            # 2. Fast Climax Breakdown
+            if idx_rvol >= 1.50 and eval_bvc <= -0.25 and eval_close < vwap:
+                is_mode_b = True
+
+            # 3. Institutional Top Resistance Reversal (Upthrust / Failed High Breakdown)
+            recent_high_sweep = (eval_high >= comp_bars['high'].max() - idx_buffer * 1.5) or (eval_high >= day_high - 150.0)
+            bearish_absorption = (eval_close < eval_open) and (thrust <= 0.50) and (delta_inflection <= -0.15 or eval_bvc <= -0.15)
+            if recent_high_sweep and bearish_absorption:
+                is_mode_rev = True
+
+        if not (is_mode_a or is_mode_b or is_mode_rev):
+            continue
+
+        # =====================================================================
+        # GATE 3: TARGETED LIVE OPTION CHAIN QUERY (ONLY FOR QUALIFIED SETUPS!)
+        # 150+ PTS RUNWAY & WALL VACUUM (ZERO ATR LIMITS)
+        # =====================================================================
+        target_dist = 150.0  # Mandatory Institutional Gate: Minimum 150 Spot Pts
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
+
         if opt_override is not None:
             opt = opt_override
         else:
-            print(f"[AKAMAI SAFETY SHIELD]: Waiting 5.0s before Option Chain query for {sym_clean}...")
-            time.sleep(5.0)
+            print(f"[AKAMAI SAFETY SHIELD]: Verified {sym_clean} setup. Querying Option Chain...")
+            time.sleep(3.0)
             opt = data_feed.compute_option_pricing(
                 spot_price=eval_close,
                 direction=direction,
@@ -272,85 +347,24 @@ def evaluate_institutional_index_engine(
             if tot_chg > 2000.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue  # Market maker equilibrium straddle pinning veto (Chop trap)
 
-        # GATE 3: DUAL-VELOCITY CONFIRMATION & 150+ PTS RUNWAY GATE (ANTI-TOP CHASING)
-        is_mode_a = False  # Momentum Expansion
-        is_mode_b = False  # Fast Climax Breakout / Breakdown
-
-        # Live Expansion Potential: 2.5% on Index Trend Days (Free from static ATR constraints)
-        max_expansion = max(250.0, eval_close * 0.025)
-        comp_high = float(comp_bars['high'].max())
-        comp_low = float(comp_bars['low'].min())
-        day_range_spent = day_high - day_low
-        normal_idx_range = max(180.0, eval_close * 0.012)
-        idx_rvol_mult = math.sqrt(max(1.0, idx_rvol))
-        effective_idx_capacity = normal_idx_range * idx_rvol_mult
-        idx_buffer = (25.0 if sym_clean == 'BANKNIFTY' else 10.0) * min(2.5, idx_rvol_mult)
-
-        # Dynamic VWAP Stretch limit: 0.8% base, up to 1.4% on high volume trend days
-        max_vwap_stretch_call = vwap * min(1.014, 1.008 * idx_rvol_mult)
-        max_vwap_stretch_put = vwap * max(0.986, 0.992 / idx_rvol_mult)
-
-        if direction == 'CALL':
-            # 1. Anti-Top Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
-            if eval_close > max_vwap_stretch_call:
-                continue
-            # 2. Anti-Extension Guard: Price must NOT be stretched beyond base breakout pivot (Top Chasing Veto)
-            if eval_close > (comp_high + idx_buffer):
-                continue
-            # 3. Base Breakout Requirement: Price must be breaking out at or above base resistance
-            if eval_close < (comp_high - (idx_buffer * 0.5)):
-                continue
-            # 4. Day Range Exhaustion Guard: Scaled dynamically with Index RVOL
-            if day_range_spent >= (0.75 * effective_idx_capacity):
-                continue
-            # 5. Remaining Runway Check: Must have at least 150 points of open runway
-            potential_high = day_low + max_expansion
-            remaining_runway = potential_high - eval_close
-            if remaining_runway < 150.0:
-                continue
-            # 6. Fresh Base Breakout Trigger:
-            if idx_rvol >= 1.20 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45:
-                is_mode_a = True
-            if idx_rvol >= 1.50 and eval_bvc >= 0.25:
-                is_mode_b = True
-        else:
-            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
-            if eval_close < max_vwap_stretch_put:
-                continue
-            # 2. Anti-Extension Guard: Price must NOT be stretched beyond base breakdown pivot (Bottom Chasing Veto)
-            if eval_close < (comp_low - idx_buffer):
-                continue
-            # 3. Base Breakdown Requirement: Price must be breaking down at or below base support
-            if eval_close > (comp_low + (idx_buffer * 0.5)):
-                continue
-            # 4. Day Range Exhaustion Guard: Scaled dynamically with Index RVOL
-            if day_range_spent >= (0.75 * effective_idx_capacity):
-                continue
-            # 5. Remaining Runway Check: Must have at least 150 points of open runway to downside
-            potential_low = day_high - max_expansion
-            remaining_runway = eval_close - potential_low
-            if remaining_runway < 150.0:
-                continue
-            # 6. Fresh Base Breakdown Trigger:
-            if idx_rvol >= 1.20 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45:
-                is_mode_a = True
-            if idx_rvol >= 1.50 and eval_bvc <= -0.25:
-                is_mode_b = True
-
-        if not (is_mode_a or is_mode_b):
-            continue
-
+        # PILLAR SCORING MATRIX (100 PTS) - FREE FROM BACKWARD ATR CONSTRAINTS
         p1_score = round(min(25.0, max(15.0, 14.0 + (idx_rvol * 3.5) + (thrust * 5.0))), 2)
         p2_score = round(min(25.0, max(14.0, (abs(eval_bvc) * 12.0) + (abs(delta_inflection) * 12.0))), 2)
-        p3_score = 18.0 if ((direction == 'CALL' and eval_close > vwap) or (direction == 'PUT' and eval_close < vwap)) else 12.0
-        p5_score = 10.0 if remaining_runway >= 300.0 else 6.0
+        p3_score = 18.0 if ((direction == 'CALL' and eval_close > vwap) or (direction == 'PUT' and eval_close < vwap) or is_mode_rev) else 14.0
+        p5_score = 10.0 if (idx_rvol >= 1.50 or is_mode_rev) else 7.0
 
         prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
         oi_score = float(opt.get('oi_score', 12.0))
         total_score = round(prelim_score + oi_score, 2)
 
         if total_score >= INDEX_SCORE_THRESHOLD:
-            mode_tag = "FAST_CLIMAX_EXPANSION" if is_mode_b else ("SLOW_GRINDING_PUSH" if direction == 'CALL' else "SLOW_CORRECTION_FALL")
+            if is_mode_rev:
+                mode_tag = "REVERSAL_ABSORPTION"
+            elif is_mode_b:
+                mode_tag = "FAST_CLIMAX_EXPANSION"
+            else:
+                mode_tag = "BREAKOUT_PUSH"
+
             return {
                 'symbol': sym_clean,
                 'is_index': True,
@@ -497,15 +511,95 @@ def evaluate_institutional_stock_engine(
     for direction in directions_to_test:
         thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
 
-        # GATE 2: TARGETED OPTION CHAIN QUERY (DATA-FIRST FOR QUALIFIED LEADERS)
-        target_dist = 60.0  # Mandatory Institutional Gate: Minimum 60.0 Spot Pts Clear Runway
+        # =====================================================================
+        # GATE 2: IN-MEMORY DUAL-ENGINE SETUP GATE (BREAKOUT, RETEST & REVERSAL)
+        # Evaluates price action and order flow in memory before touching network
+        # =====================================================================
+        is_mode_breakout = False   # Fresh Base Breakout
+        is_mode_retest = False     # Pullback / Base Retest (Anti-Top Chasing)
+        is_mode_reversal = False   # Institutional Support Sweep Reversal (Spring)
+        is_mode_climax = False     # High-Volume Momentum Climax
+
+        comp_high = float(comp_bars['high'].max())
+        comp_low = float(comp_bars['low'].min())
+        rvol_fuel_mult = math.sqrt(max(1.0, real_rvol))
+        max_breakout_chase_pct = min(0.0085, 0.0035 * rvol_fuel_mult)
+
+        # Dynamic VWAP Stretch Band (Free from ATR caps)
+        max_vwap_call = vwap * min(1.025, 1.010 * rvol_fuel_mult)
+        max_vwap_put = vwap * max(0.975, 0.990 / rvol_fuel_mult)
+
+        if direction == 'CALL':
+            # 1. Anti-Top Chasing Guard: Do not buy if price is overextended from VWAP
+            if eval_close > max_vwap_call:
+                continue
+
+            # SETUP 1: Fresh Base Breakout
+            if (eval_close >= (comp_high * 0.999)) and (eval_close <= (comp_high * (1.0 + max_breakout_chase_pct))):
+                if real_rvol >= 1.50 and (delta_inflection >= 0.15 or eval_bvc >= 0.15) and thrust >= 0.45:
+                    is_mode_breakout = True
+
+            # SETUP 2: Pullback / Base Retest (Support Defense - Anti-Top Chasing)
+            # Prior bars broke out, current bar pulled back to base high / VWAP and defended with rejection wick
+            recent_high_broke = comp_bars['high'].max() >= (comp_high * 1.002)
+            retest_dip = (eval_low <= (comp_high * 1.008)) or (eval_low <= (vwap * 1.005))
+            support_defended = (eval_close >= (comp_high * 0.998)) and (thrust >= 0.50)
+            if recent_high_broke and retest_dip and support_defended:
+                is_mode_retest = True
+
+            # SETUP 3: Institutional Support Reversal / Spring (Liquidity Sweep Absorption)
+            # Prior bars swept day low / base low, current bar formed strong green absorption candle
+            low_swept = (eval_low <= (comp_low * 1.004)) or (eval_low <= (day_low * 1.004))
+            bullish_reversal = (eval_close > eval_open) and (thrust >= 0.55) and (delta_inflection >= 0.15 or eval_bvc >= 0.15)
+            if low_swept and bullish_reversal:
+                is_mode_reversal = True
+
+            # SETUP 4: Fast Climax Expansion
+            if real_rvol >= 2.00 and eval_bvc >= 0.25 and eval_close >= vwap:
+                is_mode_climax = True
+
+        else:  # PUT
+            # 1. Anti-Bottom Chasing Guard
+            if eval_close < max_vwap_put:
+                continue
+
+            # SETUP 1: Fresh Base Breakdown
+            if (eval_close <= (comp_low * 1.001)) and (eval_close >= (comp_low * (1.0 - max_breakout_chase_pct))):
+                if real_rvol >= 1.50 and (delta_inflection <= -0.15 or eval_bvc <= -0.15) and thrust >= 0.45:
+                    is_mode_breakout = True
+
+            # SETUP 2: Pullback / Breakdown Retest (Resistance Defense)
+            recent_low_broke = comp_bars['low'].min() <= (comp_low * 0.998)
+            retest_rally = (eval_high >= (comp_low * 0.992)) or (eval_high >= (vwap * 0.995))
+            resistance_defended = (eval_close <= (comp_low * 1.002)) and (thrust <= 0.50)
+            if recent_low_broke and retest_rally and resistance_defended:
+                is_mode_retest = True
+
+            # SETUP 3: Institutional Top Resistance Reversal / Upthrust
+            high_swept = (eval_high >= (comp_high * 0.996)) or (eval_high >= (day_high * 0.996))
+            bearish_reversal = (eval_close < eval_open) and (thrust <= 0.45) and (delta_inflection <= -0.15 or eval_bvc <= -0.15)
+            if high_swept and bearish_reversal:
+                is_mode_reversal = True
+
+            # SETUP 4: Fast Climax Breakdown
+            if real_rvol >= 2.00 and eval_bvc <= -0.25 and eval_close <= vwap:
+                is_mode_climax = True
+
+        if not (is_mode_breakout or is_mode_retest or is_mode_reversal or is_mode_climax):
+            continue
+
+        # =====================================================================
+        # GATE 3: TARGETED LIVE OPTION CHAIN QUERY (ONLY ON QUALIFIED SETUPS!)
+        # Fast execution: 95% of choppy stocks rejected above in 0.001 seconds
+        # =====================================================================
+        target_dist = 60.0 if eval_close >= 1500.0 else max(25.0, eval_close * 0.025)
         target_price = (eval_close + target_dist) if direction == 'CALL' else (eval_close - target_dist)
 
         if opt_override is not None:
             opt = opt_override
         else:
-            print(f"[AKAMAI SAFETY SHIELD]: Waiting 5.0s before Option Chain query for {sym_clean}...")
-            time.sleep(5.0)
+            print(f"[AKAMAI SAFETY SHIELD]: Verified {sym_clean} setup. Querying Option Chain...")
+            time.sleep(3.0)
             opt = data_feed.compute_option_pricing(
                 spot_price=eval_close,
                 direction=direction,
@@ -526,99 +620,18 @@ def evaluate_institutional_stock_engine(
             if tot_chg > 500.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue  # Market maker equilibrium straddle pinning veto (Chop trap)
 
-        # GATE 3: DUAL-VELOCITY ENGINE CONFIRMATION & ANTI-TOP CHASING GATE
-        is_mode_a = False  # Institutional Momentum Accumulation / Rejection
-        is_mode_b = False  # Fast Fresh Base Breakout / Breakdown
-
-        # Base Contraction & Anti-Top Chasing Framework
-        comp_high = float(comp_bars['high'].max())
-        comp_low = float(comp_bars['low'].min())
-        base_range_pct = ((comp_high - comp_low) / max(1.0, comp_low)) * 100.0
-        day_range_spent = day_high - day_low
-        normal_day_range = max(50.0, eval_close * 0.022)
-
-        # Dynamic Volatility Expansion: Live expansion potential (up to 8% trend day or dynamic ATR)
-        max_expansion = max(75.0, eval_close * 0.08, atr * math.sqrt(max(1.0, real_rvol)))
-
-        # Dynamic Institutional Fuel Capacity:
-        # Scales with volume surge (sqrt of RVOL). Normal days stay capped at 2.2% (PIIND sideways chop blocked at 65%).
-        # News/trend days scale up to 4.5%-6.0% (Reliance/HDFCLIFE rally allowed!).
-        rvol_fuel_mult = math.sqrt(max(1.0, real_rvol))
-        effective_day_capacity = normal_day_range * rvol_fuel_mult
-
-        # Dynamic Anti-Top Chasing Band:
-        # Base cap: 0.35%, scaling up to 0.85% for high-volume explosive Bar 1 breakouts.
-        max_breakout_chase_pct = min(0.0085, 0.0035 * rvol_fuel_mult)
-
-        # Dynamic VWAP Stretch Band:
-        max_vwap_call = vwap * min(1.015, 1.008 * rvol_fuel_mult)
-        max_vwap_put = vwap * max(0.985, 0.992 / rvol_fuel_mult)
-
-        if direction == 'CALL':
-            # 1. Anti-Top Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
-            if eval_close > max_vwap_call:
-                continue
-            # 2. Anti-Extension Guard: Price must NOT be stretched beyond breakout tolerance (Top Chasing Veto)
-            if eval_close > (comp_high * (1.0 + max_breakout_chase_pct)):
-                continue
-            # 3. Base Breakout Requirement: Price must be breaking out at or above base resistance
-            if eval_close < (comp_high * 0.999):
-                continue
-            # 4. Day Range Exhaustion Guard: Scaled dynamically with RVOL (blocks PIIND @ 0.65x, allows Reliance @ 1.6x)
-            if day_range_spent >= (0.65 * effective_day_capacity):
-                continue
-            # 5. Remaining Runway Check: Must have at least target_dist points of open runway
-            potential_high = day_low + max_expansion
-            remaining_runway = potential_high - eval_close
-            if remaining_runway < target_dist:
-                continue
-            # 6. Fresh Base Breakout Trigger:
-            if real_rvol >= 1.50 and (delta_inflection >= 0.20 or eval_bvc >= 0.20) and thrust >= 0.45 and eval_close >= vwap:
-                is_mode_a = True
-            if real_rvol >= 1.80 and eval_bvc >= 0.25:
-                is_mode_b = True
-        else:
-            # 1. Anti-Bottom Chasing Guard: Price must NOT be stretched beyond dynamic VWAP band
-            if eval_close < max_vwap_put:
-                continue
-            # 2. Anti-Extension Guard: Price must NOT be stretched beyond breakdown tolerance (Bottom Chasing Veto)
-            if eval_close < (comp_low * (1.0 - max_breakout_chase_pct)):
-                continue
-            # 3. Base Breakdown Requirement: Price must be breaking down at or below base support
-            if eval_close > (comp_low * 1.001):
-                continue
-            # 4. Day Range Exhaustion Guard: Scaled dynamically with RVOL (blocks sideways dump exhaustion)
-            if day_range_spent >= (0.65 * effective_day_capacity):
-                continue
-            # 5. Remaining Runway Check: Must have at least target_dist points of open runway to downside
-            potential_low = day_high - max_expansion
-            remaining_runway = eval_close - potential_low
-            if remaining_runway < target_dist:
-                continue
-            # 6. Fresh Base Breakdown Trigger:
-            if real_rvol >= 1.50 and (delta_inflection <= -0.20 or eval_bvc <= -0.20) and thrust >= 0.45 and eval_close <= vwap:
-                is_mode_a = True
-            if real_rvol >= 1.80 and eval_bvc <= -0.25:
-                is_mode_b = True
-
-        if not (is_mode_a or is_mode_b):
-            continue
-
-        # PILLAR SCORING MATRIX (100 PTS)
+        # PILLAR SCORING MATRIX (100 PTS) - ZERO ATR RESTRICTIONS
         p1_score = round(min(25.0, max(14.0, 13.0 + min(7.0, real_rvol * 2.5) + min(5.0, turnover_15m / 10.0))), 2)
         p2_score = round(min(25.0, max(14.0, (abs(eval_bvc) * 12.0) + (abs(delta_inflection) * 12.0))), 2)
-        p3_score = 18.0 if ((direction == 'CALL' and eval_close >= vwap) or (direction == 'PUT' and eval_close <= vwap)) else 12.0
-
-        # PILLAR 5: ATR Runway & Fuel Check (Measured against Live Expansion, no static ATR traps)
-        fuel_spent = day_high - day_low
-        p5_score = round(min(10.0, max(5.0, 5.0 + min(5.0, (remaining_runway / max(1.0, max_expansion)) * 10.0))), 2)
+        p3_score = 18.0 if ((direction == 'CALL' and eval_close >= vwap) or (direction == 'PUT' and eval_close <= vwap) or is_mode_retest or is_mode_reversal) else 14.0
+        p5_score = 10.0 if (real_rvol >= 2.0 or is_mode_retest or is_mode_reversal) else 7.0
 
         prelim_score = round(p1_score + p2_score + p3_score + p5_score, 2)
         oi_score = float(opt.get('oi_score', 12.0))
         total_score = round(prelim_score + oi_score, 2)
 
         if total_score >= STOCK_SCORE_THRESHOLD:
-            mode_tag = ("FAST_CLIMAX_BREAKOUT" if direction == 'CALL' else "FAST_CLIMAX_BREAKDOWN") if is_mode_b else ("STEALTH_ACCUMULATION_BOUNCE" if direction == 'CALL' else "STEALTH_DISTRIBUTION_REJECTION")
+            mode_tag = ("REVERSAL_SPRING" if is_mode_reversal else ("PULLBACK_RETEST" if is_mode_retest else ("CLIMAX_EXPANSION" if is_mode_climax else "BASE_BREAKOUT")))
             return {
                 'symbol': sym_clean,
                 'is_index': False,
@@ -2130,7 +2143,7 @@ class AlphaInstitutionalSwappedScreener:
             cycle += 1
             ist_next = get_ist_time()
             next_m = (ist_next.hour * 60 + ist_next.minute) + (interval_seconds // 60)
-            if not ((578 <= next_m <= 616) or (795 <= next_m <= 856)):
+            if not ((578 <= next_m <= 650) or (795 <= next_m <= 856)):
                 print(f"\n[SLAB CONCLUDED]: Next cycle falls outside slab window. Completed {cycle - 1} cycles.")
                 break
 

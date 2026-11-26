@@ -95,7 +95,7 @@ def is_in_active_trading_slab(ist_time: datetime.datetime) -> bool:
     if ist_time.weekday() >= 5:
         return False
     tot_mins = ist_time.hour * 60 + ist_time.minute
-    slab1 = (570 <= tot_mins <= 615)
+    slab1 = (570 <= tot_mins <= 650)
     slab2 = (795 <= tot_mins <= 855)
     return slab1 or slab2
 
