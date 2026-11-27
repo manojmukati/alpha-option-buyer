@@ -802,22 +802,21 @@ class LiveMarketDataFeed:
             if not is_buying_squeeze and (tot_upper_ce_chg >= ambush_min_chg or tot_upper_ce_chg >= ambush_min_chg_shares) and tot_upper_ce_chg > 2.0 * max(50.0, tot_lower_pe_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
-            # Check 3: Immediate Active Call Resistance Wall (+1 to Target Runway)
+            # Check 3: Immediate Active Call Resistance Wall (+1 to +2 strikes runway)
             call_wall_detected = False
             wall_strike_hit = None
-            target_barrier = max(float(target_price), ref_spot + 2.5 * strike_step) if target_price else (ref_spot + 2.5 * strike_step)
-            for s in upper_4:
-                if s > target_barrier + 0.25 * strike_step:
-                    continue
+            immediate_target_dist = 60.0 if (is_index and sym_clean == 'BANKNIFTY') else (35.0 if is_index else max(15.0, 2.0 * strike_step))
+            immediate_upper = [s for s in upper_4[:2] if (s - ref_spot) <= immediate_target_dist]
+            for s in immediate_upper:
                 s_ce = strike_data[s]['ce_oi']
                 s_pe = strike_data[s]['pe_oi']
                 s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0)
                 
-                # Active Resistance Wall: Call Writing is adding resistance in the immediate runway (+1 to +3 strikes)
-                if s_ce_chg > 0 and (s_ce >= min_wall_oi or s_ce >= min_wall_oi_shares or s in upper_4[:2]):
-                    if (s_ce > 1.20 * max(20.0, s_pe)) or (s_ce_chg > 1.2 * max(10.0, s_pe_chg)):
+                # Active Resistance Wall: Call Writing is adding resistance in the immediate runway (+1 to +2 strikes)
+                if s_ce_chg > 0 and (s_ce >= min_wall_oi or s_ce >= min_wall_oi_shares):
+                    if (s_ce > 1.35 * max(50.0, s_pe)) and (s_ce_chg > 1.2 * max(10.0, s_pe_chg)):
                         if s_ce_vol >= 2.5 * s_ce:
                             continue  # Squeeze volume exception (forced short covering)
                         call_wall_detected = True
@@ -897,22 +896,21 @@ class LiveMarketDataFeed:
             if not is_buying_squeeze and (tot_lower_pe_chg >= ambush_min_chg or tot_lower_pe_chg >= ambush_min_chg_shares) and tot_lower_pe_chg > 2.0 * max(50.0, tot_upper_ce_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
-            # Check 3: Immediate Active Put Support Wall (-1 to Target Runway)
+            # Check 3: Immediate Active Put Support Wall (-1 to -2 strikes runway)
             put_wall_detected = False
             wall_strike_hit = None
-            target_barrier = min(float(target_price), ref_spot - 2.5 * strike_step) if target_price else (ref_spot - 2.5 * strike_step)
-            for s in lower_4:
-                if s < target_barrier - 0.25 * strike_step:
-                    continue
+            immediate_target_dist = 60.0 if (is_index and sym_clean == 'BANKNIFTY') else (35.0 if is_index else max(15.0, 2.0 * strike_step))
+            immediate_lower = [s for s in lower_4[-2:] if (ref_spot - s) <= immediate_target_dist]
+            for s in immediate_lower:
                 s_pe = strike_data[s]['pe_oi']
                 s_ce = strike_data[s]['ce_oi']
                 s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0)
                 
-                # Active Support Wall: Put Writing is actively adding support in the immediate runway (-1 to -3 strikes)
-                if s_pe_chg > 0 and (s_pe >= min_wall_oi or s_pe >= min_wall_oi_shares or s in lower_4[-2:]):
-                    if (s_pe > 1.20 * max(20.0, s_ce)) or (s_pe_chg > 1.2 * max(10.0, s_ce_chg)):
+                # Active Support Wall: Put Writing is actively adding support in the immediate runway (-1 to -2 strikes)
+                if s_pe_chg > 0 and (s_pe >= min_wall_oi or s_pe >= min_wall_oi_shares):
+                    if (s_pe > 1.35 * max(50.0, s_ce)) and (s_pe_chg > 1.2 * max(10.0, s_ce_chg)):
                         if s_pe_vol >= 2.5 * s_pe:
                             continue  # Squeeze volume exception (panic breakdown liquidation)
                         put_wall_detected = True

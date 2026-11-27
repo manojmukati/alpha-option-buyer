@@ -3093,8 +3093,8 @@ def check_github_actions_concurrency_guard() -> bool:
 
 
 if __name__ == '__main__':
-    from alpha_profile_oi_system.alpha_institutional_swapped_screener import AlphaInstitutionalSwappedScreener
-    screener = AlphaInstitutionalSwappedScreener()
+    from alpha_profile_oi_system.alpha_5pillar_institutional_engine import Alpha5PillarInstitutionalEngine
+    screener = Alpha5PillarInstitutionalEngine()
     if '--backtest' in sys.argv:
         screener.run_authoritative_5day_backtest()
     elif '--slab-loop' in sys.argv:
