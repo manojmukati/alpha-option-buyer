@@ -1,6 +1,16 @@
 {
-  "date": "2026-11-26",
-  "dispatched": {},
-  "eod_journal_dispatched": true,
-  "eod_dispatched_time": "03:35:40 PM IST"
+  "date": "2026-11-27",
+  "dispatched": {
+    "dispatched_2026-11-27_morning_APLAPOLLO": 1795752767.0894818,
+    "APLAPOLLO": 1795752767.0894825,
+    "slab_stocks_2026-11-27_morning": [
+      "APLAPOLLO",
+      "POLYCAB",
+      "COFORGE"
+    ],
+    "dispatched_2026-11-27_morning_POLYCAB": 1795753090.6496432,
+    "POLYCAB": 1795753090.6496444,
+    "dispatched_2026-11-27_morning_COFORGE": 1795755453.8979115,
+    "COFORGE": 1795755453.8979137
+  }
 }
