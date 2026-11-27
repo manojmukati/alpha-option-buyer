@@ -175,8 +175,8 @@ def compute_volume_profile(df_slice: pd.DataFrame, daily_atr: float, is_index: b
     eval_bar = df_slice.iloc[-2] if len(df_slice) >= 2 else df_slice.iloc[-1]
 
     poc = float(eval_bar['poc']) if ('poc' in eval_bar and pd.notna(eval_bar['poc']) and float(eval_bar['poc']) > 0) else float(tp_all.median())
-    vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 1.0 * std_dev, 2)
-    val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 1.0 * std_dev, 2)
+    vah = float(eval_bar['vah']) if ('vah' in eval_bar and pd.notna(eval_bar['vah']) and float(eval_bar['vah']) > 0) else round(vwap + 0.68 * std_dev, 2)
+    val = float(eval_bar['val']) if ('val' in eval_bar and pd.notna(eval_bar['val']) and float(eval_bar['val']) > 0) else round(vwap - 0.68 * std_dev, 2)
 
     return {
         'vwap': round(vwap, 2),
@@ -317,7 +317,7 @@ def evaluate_5pillar_stock_engine(
             # Hard Gate: BVC delta MUST be strictly positive, and delta inflection or cumulative delta positive
             if eval_bvc < 0.15:
                 continue
-            if delta_inflection < 0.10 and bvc_cum_ratio < 0.10:
+            if delta_inflection < 0.05 and bvc_cum_ratio < 0.05 and eval_bvc < 0.35:
                 continue
             if eval_bvc <= 0.0 or bvc_cum_ratio <= 0.0:
                 continue
@@ -326,7 +326,7 @@ def evaluate_5pillar_stock_engine(
             # Hard Gate: BVC delta MUST be strictly negative, and delta inflection or cumulative delta negative
             if eval_bvc > -0.15:
                 continue
-            if delta_inflection > -0.10 and bvc_cum_ratio > -0.10:
+            if delta_inflection > -0.05 and bvc_cum_ratio > -0.05 and eval_bvc > -0.35:
                 continue
             if eval_bvc >= 0.0 or bvc_cum_ratio >= 0.0:
                 continue
@@ -520,10 +520,10 @@ def evaluate_5pillar_index_engine(
     median_rng = float(comp_rngs.median()) if len(comp_rngs) > 0 else (45.0 if sym_clean == 'BANKNIFTY' else 15.0)
     idx_rvol = round(bar_rng / max(15.0 if sym_clean == 'BANKNIFTY' else 8.0, median_rng), 2)
 
-    if idx_rvol < 1.20:
+    if idx_rvol < 1.05 and bar_rng < (1.35 * min_idx_rng):
         return None
 
-    p1_score = round(min(20.0, 10.0 + min(10.0, (idx_rvol - 1.20) * 8.0)), 2)
+    p1_score = round(min(20.0, 10.0 + min(10.0, max(0.0, (bar_rng - min_idx_rng) / min_idx_rng * 10.0))), 2)
 
     # =========================================================================
     # PILLAR 2: TRUE RANGE CVD DELTA GATE (ZERO abs())
@@ -581,7 +581,7 @@ def evaluate_5pillar_index_engine(
         if direction == 'CALL':
             if eval_bvc < 0.15:
                 continue
-            if delta_inflection < 0.10 and bvc_cum_ratio < 0.10:
+            if delta_inflection < 0.05 and bvc_cum_ratio < 0.05 and eval_bvc < 0.35:
                 continue
             if eval_bvc <= 0.0 or bvc_cum_ratio <= 0.0:
                 continue
@@ -589,7 +589,7 @@ def evaluate_5pillar_index_engine(
         else:  # PUT
             if eval_bvc > -0.15:
                 continue
-            if delta_inflection > -0.10 and bvc_cum_ratio > -0.10:
+            if delta_inflection > -0.05 and bvc_cum_ratio > -0.05 and eval_bvc > -0.35:
                 continue
             if eval_bvc >= 0.0 or bvc_cum_ratio >= 0.0:
                 continue
