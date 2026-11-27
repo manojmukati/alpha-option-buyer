@@ -521,20 +521,61 @@ def evaluate_5pillar_stock_engine(
         p4_score = round(min(25.0, max(12.0, float(opt.get('oi_score', 14.0)) * 1.35)), 2)
 
         # ---------------------------------------------------------------------
-        # PILLAR 5: ADVERSE EXECUTION GUARD (SANITY TIMING - NOT A CANDLE SHAPE VETO)
-        # Prevents taking trades into an active freefall collapse (CALL) or vertical spike (PUT).
-        # Signal is 100% driven by Pillars 1-4 Data!
+        # PILLAR 5: EXECUTION MOMENTUM IMPULSE & TIMING GUARD
+        # Evaluated strictly AFTER Pillars 1-4 Data have all fully passed!
+        # Prevents entries on lazy, compressed doji drift that suffers theta decay.
+        # Requires an active institutional volatility impulse (>= 1.30x median range & >= 60% solid body).
         # ---------------------------------------------------------------------
+        comp_ranges = comp_bars['high'] - comp_bars['low']
+        median_bar_rng = float(comp_ranges.median()) if len(comp_ranges) > 0 else bar_rng
+        median_bar_rng = max(0.05, median_bar_rng)
+        range_expansion = round(bar_rng / median_bar_rng, 2)
+
+        body_rng = abs(eval_close - eval_open)
+        body_ratio = round(body_rng / max(0.01, bar_rng), 2)
+
+        # Adverse collapse check (never buy a freefall dump or sell a vertical squeeze)
         if direction == 'CALL':
             is_dead_low_dump = (eval_close <= (eval_low + 0.15 * bar_rng)) and (eval_close < eval_open * 0.995)
             if is_dead_low_dump:
                 continue
-            p5_score = 5.0 if eval_close >= eval_open else 2.0
         else:  # PUT
             is_dead_high_spike = (eval_close >= (eval_high - 0.15 * bar_rng)) and (eval_close > eval_open * 1.005)
             if is_dead_high_spike:
                 continue
-            p5_score = 5.0 if eval_close <= eval_open else 2.0
+
+        # Institutional Momentum Impulse Verification:
+        if is_breakout:
+            # 1. Range Expansion: Candle must show institutional volatility expansion (>= 1.30x median range OR >= 0.35% bar range)
+            if range_expansion < 1.30 and bar_rng < (eval_close * 0.0035):
+                continue  # Sluggish / compressed drift -> VETO to eliminate theta decay!
+
+            # 2. Solid Directional Body: Minimum 60% solid body (no indecisive dojis / long-wick chop)
+            if body_ratio < 0.60:
+                continue  # Indecisive candle / spinning top -> VETO!
+
+            # 3. Strict Directional Candle Close
+            if direction == 'CALL' and eval_close <= eval_open:
+                continue  # Breakout CALL must be a solid green expansion bar!
+            if direction == 'PUT' and eval_close >= eval_open:
+                continue  # Breakdown PUT must be a solid red expansion bar!
+
+        elif is_reversal:
+            # Wyckoff Spring / Upthrust Reversal Body & Wick Verification:
+            if direction == 'CALL':
+                # Spring: Price swept lows and closed strong green in the upper 40% of the bar
+                closed_in_upper = (eval_close >= (eval_high - 0.40 * bar_rng)) and (eval_close > eval_open)
+                if not closed_in_upper:
+                    continue
+            else:  # PUT
+                # Upthrust: Price swept highs and closed strong red in the lower 40% of the bar
+                closed_in_lower = (eval_close <= (eval_low + 0.40 * bar_rng)) and (eval_close < eval_open)
+                if not closed_in_lower:
+                    continue
+
+        # Pillar 5 Score: 0 to 5 pts (High-conviction impulse gets full 5.0 pts)
+        is_clean_impulse = (range_expansion >= 1.40 and body_ratio >= 0.65)
+        p5_score = 5.0 if is_clean_impulse else (4.0 if body_ratio >= 0.60 else 3.0)
 
         # =====================================================================
         # TOTAL 5-PILLAR INSTITUTIONAL SCORE CALCULATION
@@ -861,20 +902,60 @@ def evaluate_5pillar_index_engine(
         p4_score = round(min(25.0, max(12.0, float(opt.get('oi_score', 14.0)) * 1.35)), 2)
 
         # ---------------------------------------------------------------------
-        # PILLAR 5: ADVERSE EXECUTION GUARD (SANITY TIMING - NOT A CANDLE SHAPE VETO)
-        # Prevents taking trades into an active freefall collapse (CALL) or vertical spike (PUT).
-        # Signal is 100% driven by Pillars 1-4 Data!
+        # PILLAR 5: INDEX EXECUTION MOMENTUM IMPULSE & TIMING GUARD
+        # Evaluated strictly AFTER Pillars 1-4 Data have all fully passed!
+        # Prevents index entries on tight dead chop that decays premium.
+        # Requires an active index volatility impulse (>= 1.25x median range & >= 60% solid body).
         # ---------------------------------------------------------------------
+        comp_clean = df_slice.iloc[1:-2].tail(8) if len(df_slice) > 3 else df_slice.iloc[:-2]
+        comp_ranges = comp_clean['high'] - comp_clean['low']
+        median_idx_rng = float(comp_ranges.median()) if len(comp_ranges) > 0 else (45.0 if sym_clean == 'BANKNIFTY' else 15.0)
+        median_idx_rng = max(5.0, median_idx_rng)
+        idx_range_expansion = round(bar_rng / median_idx_rng, 2)
+
+        idx_body_rng = abs(eval_close - eval_open)
+        idx_body_ratio = round(idx_body_rng / max(0.5, bar_rng), 2)
+
+        # Adverse collapse check (never buy a freefall dump or sell a vertical squeeze)
         if direction == 'CALL':
             is_dead_low_dump = (eval_close <= (eval_low + 0.15 * bar_rng)) and (eval_close < eval_open * 0.997)
             if is_dead_low_dump:
                 continue
-            p5_score = 5.0 if eval_close >= eval_open else 2.0
         else:  # PUT
             is_dead_high_spike = (eval_close >= (eval_high - 0.15 * bar_rng)) and (eval_close > eval_open * 1.003)
             if is_dead_high_spike:
                 continue
-            p5_score = 5.0 if eval_close <= eval_open else 2.0
+
+        # Index Momentum Impulse Verification:
+        min_impulse_pts = 35.0 if sym_clean == 'BANKNIFTY' else 15.0
+        if is_breakout:
+            # 1. Range Expansion: Index candle must show momentum expansion (>= 1.25x median range OR >= min_impulse_pts)
+            if idx_range_expansion < 1.25 and bar_rng < min_impulse_pts:
+                continue  # Sluggish index drift -> VETO to eliminate theta decay!
+
+            # 2. Solid Directional Body: Minimum 60% solid body
+            if idx_body_ratio < 0.60:
+                continue  # Indecisive index doji -> VETO!
+
+            # 3. Strict Directional Close
+            if direction == 'CALL' and eval_close <= eval_open:
+                continue
+            if direction == 'PUT' and eval_close >= eval_open:
+                continue
+
+        elif is_reversal:
+            # Wyckoff Index Reversal Verification:
+            if direction == 'CALL':
+                closed_in_upper = (eval_close >= (eval_high - 0.40 * bar_rng)) and (eval_close > eval_open)
+                if not closed_in_upper:
+                    continue
+            else:  # PUT
+                closed_in_lower = (eval_close <= (eval_low + 0.40 * bar_rng)) and (eval_close < eval_open)
+                if not closed_in_lower:
+                    continue
+
+        is_clean_idx_impulse = (idx_range_expansion >= 1.35 and idx_body_ratio >= 0.65)
+        p5_score = 5.0 if is_clean_idx_impulse else (4.0 if idx_body_ratio >= 0.60 else 3.0)
 
         # =====================================================================
         # TOTAL 5-PILLAR INSTITUTIONAL SCORE CALCULATION
