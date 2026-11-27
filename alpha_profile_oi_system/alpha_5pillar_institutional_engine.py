@@ -333,24 +333,48 @@ def evaluate_5pillar_stock_engine(
             p2_score = round(min(25.0, (abs(eval_bvc) * 15.0) + (max(0.0, -delta_inflection) * 10.0)), 2)
 
         # ---------------------------------------------------------------------
-        # PILLAR 3 HARD GATE: WYCKOFF VOLUME PROFILE & VWAP ACCEPTANCE
+        # PILLAR 3 HARD GATE: WYCKOFF VOLUME PROFILE ACCEPTANCE & REVERSAL SETUP
+        # Dual-Setup Architecture:
+        # 1. Breakout / Expansion: Price accepted outside Value Area (CALL > VAH, PUT < VAL)
+        # 2. Institutional Reversal / Absorption: Price sweeps extreme and reverses with strong delta (CALL from Support/VAL, PUT from Resistance/VAH)
         # ---------------------------------------------------------------------
+        is_breakout = False
+        is_reversal = False
+
         if direction == 'CALL':
-            # Hard Gate: Price must be above VWAP, above or breaking VAH, and above POC
-            if not (eval_close > vwap and eval_close >= (vah * 0.998) and eval_close >= (poc * 0.998)):
+            # Setup 1: Fresh Base Breakout / Value Expansion
+            if eval_close > vwap and eval_close >= (vah * 0.998) and eval_close >= (poc * 0.998):
+                if eval_close <= (vwap * 1.020):  # Anti-top chasing guard
+                    is_breakout = True
+
+            # Setup 2: Institutional Support Sweep Reversal (Wyckoff Spring)
+            # Recent bars swept day low or recent base low, buyers absorb supply and reclaim back above VAL/VWAP
+            low_swept = (comp_bars['low'].tail(3).min() <= (day_low * 1.003)) or (eval_low <= (day_low * 1.003))
+            support_reclaimed = (eval_close >= (val * 0.998)) and (eval_close > eval_open)
+            buying_absorption = (eval_bvc >= 0.20) and (delta_inflection >= 0.10 or bvc_cum_ratio >= 0.10)
+            if low_swept and support_reclaimed and buying_absorption and eval_close <= (vwap * 1.010):
+                is_reversal = True
+
+            if not (is_breakout or is_reversal):
                 continue
-            # Anti-Top Chasing Guard: Do not buy if price is overextended > 2.0% above VWAP
-            if eval_close > (vwap * 1.020):
-                continue
-            p3_score = 25.0 if eval_close >= vah else 20.0
+            p3_score = 25.0 if is_breakout else 22.0
         else:  # PUT
-            # Hard Gate: Price must be below VWAP, below or breaking VAL, and below POC
-            if not (eval_close < vwap and eval_close <= (val * 1.002) and eval_close <= (poc * 1.002)):
+            # Setup 1: Fresh Base Breakdown / Value Expansion
+            if eval_close < vwap and eval_close <= (val * 1.002) and eval_close <= (poc * 1.002):
+                if eval_close >= (vwap * 0.980):  # Anti-bottom chasing guard
+                    is_breakout = True
+
+            # Setup 2: Institutional Resistance Sweep Reversal (Wyckoff Upthrust)
+            # Recent bars swept day high or recent base high, sellers dump and reject back below VAH/VWAP
+            high_swept = (comp_bars['high'].tail(3).max() >= (day_high * 0.997)) or (eval_high >= (day_high * 0.997))
+            resistance_rejected = (eval_close <= (vah * 1.002)) and (eval_close < eval_open)
+            selling_absorption = (eval_bvc <= -0.20) and (delta_inflection <= -0.10 or bvc_cum_ratio <= -0.10)
+            if high_swept and resistance_rejected and selling_absorption and eval_close >= (vwap * 0.990):
+                is_reversal = True
+
+            if not (is_breakout or is_reversal):
                 continue
-            # Anti-Bottom Chasing Guard: Do not short if price is overextended > 2.0% below VWAP
-            if eval_close < (vwap * 0.980):
-                continue
-            p3_score = 25.0 if eval_close <= val else 20.0
+            p3_score = 25.0 if is_breakout else 22.0
 
         # ---------------------------------------------------------------------
         # PILLAR 4 HARD GATE: LIVE OPTION CHAIN OI CONFLUENCE & RUNWAY
@@ -441,7 +465,8 @@ def evaluate_5pillar_stock_engine(
                 'pct_change': pct_change,
                 'verified_opt': opt,
                 'passed': True,
-                'tier_reason': f'ALPHA_5PILLAR_STOCK_{direction}_CONFIRMED'
+                'setup_mode': ("REVERSAL_SPRING" if (direction == 'CALL' and is_reversal) else ("REVERSAL_UPTHRUST" if is_reversal else "BASE_BREAKOUT")),
+                'tier_reason': f'ALPHA_5PILLAR_STOCK_{direction}_{("REVERSAL_SPRING" if (direction == "CALL" and is_reversal) else ("REVERSAL_UPTHRUST" if is_reversal else "BASE_BREAKOUT"))}_CONFIRMED'
             }
 
     return None
@@ -596,22 +621,48 @@ def evaluate_5pillar_index_engine(
             p2_score = round(min(25.0, (abs(eval_bvc) * 15.0) + (max(0.0, -delta_inflection) * 10.0)), 2)
 
         # ---------------------------------------------------------------------
-        # PILLAR 3 HARD GATE: WYCKOFF VOLUME PROFILE & VWAP ACCEPTANCE
+        # PILLAR 3 HARD GATE: WYCKOFF VOLUME PROFILE ACCEPTANCE & REVERSAL SETUP
+        # Dual-Setup Architecture: Breakout vs Institutional Reversal Absorption
         # ---------------------------------------------------------------------
+        is_breakout = False
+        is_reversal = False
+
         if direction == 'CALL':
-            if not (eval_close > vwap and eval_close >= (vah * 0.998)):
+            # Setup 1: Index Base Breakout / Value Expansion
+            if eval_close > vwap and eval_close >= (vah * 0.998):
+                if eval_close <= (vwap * 1.018):  # Anti-top chasing guard
+                    is_breakout = True
+
+            # Setup 2: Institutional Index Support Reversal (Spring / Bottom Reclaim)
+            # Swept swing low or day low, strong buying absorption reclaims VAL towards VWAP
+            idx_buffer = 30.0 if sym_clean == 'BANKNIFTY' else 12.0
+            low_swept = (comp_bars['low'].tail(3).min() <= comp_bars['low'].min() + idx_buffer) or (comp_bars['low'].tail(3).min() <= day_low + 50.0) or (eval_low <= day_low + 50.0)
+            support_reclaimed = (eval_close >= (val * 0.998)) and (eval_close > eval_open)
+            buying_absorption = (eval_bvc >= 0.20) and (delta_inflection >= 0.10 or bvc_cum_ratio >= 0.10)
+            if low_swept and support_reclaimed and buying_absorption and eval_close <= (vwap * 1.010):
+                is_reversal = True
+
+            if not (is_breakout or is_reversal):
                 continue
-            # Anti-Top Chasing Guard
-            if eval_close > (vwap * 1.018):
-                continue
-            p3_score = 25.0 if eval_close >= vah else 20.0
+            p3_score = 25.0 if is_breakout else 22.0
         else:  # PUT
-            if not (eval_close < vwap and eval_close <= (val * 1.002)):
+            # Setup 1: Index Base Breakdown / Value Expansion
+            if eval_close < vwap and eval_close <= (val * 1.002):
+                if eval_close >= (vwap * 0.982):  # Anti-bottom chasing guard
+                    is_breakout = True
+
+            # Setup 2: Institutional Index Top Resistance Reversal (Upthrust / Failed High)
+            # Swept swing high or day high, strong selling absorption rejects VAH towards VWAP
+            idx_buffer = 30.0 if sym_clean == 'BANKNIFTY' else 12.0
+            high_swept = (comp_bars['high'].tail(3).max() >= comp_bars['high'].max() - idx_buffer) or (comp_bars['high'].tail(3).max() >= day_high - 50.0) or (eval_high >= day_high - 50.0)
+            resistance_rejected = (eval_close <= (vah * 1.002)) and (eval_close < eval_open)
+            selling_absorption = (eval_bvc <= -0.20) and (delta_inflection <= -0.10 or bvc_cum_ratio <= -0.10)
+            if high_swept and resistance_rejected and selling_absorption and eval_close >= (vwap * 0.990):
+                is_reversal = True
+
+            if not (is_breakout or is_reversal):
                 continue
-            # Anti-Bottom Chasing Guard
-            if eval_close < (vwap * 0.982):
-                continue
-            p3_score = 25.0 if eval_close <= val else 20.0
+            p3_score = 25.0 if is_breakout else 22.0
 
         # ---------------------------------------------------------------------
         # PILLAR 4 HARD GATE: LIVE OPTION CHAIN OI CONFLUENCE & RUNWAY
@@ -693,7 +744,8 @@ def evaluate_5pillar_index_engine(
                 'pct_change': pct_change,
                 'verified_opt': opt,
                 'passed': True,
-                'tier_reason': f'ALPHA_5PILLAR_INDEX_{direction}_CONFIRMED'
+                'setup_mode': ("REVERSAL_SPRING" if (direction == 'CALL' and is_reversal) else ("REVERSAL_UPTHRUST" if is_reversal else "BASE_BREAKOUT")),
+                'tier_reason': f'ALPHA_5PILLAR_INDEX_{direction}_{("REVERSAL_SPRING" if (direction == "CALL" and is_reversal) else ("REVERSAL_UPTHRUST" if is_reversal else "BASE_BREAKOUT"))}_CONFIRMED'
             }
 
     return None
