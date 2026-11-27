@@ -109,21 +109,22 @@ INSTITUTIONAL_INDEX_THRESHOLD = 70.0
 # =========================================================================
 # PILLAR 2: DIRECTIONAL BAR & CUMULATIVE DELTA ENGINE (ZERO abs())
 # =========================================================================
-def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> Tuple[float, float, float, float]:
+def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> Tuple[float, float, float, float, float]:
     """
-    Computes instant bar delta, previous bar delta, delta inflection, and cumulative delta ratio.
-    Returns: (eval_bvc, prev_bvc, delta_inflection, bvc_cum_ratio)
+    Computes instant bar delta, previous bar delta, delta inflection, cumulative delta ratio, and 3-bar sum.
+    Returns: (eval_bvc, prev_bvc, delta_inflection, bvc_cum_ratio, bvc_3bar_sum)
     - eval_bvc: current bar order flow delta [-1.0, +1.0]
     - prev_bvc: previous bar order flow delta [-1.0, +1.0]
     - delta_inflection: eval_bvc - prev_bvc (positive = selling drying up / buying expanding)
     - bvc_cum_ratio: volume-weighted cumulative delta of recent 5 bars [-1.0, +1.0]
+    - bvc_3bar_sum: sum of order flow delta of recent 3 bars [-3.0, +3.0] (sustained directional slope)
     """
     if df_slice is None or len(df_slice) < 3:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0
 
     bars_slice = df_slice.iloc[-6:-1] if len(df_slice) >= 6 else df_slice.iloc[:-1]
     if len(bars_slice) < 2:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0
 
     price_chg = bars_slice['close'] - bars_slice['open']
     std_val = float(price_chg.std()) if len(bars_slice) > 1 else 0.0
@@ -137,6 +138,9 @@ def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> T
     prev_bvc = float(bvc_fraction.iloc[-2]) if len(bvc_fraction) >= 2 else 0.0
     delta_inflection = round(eval_bvc - prev_bvc, 4)
 
+    # 3-bar cumulative directional delta sum
+    bvc_3bar_sum = round(float(bvc_fraction.iloc[-3:].sum()), 4) if len(bvc_fraction) >= 3 else eval_bvc
+
     # Volume-weighted cumulative delta
     if 'volume' in bars_slice.columns and not is_index:
         weights = bars_slice['volume'].values.astype(float)
@@ -147,7 +151,7 @@ def compute_bar_delta_proxy(df_slice: pd.DataFrame, is_index: bool = False) -> T
         tot_w = float(np.sum(rng_weights))
         bvc_cum_ratio = float(np.sum(rng_weights * bvc_fraction.values) / max(0.1, tot_w)) if tot_w > 0 else float(bvc_fraction.mean())
 
-    return eval_bvc, prev_bvc, delta_inflection, round(bvc_cum_ratio, 4)
+    return eval_bvc, prev_bvc, delta_inflection, round(bvc_cum_ratio, 4), bvc_3bar_sum
 
 
 # =========================================================================
@@ -219,6 +223,7 @@ def evaluate_5pillar_stock_engine(
 
     eval_bar = df_slice.iloc[-2]
     live_bar = df_slice.iloc[-1]
+    prev_bar = df_slice.iloc[-3]
     comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
     if len(comp_bars) < 3:
         return None
@@ -229,6 +234,11 @@ def evaluate_5pillar_stock_engine(
     eval_low = float(eval_bar['low'])
     eval_vol = float(eval_bar.get('volume', 0.0))
     bar_rng = max(0.01, eval_high - eval_low)
+
+    prev_close = float(prev_bar['close'])
+    prev_open = float(prev_bar['open'])
+    prev_high = float(prev_bar['high'])
+    prev_low = float(prev_bar['low'])
     live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
 
     # Price Floor (Instantly eliminates illiquid penny options)
@@ -237,23 +247,38 @@ def evaluate_5pillar_stock_engine(
 
     atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.022)
 
-    # Intraday Day Open / High / Low
+    # Intraday Day Open / High / Low (and Prior Session Extremes before eval_bar)
     if hasattr(df_slice.index, 'date'):
         today_date = df_slice.index[-1].date()
         today_bars = df_slice[df_slice.index.date == today_date]
-        if len(today_bars) > 0:
+        if len(today_bars) > 2:
+            prior_today_bars = today_bars.iloc[:-2]
             day_open = float(today_bars['open'].iloc[0])
             day_high = float(today_bars['high'].max())
             day_low = float(today_bars['low'].min())
+            day_high_prior = float(prior_today_bars['high'].max())
+            day_low_prior = float(prior_today_bars['low'].min())
+        elif len(today_bars) > 0:
+            day_open = float(today_bars['open'].iloc[0])
+            day_high = float(today_bars['high'].max())
+            day_low = float(today_bars['low'].min())
+            day_high_prior = day_high
+            day_low_prior = day_low
         else:
             day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+            day_high_prior = float(df_slice.iloc[:-2]['high'].max()) if len(df_slice) > 2 else day_high
+            day_low_prior = float(df_slice.iloc[:-2]['low'].min()) if len(df_slice) > 2 else day_low
     else:
-        day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+        day_open = float(df_slice['open'].iloc[0])
+        day_high = float(df_slice['high'].max())
+        day_low = float(df_slice['low'].min())
+        day_high_prior = float(df_slice.iloc[:-2]['high'].max()) if len(df_slice) > 2 else day_high
+        day_low_prior = float(df_slice.iloc[:-2]['low'].min()) if len(df_slice) > 2 else day_low
 
     pct_change = float(pct_change_override) if pct_change_override is not None else round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
     # =========================================================================
-    # PILLAR 1: VOLUME & CASH TURNOVER GATE
+    # PILLAR 1: VOLUME & DYNAMIC 3-TIER CASH TURNOVER GATE
     # =========================================================================
     turnover_cr = (eval_close * eval_vol) / 1e7
     bars_5_turnover = []
@@ -262,8 +287,28 @@ def evaluate_5pillar_stock_engine(
         bars_5_turnover.append((float(b_item.get('close', 0.0)) * float(b_item.get('volume', 0.0))) / 1e7)
     turnover_15m = float(sum(bars_5_turnover)) if bars_5_turnover else turnover_cr
 
-    # Hard Gate 1: Strict Cash Turnover Floor (Filters illiquid / dead stocks)
-    if turnover_15m < 5.0 and turnover_cr < 2.5:
+    # 3-Tier Dynamic Cash Turnover Thresholds based on Spot Price:
+    # Tier 1 (Ultra High-Priced >= Rs 10,000, e.g. MRF, BOSCHLTD, PAGEIND, SHREECEM):
+    #   15m Turnover >= Rs 2.5 Cr (or 1-bar >= Rs 0.80 Cr)
+    # Tier 2 (High-Priced Rs 2,000 to Rs 10,000, e.g. TCS, INFY, BHARTIARTL, BAJFINANCE):
+    #   15m Turnover >= Rs 6.0 Cr (or 1-bar >= Rs 2.0 Cr)
+    # Tier 3 (Standard / Mid / Low Priced < Rs 2,000, e.g. TATASTEEL, SBIN, RELIANCE):
+    #   15m Turnover >= Rs 12.0 Cr (or 1-bar >= Rs 3.5 Cr)
+    if eval_close >= 10000.0:
+        min_turnover_15m = 2.5
+        min_turnover_bar = 0.80
+        tier_p1_base = 2.5
+    elif eval_close >= 2000.0:
+        min_turnover_15m = 6.0
+        min_turnover_bar = 2.0
+        tier_p1_base = 6.0
+    else:
+        min_turnover_15m = 12.0
+        min_turnover_bar = 3.5
+        tier_p1_base = 12.0
+
+    # Hard Gate 1: Strict Tiered Cash Turnover Floor (Filters illiquid / dead stocks)
+    if turnover_15m < min_turnover_15m and turnover_cr < min_turnover_bar:
         return None
 
     # RVOL Calculation
@@ -272,20 +317,26 @@ def evaluate_5pillar_stock_engine(
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
 
-    # Hard Gate 1: Minimum RVOL Floor or Institutional Cash Turnover Floor
-    # Ensures high-turnover institutional stocks (>= 15 Cr in 15m) are not blocked by mid-day volume taper
-    if real_rvol < 1.15 and turnover_15m < 15.0:
+    # Hard Gate 1: Minimum RVOL Floor or Institutional Cash Turnover Surge
+    # Ensures high-turnover institutional stocks (>= 1.5x Tier Base) are not blocked by mid-day volume taper
+    if real_rvol < 1.15 and turnover_15m < (tier_p1_base * 1.5):
         return None
 
     # Pillar 1 Score (0 - 25 pts)
     rvol_component = min(15.0, max(8.0, real_rvol * 8.0))
-    turnover_component = min(10.0, max(4.0, (turnover_15m / 10.0) * 3.5))
+    turnover_component = min(10.0, max(4.0, (turnover_15m / tier_p1_base) * 5.0))
     p1_score = round(min(25.0, rvol_component + turnover_component), 2)
 
     # =========================================================================
     # PILLAR 2: CVD / BVC DIRECTIONAL DELTA GATE (ZERO abs())
     # =========================================================================
-    eval_bvc, prev_bvc, delta_inflection, bvc_cum_ratio = compute_bar_delta_proxy(df_slice, is_index=False)
+    eval_bvc, prev_bvc, delta_inflection, bvc_cum_ratio, bvc_3bar_sum = compute_bar_delta_proxy(df_slice, is_index=False)
+
+    # Quantitative Volume Absorption Check (High Volume + Compressed Candle Body = Absorption Veto)
+    # If volume is >= 1.50x normal but candle body is < 25% of bar range, smart money is absorbing at the level!
+    comp_rng_med = float((comp_bars['high'] - comp_bars['low']).median()) if len(comp_bars) > 0 else bar_rng
+    body_rng = abs(eval_close - eval_open)
+    is_absorption_bar = (real_rvol >= 1.50 and body_rng < (0.25 * bar_rng) and bar_rng <= comp_rng_med)
 
     # Direction Selection based on Macro Regime (Data determines trade direction)
     if target_direction:
@@ -312,38 +363,56 @@ def evaluate_5pillar_stock_engine(
         # PILLAR 2 HARD GATE: STRICT DIRECTIONAL DELTA (ZERO abs()!)
         # ---------------------------------------------------------------------
         if direction == 'CALL':
-            # Hard Gate: BVC delta MUST be strictly positive, and delta inflection or cumulative delta positive
+            # Hard Gate: BVC delta MUST be strictly positive, and 3-bar sum strictly positive
             if eval_bvc < 0.15:
                 continue
             if delta_inflection < 0.05 and bvc_cum_ratio < 0.05 and eval_bvc < 0.35:
                 continue
-            if eval_bvc <= 0.0 or bvc_cum_ratio <= 0.0:
+            if eval_bvc <= 0.0 or bvc_cum_ratio <= 0.0 or bvc_3bar_sum <= 0.0:
                 continue
-            p2_score = round(min(25.0, (eval_bvc * 15.0) + (max(0.0, delta_inflection) * 10.0)), 2)
+            if is_absorption_bar and eval_close >= (day_high * 0.995):
+                # Buying absorption at resistance (operators unloading into retail bids)
+                continue
+            p2_score = round(min(25.0, (eval_bvc * 12.0) + (max(0.0, delta_inflection) * 8.0) + (max(0.0, bvc_cum_ratio) * 5.0)), 2)
         else:  # PUT
-            # Hard Gate: BVC delta MUST be strictly negative, and delta inflection or cumulative delta negative
+            # Hard Gate: BVC delta MUST be strictly negative, and 3-bar sum strictly negative
             if eval_bvc > -0.15:
                 continue
             if delta_inflection > -0.05 and bvc_cum_ratio > -0.05 and eval_bvc > -0.35:
                 continue
-            if eval_bvc >= 0.0 or bvc_cum_ratio >= 0.0:
+            if eval_bvc >= 0.0 or bvc_cum_ratio >= 0.0 or bvc_3bar_sum >= 0.0:
                 continue
-            p2_score = round(min(25.0, (abs(eval_bvc) * 15.0) + (max(0.0, -delta_inflection) * 10.0)), 2)
+            if is_absorption_bar and eval_close <= (day_low * 1.005):
+                # Selling absorption at support (operators buying into retail panic)
+                continue
+            p2_score = round(min(25.0, (abs(eval_bvc) * 12.0) + (max(0.0, -delta_inflection) * 8.0) + (max(0.0, -bvc_cum_ratio) * 5.0)), 2)
 
         # ---------------------------------------------------------------------
         # PILLAR 3 HARD GATE: WYCKOFF VOLUME PROFILE ACCEPTANCE & REVERSAL SETUP
         # Dual-Setup Architecture:
         # 1. Breakout / Expansion: Price accepted outside Value Area (CALL > VAH, PUT < VAL)
-        # 2. Institutional Reversal / Absorption: Price sweeps extreme and reverses with strong delta (CALL from Support/VAL, PUT from Resistance/VAH)
+        # 2. Institutional Reversal / Absorption: Price sweeps extreme and reverses with strong delta
         # ---------------------------------------------------------------------
         is_breakout = False
         is_reversal = False
 
         if direction == 'CALL':
+            # 1. Minimum Runway Gate to Day High Resistance (Breakout Mode)
+            # If price is below established Day High, it must have >= 0.60% clearance,
+            # OR it must have broken Day High into new territory!
+            runway_to_day_high = ((day_high_prior - eval_close) / eval_close) if day_high_prior > eval_close else 0.0
+            has_call_runway = (eval_close >= day_high_prior) or (runway_to_day_high >= 0.0060)
+
+            # Dalton Acceptance: 2 consecutive closes >= VAH or Retest Bounce off VAH
+            two_bar_accepted = (eval_close >= vah) and (prev_close >= (vah * 0.999))
+            retest_bounce = (prev_low <= (vah * 1.001)) and (eval_close > prev_high) and (eval_close > eval_open)
+
             # Setup 1: Fresh Base Breakout / Value Expansion
-            if eval_close > vwap and eval_close >= (vah * 0.998) and eval_close >= (poc * 0.998):
+            if eval_close > vwap and (two_bar_accepted or retest_bounce) and eval_close >= (poc * 0.998):
                 if eval_close <= (vwap * 1.020):  # Anti-top chasing guard
-                    is_breakout = True
+                    # Runway Check: If below Day High, must have >= 0.60% room, or already cleared Day High
+                    if has_call_runway:
+                        is_breakout = True
 
             # Setup 2: Institutional Support Sweep Reversal (Wyckoff Spring)
             # Swept day low, recent 15-bar swing low, or tested VAL support with buying absorption
@@ -356,17 +425,40 @@ def evaluate_5pillar_stock_engine(
             )
             support_reclaimed = (eval_close >= (val * 0.998)) and (eval_close > eval_open)
             buying_absorption = (eval_bvc >= 0.20) and (delta_inflection >= 0.10 or bvc_cum_ratio >= 0.10)
+            runway_to_vwap = ((vwap - eval_close) / eval_close) if vwap > eval_close else 0.0
             if low_swept and support_reclaimed and buying_absorption and eval_close <= (vwap * 1.010):
-                is_reversal = True
+                # Reversal requires at least 0.50% upside room to VWAP/POC target
+                if runway_to_vwap >= 0.0050 or eval_close < (vwap * 0.995):
+                    is_reversal = True
 
             if not (is_breakout or is_reversal):
                 continue
+
+            # Macro Beta / Nifty Freeze Veto:
+            # If Nifty is locked in a tight dead chop box (< 15 pts range) and stock is in breakout mode,
+            # require exceptional relative strength (RVOL >= 1.75x)
+            if nifty_regime.get('is_nifty_frozen', False) and is_breakout and real_rvol < 1.75:
+                continue
+
             p3_score = 25.0 if is_breakout else 22.0
+
         else:  # PUT
+            # 1. Minimum Runway Gate to Day Low Support (Breakdown Mode)
+            # If price is above established Day Low, it must have >= 0.60% clearance,
+            # OR it must have broken Day Low into new territory!
+            runway_to_day_low = ((eval_close - day_low_prior) / eval_close) if eval_close > day_low_prior else 0.0
+            has_put_runway = (eval_close <= day_low_prior) or (runway_to_day_low >= 0.0060)
+
+            # Dalton Acceptance: 2 consecutive closes <= VAL or Retest Rejection off VAL
+            two_bar_accepted = (eval_close <= val) and (prev_close <= (val * 1.001))
+            retest_rejected = (prev_high >= (val * 0.999)) and (eval_close < prev_low) and (eval_close < eval_open)
+
             # Setup 1: Fresh Base Breakdown / Value Expansion
-            if eval_close < vwap and eval_close <= (val * 1.002) and eval_close <= (poc * 1.002):
+            if eval_close < vwap and (two_bar_accepted or retest_rejected) and eval_close <= (poc * 1.002):
                 if eval_close >= (vwap * 0.980):  # Anti-bottom chasing guard
-                    is_breakout = True
+                    # Runway Check: If above Day Low, must have >= 0.60% room, or already cleared Day Low
+                    if has_put_runway:
+                        is_breakout = True
 
             # Setup 2: Institutional Resistance Sweep Reversal (Wyckoff Upthrust)
             # Swept day high, recent 15-bar swing high, or tested VAH resistance with selling absorption
@@ -379,11 +471,21 @@ def evaluate_5pillar_stock_engine(
             )
             resistance_rejected = (eval_close <= (vah * 1.002)) and (eval_close < eval_open)
             selling_absorption = (eval_bvc <= -0.20) and (delta_inflection <= -0.10 or bvc_cum_ratio <= -0.10)
+            runway_to_vwap = ((eval_close - vwap) / eval_close) if eval_close > vwap else 0.0
             if high_swept and resistance_rejected and selling_absorption and eval_close >= (vwap * 0.990):
-                is_reversal = True
+                # Reversal requires at least 0.50% downside room to VWAP/POC target
+                if runway_to_vwap >= 0.0050 or eval_close > (vwap * 1.005):
+                    is_reversal = True
 
             if not (is_breakout or is_reversal):
                 continue
+
+            # Macro Beta / Nifty Freeze Veto:
+            # If Nifty is locked in a tight dead chop box (< 15 pts range) and stock is in breakout mode,
+            # require exceptional relative strength (RVOL >= 1.75x)
+            if nifty_regime.get('is_nifty_frozen', False) and is_breakout and real_rvol < 1.75:
+                continue
+
             p3_score = 25.0 if is_breakout else 22.0
 
         # ---------------------------------------------------------------------
@@ -505,6 +607,7 @@ def evaluate_5pillar_index_engine(
 
     eval_bar = df_slice.iloc[-2]
     live_bar = df_slice.iloc[-1]
+    prev_bar = df_slice.iloc[-3]
     comp_bars = df_slice.iloc[:-2].tail(min(8, len(df_slice) - 2))
 
     eval_close = float(eval_bar['close'])
@@ -512,6 +615,11 @@ def evaluate_5pillar_index_engine(
     eval_high = float(eval_bar['high'])
     eval_low = float(eval_bar['low'])
     bar_rng = max(0.5, eval_high - eval_low)
+
+    prev_close = float(prev_bar['close'])
+    prev_open = float(prev_bar['open'])
+    prev_high = float(prev_bar['high'])
+    prev_low = float(prev_bar['low'])
     live_spot = float(live_spot_override) if live_spot_override is not None else float(live_bar['close'])
 
     atr = float(daily_atr) if float(daily_atr or 0.0) > 0.0 else (live_spot * 0.015)
@@ -519,14 +627,29 @@ def evaluate_5pillar_index_engine(
     if hasattr(df_slice.index, 'date'):
         today_date = df_slice.index[-1].date()
         today_bars = df_slice[df_slice.index.date == today_date]
-        if len(today_bars) > 0:
+        if len(today_bars) > 2:
+            prior_today_bars = today_bars.iloc[:-2]
             day_open = float(today_bars['open'].iloc[0])
             day_high = float(today_bars['high'].max())
             day_low = float(today_bars['low'].min())
+            day_high_prior = float(prior_today_bars['high'].max())
+            day_low_prior = float(prior_today_bars['low'].min())
+        elif len(today_bars) > 0:
+            day_open = float(today_bars['open'].iloc[0])
+            day_high = float(today_bars['high'].max())
+            day_low = float(today_bars['low'].min())
+            day_high_prior = day_high
+            day_low_prior = day_low
         else:
             day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+            day_high_prior = float(df_slice.iloc[:-2]['high'].max()) if len(df_slice) > 2 else day_high
+            day_low_prior = float(df_slice.iloc[:-2]['low'].min()) if len(df_slice) > 2 else day_low
     else:
-        day_open, day_high, day_low = float(df_slice['open'].iloc[0]), float(df_slice['high'].max()), float(df_slice['low'].min())
+        day_open = float(df_slice['open'].iloc[0])
+        day_high = float(df_slice['high'].max())
+        day_low = float(df_slice['low'].min())
+        day_high_prior = float(df_slice.iloc[:-2]['high'].max()) if len(df_slice) > 2 else day_high
+        day_low_prior = float(df_slice.iloc[:-2]['low'].min()) if len(df_slice) > 2 else day_low
 
     pct_change = round(((live_spot - day_open) / max(1.0, day_open)) * 100.0, 2)
 
@@ -551,7 +674,7 @@ def evaluate_5pillar_index_engine(
     # =========================================================================
     # PILLAR 2: TRUE RANGE CVD DELTA GATE (ZERO abs())
     # =========================================================================
-    eval_bvc, prev_bvc, delta_inflection, bvc_cum_ratio = compute_bar_delta_proxy(df_slice, is_index=True)
+    eval_bvc, prev_bvc, delta_inflection, bvc_cum_ratio, bvc_3bar_sum = compute_bar_delta_proxy(df_slice, is_index=True)
 
     # Banking / Heavyweight Confluence Check (Evaluates Intraday Trend, NOT Day-to-Day Gap!)
     heavy_call_allow = True
@@ -597,6 +720,9 @@ def evaluate_5pillar_index_engine(
     val = prof['val']
     poc = prof['poc']
 
+    # Index Runway Thresholds
+    min_idx_runway = 100.0 if sym_clean == 'BANKNIFTY' else (25.0 if sym_clean == 'MIDCPNIFTY' else 35.0)
+
     for direction in directions_to_test:
         # ---------------------------------------------------------------------
         # PILLAR 2 HARD GATE: STRICT DIRECTIONAL DELTA (ZERO abs())
@@ -606,17 +732,17 @@ def evaluate_5pillar_index_engine(
                 continue
             if delta_inflection < 0.05 and bvc_cum_ratio < 0.05 and eval_bvc < 0.35:
                 continue
-            if eval_bvc <= 0.0 or bvc_cum_ratio <= 0.0:
+            if eval_bvc <= 0.0 or bvc_cum_ratio <= 0.0 or bvc_3bar_sum <= 0.0:
                 continue
-            p2_score = round(min(25.0, (eval_bvc * 15.0) + (max(0.0, delta_inflection) * 10.0)), 2)
+            p2_score = round(min(25.0, (eval_bvc * 12.0) + (max(0.0, delta_inflection) * 8.0) + (max(0.0, bvc_cum_ratio) * 5.0)), 2)
         else:  # PUT
             if eval_bvc > -0.15:
                 continue
             if delta_inflection > -0.05 and bvc_cum_ratio > -0.05 and eval_bvc > -0.35:
                 continue
-            if eval_bvc >= 0.0 or bvc_cum_ratio >= 0.0:
+            if eval_bvc >= 0.0 or bvc_cum_ratio >= 0.0 or bvc_3bar_sum >= 0.0:
                 continue
-            p2_score = round(min(25.0, (abs(eval_bvc) * 15.0) + (max(0.0, -delta_inflection) * 10.0)), 2)
+            p2_score = round(min(25.0, (abs(eval_bvc) * 12.0) + (max(0.0, -delta_inflection) * 8.0) + (max(0.0, -bvc_cum_ratio) * 5.0)), 2)
 
         # ---------------------------------------------------------------------
         # PILLAR 3 HARD GATE: WYCKOFF VOLUME PROFILE ACCEPTANCE & REVERSAL SETUP
@@ -626,10 +752,20 @@ def evaluate_5pillar_index_engine(
         is_reversal = False
 
         if direction == 'CALL':
+            # Index Runway Gate to Day High
+            pts_to_day_high = (day_high_prior - eval_close) if day_high_prior > eval_close else 0.0
+            has_idx_call_runway = (eval_close >= day_high_prior) or (pts_to_day_high >= min_idx_runway)
+
+            # Dalton Acceptance: 2 consecutive closes >= VAH or Retest Bounce off VAH
+            two_bar_accepted = (eval_close >= vah) and (prev_close >= (vah * 0.999))
+            retest_bounce = (prev_low <= (vah * 1.001)) and (eval_close > prev_high) and (eval_close > eval_open)
+
             # Setup 1: Index Base Breakout / Value Expansion
-            if eval_close > vwap and eval_close >= (vah * 0.998):
+            if eval_close > vwap and (two_bar_accepted or retest_bounce):
                 if eval_close <= (vwap * 1.018):  # Anti-top chasing guard
-                    is_breakout = True
+                    # Runway Check: If below Day High, must have >= min_idx_runway room, or cleared Day High
+                    if has_idx_call_runway:
+                        is_breakout = True
 
             # Setup 2: Institutional Index Support Reversal (Spring / Bottom Reclaim)
             # Swept swing low, day low, or tested VAL support with buying absorption
@@ -644,17 +780,30 @@ def evaluate_5pillar_index_engine(
             )
             support_reclaimed = (eval_close >= (val * 0.998)) and (eval_close > eval_open)
             buying_absorption = (eval_bvc >= 0.20) and (delta_inflection >= 0.10 or bvc_cum_ratio >= 0.10)
+            pts_to_vwap = (vwap - eval_close) if vwap > eval_close else 0.0
             if low_swept and support_reclaimed and buying_absorption and eval_close <= (vwap * 1.010):
-                is_reversal = True
+                # Reversal requires point room to VWAP
+                if pts_to_vwap >= (min_idx_runway * 0.70) or eval_close < (vwap - 5.0):
+                    is_reversal = True
 
             if not (is_breakout or is_reversal):
                 continue
             p3_score = 25.0 if is_breakout else 22.0
         else:  # PUT
+            # Index Runway Gate to Day Low
+            pts_to_day_low = (eval_close - day_low_prior) if eval_close > day_low_prior else 0.0
+            has_idx_put_runway = (eval_close <= day_low_prior) or (pts_to_day_low >= min_idx_runway)
+
+            # Dalton Acceptance: 2 consecutive closes <= VAL or Retest Rejection off VAL
+            two_bar_accepted = (eval_close <= val) and (prev_close <= (val * 1.001))
+            retest_rejected = (prev_high >= (val * 0.999)) and (eval_close < prev_low) and (eval_close < eval_open)
+
             # Setup 1: Index Base Breakdown / Value Expansion
-            if eval_close < vwap and eval_close <= (val * 1.002):
+            if eval_close < vwap and (two_bar_accepted or retest_rejected):
                 if eval_close >= (vwap * 0.982):  # Anti-bottom chasing guard
-                    is_breakout = True
+                    # Runway Check: If above Day Low, must have >= min_idx_runway room, or cleared Day Low
+                    if has_idx_put_runway:
+                        is_breakout = True
 
             # Setup 2: Institutional Index Top Resistance Reversal (Upthrust / Failed High)
             # Swept swing high, day high, or tested VAH resistance with selling absorption
@@ -669,8 +818,11 @@ def evaluate_5pillar_index_engine(
             )
             resistance_rejected = (eval_close <= (vah * 1.002)) and (eval_close < eval_open)
             selling_absorption = (eval_bvc <= -0.20) and (delta_inflection <= -0.10 or bvc_cum_ratio <= -0.10)
+            pts_to_vwap = (eval_close - vwap) if eval_close > vwap else 0.0
             if high_swept and resistance_rejected and selling_absorption and eval_close >= (vwap * 0.990):
-                is_reversal = True
+                # Reversal requires point room to VWAP
+                if pts_to_vwap >= (min_idx_runway * 0.70) or eval_close > (vwap + 5.0):
+                    is_reversal = True
 
             if not (is_breakout or is_reversal):
                 continue
@@ -777,6 +929,28 @@ class Alpha5PillarInstitutionalEngine(AlphaInstitutionalSwappedScreener):
             handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] [5PILLAR_ENGINE] %(message)s'))
             self.logger.addHandler(handler)
         self.logger.setLevel(logging.INFO)
+
+    def get_nifty_market_regime(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Computes Nifty macro regime and 15-minute micro-volatility box.
+        Detects dead consolidation zones (15m range < 15 pts) to protect stocks from sideways chop.
+        """
+        base_regime = super().get_nifty_market_regime(force_refresh=force_refresh)
+        try:
+            df_nifty = self.data_feed.get_live_intraday_bars('NIFTY')
+            if df_nifty is not None and len(df_nifty) >= 5:
+                recent_5 = df_nifty.iloc[-5:]
+                rng_15m = float(recent_5['high'].max() - recent_5['low'].min())
+                base_regime['nifty_15m_range'] = round(rng_15m, 1)
+                base_regime['is_nifty_frozen'] = (rng_15m < 15.0)
+            else:
+                base_regime['nifty_15m_range'] = 20.0
+                base_regime['is_nifty_frozen'] = False
+        except Exception as e:
+            base_regime['nifty_15m_range'] = 20.0
+            base_regime['is_nifty_frozen'] = False
+
+        return base_regime
 
     def run_screener(self, ignore_window: bool = False, send_heartbeat: bool = True, cycle_num: Optional[int] = None):
         """
