@@ -37,18 +37,17 @@ PILLAR 4: Live Option Chain Confluence & Runway Gate
   - PUT:  Put unwinding + Call resistance ceiling; no immediate PE wall in ATM-1/ATM-2 runway.
   - Market Maker Straddle Pinning Check (|ΔCE - ΔPE| / (ΔCE + ΔPE) < 0.15 blocks chop traps).
 
-PILLAR 5: 3-Minute Candle Price Action Trigger (AT THE VERY END)
+PILLAR 5: Execution Guard (Timing / Sanity Check - NEVER a Candle Shape Filter)
   - Evaluated ONLY AFTER Pillars 1, 2, 3, and 4 have ALL fully passed!
-  - CALL: Bullish candle closing in upper half (thrust >= 0.50), upper wick <= 45% of range.
-  - PUT:  Bearish candle closing in lower half (thrust <= 0.50), lower wick <= 45% of range.
-  - Filters out exhaustion wicks, shooting stars on calls, and hammer absorption on puts.
+  - 100% of the signal is driven by Institutional Data (Turnover, Delta, Profile, Option OI).
+  - Pillar 5 only prevents entry if price is in a catastrophic adverse collapse (dump on CALL or vertical spike on PUT).
 ----------------------------------------------------------------------------------------
-SCORING MATRIX (100 PTS HONEST DYNAMIC SCORING):
-  Pillar 1: 0 - 20 pts (Volume & Cash Turnover)
-  Pillar 2: 0 - 25 pts (Strict Directional CVD/BVC Delta)
-  Pillar 3: 0 - 25 pts (Volume Profile VAH/VAL/VWAP Acceptance)
-  Pillar 4: 0 - 20 pts (Live Option Chain Confluence)
-  Pillar 5: 0 - 10 pts (Candle Trigger Quality)
+SCORING MATRIX (100 PTS INSTITUTIONAL DATA SCORING):
+  Pillar 1: 0 - 25 pts (Volume & Cash Turnover / Index RVOL Range)
+  Pillar 2: 0 - 25 pts (Strict Directional CVD/BVC Delta, ZERO abs())
+  Pillar 3: 0 - 25 pts (Volume Profile VAH/VAL/VWAP Acceptance or Reversal)
+  Pillar 4: 0 - 25 pts (Live Option Chain Confluence & Strike Runway)
+  Pillar 5: 0 - 5 pts (Execution Timing Guard)
   Hard Pass Threshold: >= 75.0 pts (Stocks), >= 70.0 pts (Indices).
   No fake base score floor. Zero points awarded if any hard gate fails.
 ========================================================================================
@@ -275,29 +274,30 @@ def evaluate_5pillar_stock_engine(
     base_vol = max(100.0, hist_slot_vol if hist_slot_vol > 0 else comp_vol_med)
     real_rvol = round(eval_vol / max(1.0, base_vol), 2)
 
-    # Hard Gate 1: Minimum RVOL Floor
-    if real_rvol < 1.25:
+    # Hard Gate 1: Minimum RVOL Floor or Institutional Cash Turnover Floor
+    # Ensures high-turnover institutional stocks (>= 15 Cr in 15m) are not blocked by mid-day volume taper
+    if real_rvol < 1.15 and turnover_15m < 15.0:
         return None
 
-    # Pillar 1 Score (0 - 20 pts)
-    p1_score = round(min(20.0, 10.0 + min(6.0, (real_rvol - 1.25) * 3.0) + min(4.0, (turnover_15m / 10.0) * 2.0)), 2)
+    # Pillar 1 Score (0 - 25 pts)
+    rvol_component = min(15.0, max(8.0, real_rvol * 8.0))
+    turnover_component = min(10.0, max(4.0, (turnover_15m / 10.0) * 3.5))
+    p1_score = round(min(25.0, rvol_component + turnover_component), 2)
 
     # =========================================================================
     # PILLAR 2: CVD / BVC DIRECTIONAL DELTA GATE (ZERO abs())
     # =========================================================================
     eval_bvc, prev_bvc, delta_inflection, bvc_cum_ratio = compute_bar_delta_proxy(df_slice, is_index=False)
 
-    # Direction Selection based on Macro Regime and Momentum
-    directions_to_test = []
-    # CALL candidate: Regime allows stock calls, non-negative intraday momentum
-    if nifty_regime.get('allow_stock_call', True) and pct_change >= -0.75:
-        directions_to_test.append('CALL')
-    # PUT candidate: Regime allows stock puts, non-positive intraday momentum
-    if nifty_regime.get('allow_stock_put', True) and pct_change <= 0.75:
-        directions_to_test.append('PUT')
-
+    # Direction Selection based on Macro Regime (Data determines trade direction)
     if target_direction:
-        directions_to_test = [d for d in directions_to_test if d == target_direction]
+        directions_to_test = [target_direction]
+    else:
+        directions_to_test = []
+        if nifty_regime.get('allow_stock_call', True):
+            directions_to_test.append('CALL')
+        if nifty_regime.get('allow_stock_put', True):
+            directions_to_test.append('PUT')
 
     if not directions_to_test:
         return None
@@ -348,8 +348,14 @@ def evaluate_5pillar_stock_engine(
                     is_breakout = True
 
             # Setup 2: Institutional Support Sweep Reversal (Wyckoff Spring)
-            # Recent bars swept day low or recent base low, buyers absorb supply and reclaim back above VAL/VWAP
-            low_swept = (comp_bars['low'].tail(3).min() <= (day_low * 1.003)) or (eval_low <= (day_low * 1.003))
+            # Swept day low, recent 15-bar swing low, or tested VAL support with buying absorption
+            recent_15_low = float(comp_bars['low'].tail(15).min()) if len(comp_bars) >= 15 else day_low
+            low_swept = (
+                (comp_bars['low'].tail(3).min() <= (day_low * 1.003)) or
+                (eval_low <= (day_low * 1.003)) or
+                (eval_low <= (val * 1.003)) or
+                (comp_bars['low'].tail(3).min() <= (recent_15_low + (atr * 0.05)))
+            )
             support_reclaimed = (eval_close >= (val * 0.998)) and (eval_close > eval_open)
             buying_absorption = (eval_bvc >= 0.20) and (delta_inflection >= 0.10 or bvc_cum_ratio >= 0.10)
             if low_swept and support_reclaimed and buying_absorption and eval_close <= (vwap * 1.010):
@@ -365,8 +371,14 @@ def evaluate_5pillar_stock_engine(
                     is_breakout = True
 
             # Setup 2: Institutional Resistance Sweep Reversal (Wyckoff Upthrust)
-            # Recent bars swept day high or recent base high, sellers dump and reject back below VAH/VWAP
-            high_swept = (comp_bars['high'].tail(3).max() >= (day_high * 0.997)) or (eval_high >= (day_high * 0.997))
+            # Swept day high, recent 15-bar swing high, or tested VAH resistance with selling absorption
+            recent_15_high = float(comp_bars['high'].tail(15).max()) if len(comp_bars) >= 15 else day_high
+            high_swept = (
+                (comp_bars['high'].tail(3).max() >= (day_high * 0.997)) or
+                (eval_high >= (day_high * 0.997)) or
+                (eval_high >= (vah * 0.997)) or
+                (comp_bars['high'].tail(3).max() >= (recent_15_high - (atr * 0.05)))
+            )
             resistance_rejected = (eval_close <= (vah * 1.002)) and (eval_close < eval_open)
             selling_absorption = (eval_bvc <= -0.20) and (delta_inflection <= -0.10 or bvc_cum_ratio <= -0.10)
             if high_swept and resistance_rejected and selling_absorption and eval_close >= (vwap * 0.990):
@@ -406,35 +418,23 @@ def evaluate_5pillar_stock_engine(
             if tot_chg > 500.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue  # Market maker equilibrium chop trap veto
 
-        p4_score = round(min(20.0, max(10.0, float(opt.get('oi_score', 14.0)))), 2)
+        p4_score = round(min(25.0, max(12.0, float(opt.get('oi_score', 14.0)) * 1.35)), 2)
 
         # ---------------------------------------------------------------------
-        # PILLAR 5 TRIGGER: 3-MINUTE CANDLE PRICE ACTION TRIGGER (AT THE VERY END)
+        # PILLAR 5: ADVERSE EXECUTION GUARD (SANITY TIMING - NOT A CANDLE SHAPE VETO)
+        # Prevents taking trades into an active freefall collapse (CALL) or vertical spike (PUT).
+        # Signal is 100% driven by Pillars 1-4 Data!
         # ---------------------------------------------------------------------
-        thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
-
         if direction == 'CALL':
-            # Bullish Candle Trigger:
-            # 1. Closes in upper half of range (thrust >= 0.50)
-            # 2. Upper wick rejection must NOT exceed 45% of bar range (avoids buying inverted hammers at tops)
-            # 3. Green body (eval_close > eval_open) or strong hammer with lower defense wick >= 40%
-            upper_wick_ratio = (eval_high - eval_close) / bar_rng
-            is_green = (eval_close > eval_open)
-            is_hammer = (eval_low <= eval_open) and ((min(eval_close, eval_open) - eval_low) / bar_rng >= 0.40)
-            if thrust < 0.50 or upper_wick_ratio > 0.45 or (not is_green and not is_hammer):
+            is_dead_low_dump = (eval_close <= (eval_low + 0.15 * bar_rng)) and (eval_close < eval_open * 0.995)
+            if is_dead_low_dump:
                 continue
-            p5_score = 10.0 if (thrust >= 0.65 and is_green) else 8.0
+            p5_score = 5.0 if eval_close >= eval_open else 2.0
         else:  # PUT
-            # Bearish Candle Trigger:
-            # 1. Closes in lower half of range (thrust <= 0.50)
-            # 2. Lower wick absorption must NOT exceed 45% of bar range (avoids selling hammers at bottoms)
-            # 3. Red body (eval_close < eval_open) or strong shooting star with upper rejection wick >= 40%
-            lower_wick_ratio = (eval_close - eval_low) / bar_rng
-            is_red = (eval_close < eval_open)
-            is_shooting_star = (eval_high >= eval_open) and ((eval_high - max(eval_close, eval_open)) / bar_rng >= 0.40)
-            if thrust < 0.50 or lower_wick_ratio > 0.45 or (not is_red and not is_shooting_star):
+            is_dead_high_spike = (eval_close >= (eval_high - 0.15 * bar_rng)) and (eval_close > eval_open * 1.005)
+            if is_dead_high_spike:
                 continue
-            p5_score = 10.0 if (thrust >= 0.65 and is_red) else 8.0
+            p5_score = 5.0 if eval_close <= eval_open else 2.0
 
         # =====================================================================
         # TOTAL 5-PILLAR INSTITUTIONAL SCORE CALCULATION
@@ -548,7 +548,7 @@ def evaluate_5pillar_index_engine(
     if idx_rvol < 1.05 and bar_rng < (1.35 * min_idx_rng):
         return None
 
-    p1_score = round(min(20.0, 10.0 + min(10.0, max(0.0, (bar_rng - min_idx_rng) / min_idx_rng * 10.0))), 2)
+    p1_score = round(min(25.0, 12.0 + min(13.0, max(0.0, (bar_rng - min_idx_rng) / min_idx_rng * 12.0))), 2)
 
     # =========================================================================
     # PILLAR 2: TRUE RANGE CVD DELTA GATE (ZERO abs())
@@ -580,14 +580,14 @@ def evaluate_5pillar_index_engine(
     allow_call = heavy_call_allow if is_bn else (nifty_regime.get('allow_call', True) and heavy_call_allow)
     allow_put = heavy_put_allow if is_bn else (nifty_regime.get('allow_put', True) and heavy_put_allow)
 
-    directions_to_test = []
-    if allow_call and pct_change >= -0.50:
-        directions_to_test.append('CALL')
-    if allow_put and pct_change <= 0.50:
-        directions_to_test.append('PUT')
-
     if target_direction:
-        directions_to_test = [d for d in directions_to_test if d == target_direction]
+        directions_to_test = [target_direction]
+    else:
+        directions_to_test = []
+        if allow_call:
+            directions_to_test.append('CALL')
+        if allow_put:
+            directions_to_test.append('PUT')
 
     if not directions_to_test:
         return None
@@ -634,9 +634,16 @@ def evaluate_5pillar_index_engine(
                     is_breakout = True
 
             # Setup 2: Institutional Index Support Reversal (Spring / Bottom Reclaim)
-            # Swept swing low or day low, strong buying absorption reclaims VAL towards VWAP
+            # Swept swing low, day low, or tested VAL support with buying absorption
             idx_buffer = 30.0 if sym_clean == 'BANKNIFTY' else 12.0
-            low_swept = (comp_bars['low'].tail(3).min() <= comp_bars['low'].min() + idx_buffer) or (comp_bars['low'].tail(3).min() <= day_low + 50.0) or (eval_low <= day_low + 50.0)
+            recent_15_low = float(comp_bars['low'].tail(15).min()) if len(comp_bars) >= 15 else day_low
+            low_swept = (
+                (comp_bars['low'].tail(3).min() <= comp_bars['low'].min() + idx_buffer) or
+                (comp_bars['low'].tail(3).min() <= day_low + 50.0) or
+                (eval_low <= day_low + 50.0) or
+                (eval_low <= val + idx_buffer) or
+                (comp_bars['low'].tail(3).min() <= recent_15_low + idx_buffer)
+            )
             support_reclaimed = (eval_close >= (val * 0.998)) and (eval_close > eval_open)
             buying_absorption = (eval_bvc >= 0.20) and (delta_inflection >= 0.10 or bvc_cum_ratio >= 0.10)
             if low_swept and support_reclaimed and buying_absorption and eval_close <= (vwap * 1.010):
@@ -652,9 +659,16 @@ def evaluate_5pillar_index_engine(
                     is_breakout = True
 
             # Setup 2: Institutional Index Top Resistance Reversal (Upthrust / Failed High)
-            # Swept swing high or day high, strong selling absorption rejects VAH towards VWAP
+            # Swept swing high, day high, or tested VAH resistance with selling absorption
             idx_buffer = 30.0 if sym_clean == 'BANKNIFTY' else 12.0
-            high_swept = (comp_bars['high'].tail(3).max() >= comp_bars['high'].max() - idx_buffer) or (comp_bars['high'].tail(3).max() >= day_high - 50.0) or (eval_high >= day_high - 50.0)
+            recent_15_high = float(comp_bars['high'].tail(15).max()) if len(comp_bars) >= 15 else day_high
+            high_swept = (
+                (comp_bars['high'].tail(3).max() >= comp_bars['high'].max() - idx_buffer) or
+                (comp_bars['high'].tail(3).max() >= day_high - 50.0) or
+                (eval_high >= day_high - 50.0) or
+                (eval_high >= vah - idx_buffer) or
+                (comp_bars['high'].tail(3).max() >= recent_15_high - idx_buffer)
+            )
             resistance_rejected = (eval_close <= (vah * 1.002)) and (eval_close < eval_open)
             selling_absorption = (eval_bvc <= -0.20) and (delta_inflection <= -0.10 or bvc_cum_ratio <= -0.10)
             if high_swept and resistance_rejected and selling_absorption and eval_close >= (vwap * 0.990):
@@ -694,27 +708,23 @@ def evaluate_5pillar_index_engine(
             if tot_chg > 2000.0 and (abs(ce_chg - pe_chg) / tot_chg) < 0.15:
                 continue
 
-        p4_score = round(min(20.0, max(10.0, float(opt.get('oi_score', 14.0)))), 2)
+        p4_score = round(min(25.0, max(12.0, float(opt.get('oi_score', 14.0)) * 1.35)), 2)
 
         # ---------------------------------------------------------------------
-        # PILLAR 5 TRIGGER: 3-MINUTE CANDLE PRICE ACTION TRIGGER (AT THE VERY END)
+        # PILLAR 5: ADVERSE EXECUTION GUARD (SANITY TIMING - NOT A CANDLE SHAPE VETO)
+        # Prevents taking trades into an active freefall collapse (CALL) or vertical spike (PUT).
+        # Signal is 100% driven by Pillars 1-4 Data!
         # ---------------------------------------------------------------------
-        thrust = (eval_close - eval_low) / bar_rng if direction == 'CALL' else (eval_high - eval_close) / bar_rng
-
         if direction == 'CALL':
-            upper_wick_ratio = (eval_high - eval_close) / bar_rng
-            is_green = (eval_close > eval_open)
-            is_hammer = (eval_low <= eval_open) and ((min(eval_close, eval_open) - eval_low) / bar_rng >= 0.40)
-            if thrust < 0.50 or upper_wick_ratio > 0.45 or (not is_green and not is_hammer):
+            is_dead_low_dump = (eval_close <= (eval_low + 0.15 * bar_rng)) and (eval_close < eval_open * 0.997)
+            if is_dead_low_dump:
                 continue
-            p5_score = 10.0 if (thrust >= 0.65 and is_green) else 8.0
+            p5_score = 5.0 if eval_close >= eval_open else 2.0
         else:  # PUT
-            lower_wick_ratio = (eval_close - eval_low) / bar_rng
-            is_red = (eval_close < eval_open)
-            is_shooting_star = (eval_high >= eval_open) and ((eval_high - max(eval_close, eval_open)) / bar_rng >= 0.40)
-            if thrust < 0.50 or lower_wick_ratio > 0.45 or (not is_red and not is_shooting_star):
+            is_dead_high_spike = (eval_close >= (eval_high - 0.15 * bar_rng)) and (eval_close > eval_open * 1.003)
+            if is_dead_high_spike:
                 continue
-            p5_score = 10.0 if (thrust >= 0.65 and is_red) else 8.0
+            p5_score = 5.0 if eval_close <= eval_open else 2.0
 
         # =====================================================================
         # TOTAL 5-PILLAR INSTITUTIONAL SCORE CALCULATION
