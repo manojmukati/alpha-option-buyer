@@ -802,19 +802,18 @@ class LiveMarketDataFeed:
             if not is_buying_squeeze and (tot_upper_ce_chg >= ambush_min_chg or tot_upper_ce_chg >= ambush_min_chg_shares) and tot_upper_ce_chg > 2.0 * max(50.0, tot_lower_pe_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'UPPER_OTM_CALL_WRITING_AMBUSH'}
 
-            # Check 3: Immediate Active Call Resistance Wall (+1 to +2 strikes runway)
+            # Check 3: Active Call Resistance Wall (+1 to +4 strikes runway)
+            # Evaluates full +-4 strike runway to ensure institutional target is unblocked
             call_wall_detected = False
             wall_strike_hit = None
-            immediate_target_dist = 60.0 if (is_index and sym_clean == 'BANKNIFTY') else (35.0 if is_index else max(15.0, 2.0 * strike_step))
-            immediate_upper = [s for s in upper_4[:2] if (s - ref_spot) <= immediate_target_dist]
-            for s in immediate_upper:
+            for s in upper_4:
                 s_ce = strike_data[s]['ce_oi']
                 s_pe = strike_data[s]['pe_oi']
                 s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0)
                 
-                # Active Resistance Wall: Call Writing is adding resistance in the immediate runway (+1 to +2 strikes)
+                # Active Resistance Wall: Call Writing is adding resistance in the +1 to +4 runway
                 if s_ce_chg > 0 and (s_ce >= min_wall_oi or s_ce >= min_wall_oi_shares):
                     if (s_ce > 1.35 * max(50.0, s_pe)) and (s_ce_chg > 1.2 * max(10.0, s_pe_chg)):
                         if s_ce_vol >= 2.5 * s_ce:
@@ -823,15 +822,15 @@ class LiveMarketDataFeed:
                         wall_strike_hit = s
                         break
             if call_wall_detected:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_CALL_RESISTANCE_WALL_AT_{int(wall_strike_hit)}'}
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'CALL_RESISTANCE_WALL_AT_{int(wall_strike_hit)}'}
 
             # Check 4: ATM Call Writer Dominance (Active call writing > put writing at ATM)
             if atm_info['ce_chg_oi'] > 1.2 * max(20.0, atm_info['pe_chg_oi']) and atm_info['ce_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_CALL_WRITER_DOMINANCE'}
 
-            # 5. Institutional Gamma Squeeze Detection (Traded Volume >= 2.0x Strike OI + Short Covering)
+            # 5. Institutional Gamma Squeeze Detection (Traded Volume >= 2.0x Strike OI + Short Covering across ATM and +1 to +4 strikes)
             is_gamma_squeeze = False
-            for s in [atm_strike] + upper_4[:2]:
+            for s in [atm_strike] + upper_4:
                 s_ce = strike_data[s]['ce_oi']
                 s_ce_vol = strike_data[s].get('ce_vol', 0.0)
                 s_ce_chg = strike_data[s]['ce_chg_oi']
@@ -896,19 +895,18 @@ class LiveMarketDataFeed:
             if not is_buying_squeeze and (tot_lower_pe_chg >= ambush_min_chg or tot_lower_pe_chg >= ambush_min_chg_shares) and tot_lower_pe_chg > 2.0 * max(50.0, tot_upper_ce_chg):
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'LOWER_OTM_PUT_WRITING_AMBUSH'}
 
-            # Check 3: Immediate Active Put Support Wall (-1 to -2 strikes runway)
+            # Check 3: Active Put Support Wall (-1 to -4 strikes runway)
+            # Evaluates full +-4 strike runway to ensure institutional target is unblocked
             put_wall_detected = False
             wall_strike_hit = None
-            immediate_target_dist = 60.0 if (is_index and sym_clean == 'BANKNIFTY') else (35.0 if is_index else max(15.0, 2.0 * strike_step))
-            immediate_lower = [s for s in lower_4[-2:] if (ref_spot - s) <= immediate_target_dist]
-            for s in immediate_lower:
+            for s in lower_4:
                 s_pe = strike_data[s]['pe_oi']
                 s_ce = strike_data[s]['ce_oi']
                 s_pe_chg = strike_data[s]['pe_chg_oi']
                 s_ce_chg = strike_data[s]['ce_chg_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0)
                 
-                # Active Support Wall: Put Writing is actively adding support in the immediate runway (-1 to -2 strikes)
+                # Active Support Wall: Put Writing is actively adding support in the -1 to -4 runway
                 if s_pe_chg > 0 and (s_pe >= min_wall_oi or s_pe >= min_wall_oi_shares):
                     if (s_pe > 1.35 * max(50.0, s_ce)) and (s_pe_chg > 1.2 * max(10.0, s_ce_chg)):
                         if s_pe_vol >= 2.5 * s_pe:
@@ -917,15 +915,15 @@ class LiveMarketDataFeed:
                         wall_strike_hit = s
                         break
             if put_wall_detected:
-                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'IMMEDIATE_PUT_SUPPORT_WALL_AT_{int(wall_strike_hit)}'}
+                return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': f'PUT_SUPPORT_WALL_AT_{int(wall_strike_hit)}'}
 
             # Check 4: ATM Put Writer Dominance (Active put writing > call writing at ATM)
             if atm_info['pe_chg_oi'] > 1.2 * max(20.0, atm_info['ce_chg_oi']) and atm_info['pe_chg_oi'] > 0:
                 return {'confluent': False, 'confluence': False, 'score': 0.0, 'reason': 'ATM_PUT_WRITER_DOMINANCE'}
 
-            # 5. Institutional Panic Squeeze Detection (Traded Volume >= 2.0x Strike OI + Long Liquidation)
+            # 5. Institutional Panic Squeeze Detection (Traded Volume >= 2.0x Strike OI + Long Liquidation across ATM and -1 to -4 strikes)
             is_panic_squeeze = False
-            for s in [atm_strike] + lower_4[-2:]:
+            for s in [atm_strike] + lower_4:
                 s_pe = strike_data[s]['pe_oi']
                 s_pe_vol = strike_data[s].get('pe_vol', 0.0)
                 s_pe_chg = strike_data[s]['pe_chg_oi']

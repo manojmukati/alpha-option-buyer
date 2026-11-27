@@ -29,12 +29,10 @@ PILLAR 3: Wyckoff Market Profile & VWAP Acceptance Gate
           Anti-Bottom Chasing: Price cannot be extended > 2.0% below VWAP.
   - Hard Gate: If price is on the wrong side of VWAP/Value Area, REJECT IMMEDIATELY (0 points).
 
-PILLAR 4: Live Option Chain Confluence & Runway Gate
-  - Symmetric -4 to +4 strike analysis with live NSE Option Chain (fail-closed).
-  - Immediate Runway Wall Check (+-2 strikes from ATM strictly).
-    Deep OTM strikes (> 2 strikes away) are NEVER classified as immediate support/resistance walls.
-  - CALL: Call unwinding + Put support floor; no immediate CE wall in ATM+1/ATM+2 runway.
-  - PUT:  Put unwinding + Call resistance ceiling; no immediate PE wall in ATM-1/ATM-2 runway.
+PILLAR 4: Live NSE Option Chain Confluence Gate (Full +-4 Strike Runway)
+  - Full +-4 strike runway evaluated with live NSE Option Chain (fail-closed).
+  - CALL: Call unwinding + Put support floor across ATM and +1 to +4 strikes; no active CE resistance wall in +1 to +4 runway.
+  - PUT:  Put unwinding + Call resistance ceiling across ATM and -1 to -4 strikes; no active PE support wall in -1 to -4 runway.
   - Market Maker Straddle Pinning Check (|ΔCE - ΔPE| / (ΔCE + ΔPE) < 0.15 blocks chop traps).
 
 PILLAR 5: Execution Guard (Timing / Sanity Check - NEVER a Candle Shape Filter)
@@ -209,8 +207,8 @@ def evaluate_5pillar_stock_engine(
     1. PILLAR 1: Volume & Cash Turnover Gate (Turnover 15m >= 5-10 Cr, RVOL >= 1.25x)
     2. PILLAR 2: CVD / BVC Delta Gate (Directional, ZERO abs(), strictly positive/negative)
     3. PILLAR 3: Volume Profile & VWAP Gate (CALL: Close > VWAP & Close >= VAH; PUT: Close < VWAP & Close <= VAL)
-    4. PILLAR 4: Live Option Chain OI Confluence Gate (Symmetric +-2 strike immediate runway)
-    5. PILLAR 5: 3-Minute Candle Price Action Trigger (AT THE VERY END, only after Pillars 1-4 pass)
+    4. PILLAR 4: Live Option Chain OI Confluence Gate (Full +-4 strike runway unwinding & wall checks)
+    5. PILLAR 5: Execution Timing Guard (Sanity timing at the very end, NEVER a candle shape filter)
     ========================================================================================
     """
     sym_clean = symbol.upper().replace('.NS', '').replace('^', '').strip()
